@@ -15,7 +15,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Bootstrap pinned Gradle wrapper
         run: bash bootstrap-wrapper.sh
       - name: Fetch pinned mpv native libraries
