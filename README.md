@@ -40,7 +40,7 @@ hardware decoder and would burn battery in software.
 
 ## Building
 
-Prerequisites: JDK 17, Android SDK 36, and a physical arm64 device.
+Prerequisites: JDK 17, Android SDK 37, and a physical arm64 device.
 The Gradle wrapper JAR and mpv native binaries are not committed; both
 bootstrap paths are version- and SHA-256-pinned.
 

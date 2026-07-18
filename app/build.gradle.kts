@@ -1,12 +1,11 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
 }
 
 android {
     namespace = "org.upscalerelay.android"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "org.upscalerelay.android"
