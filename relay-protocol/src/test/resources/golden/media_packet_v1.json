@@ -1,0 +1,10 @@
+{
+  "description": "Python relay_protocol.framing packet: payload=00ff6d6b76 flags=3 epoch=7 pts=123456789 dts=-123",
+  "encoded_hex": "05000000030700000015cd5b070000000085ffffffffffffff00ff6d6b76",
+  "payload_hex": "00ff6d6b76",
+  "flags": 3,
+  "epoch": 7,
+  "pts": 123456789,
+  "dts": -123
+}
+

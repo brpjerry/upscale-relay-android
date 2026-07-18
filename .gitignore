@@ -1,0 +1,7 @@
+.gradle/
+.idea/
+**/build/
+local.properties
+player-mpv/src/main/jniLibs/arm64-v8a/*.so
+gradle/wrapper/gradle-wrapper.jar
+native/.work/
