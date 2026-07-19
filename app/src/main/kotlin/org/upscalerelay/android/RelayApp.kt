@@ -514,10 +514,21 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
                 LibraryItem(
                     node = node,
                     selected = state.selectedLibraryNode?.path == node.path,
-                    enabled = !state.busy,
+                    enabled = !state.busy && !state.libraryLoading,
                 ) {
                     if (node.type == LibraryNode.Type.DIRECTORY) viewModel.openDirectory(node)
                     else viewModel.selectLibraryNode(node)
+                }
+            }
+            if (state.libraryLoading || state.libraryNextCursor != null) {
+                item(key = "library-page-footer") {
+                    Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                        if (state.libraryLoading) {
+                            CircularProgressIndicator(Modifier.size(28.dp))
+                        } else {
+                            TextButton(onClick = viewModel::loadMoreLibrary) { Text("Load more") }
+                        }
+                    }
                 }
             }
         }

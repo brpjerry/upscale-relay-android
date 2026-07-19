@@ -128,6 +128,21 @@ data class LibraryNode(
     }
 }
 
+data class LibraryPage(
+    val directory: LibraryNode,
+    val nextCursor: String?,
+) {
+    companion object {
+        fun fromJson(value: JsonObject): LibraryPage = LibraryPage(
+            directory = LibraryNode.fromJson(value.getValue("tree").jsonObject),
+            nextCursor = value["next_cursor"]
+                ?.takeUnless { it is JsonNull }
+                ?.jsonPrimitive
+                ?.content,
+        )
+    }
+}
+
 /**
  * A chapter mark of the source media, in seconds of source-media time
  * (session_opened.chapters). Seeking to one goes through the ordinary

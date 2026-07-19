@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
+import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
 import java.io.Closeable
@@ -74,19 +75,29 @@ class RelaySessionController(
                 "server protocol v${caps.protocolVersion} is not supported"
             }
             require("lossless-hevc" in caps.qualityTiers) { "server does not support lossless-hevc" }
-            val root = if (caps.hasLibrary) channel.fetchLibrary() else LibraryNode(
-                type = LibraryNode.Type.DIRECTORY,
-                name = "Server library unavailable",
-                path = "",
+            val page = if (caps.hasLibrary) channel.fetchLibrary() else LibraryPage(
+                directory = LibraryNode(
+                    type = LibraryNode.Type.DIRECTORY,
+                    name = "Server library unavailable",
+                    path = "",
+                ),
+                nextCursor = null,
             )
             capabilities = caps
             stateMachine.transition(SessionState.BROWSING)
-            ConnectedLibrary(caps, root)
+            ConnectedLibrary(caps, page.directory, page.nextCursor)
         } catch (error: Throwable) {
             fail(error)
             throw error
         }
     }
+
+    suspend fun fetchLibraryPage(
+        path: String,
+        cursor: String? = null,
+        limit: Int = LIBRARY_PAGE_SIZE,
+    ): LibraryPage = requireNotNull(control) { "not connected" }
+        .fetchLibrary(path, cursor, limit)
 
     suspend fun preparePlayback(
         path: String,
@@ -433,10 +444,15 @@ class RelaySessionController(
             "hevc-qp10", "hevc-qp14", "hevc-qp18",
         )
         val FIT_MODES = setOf("fit", "cover")
+        const val LIBRARY_PAGE_SIZE = 100
     }
 }
 
-data class ConnectedLibrary(val capabilities: Capabilities, val root: LibraryNode)
+data class ConnectedLibrary(
+    val capabilities: Capabilities,
+    val root: LibraryNode,
+    val nextCursor: String?,
+)
 
 data class PlaybackEndpoint(
     val localUrl: String,

@@ -8,6 +8,21 @@ import org.junit.Test
 
 class MessagesTest {
     @Test
+    fun `library pages preserve cursor and shallow children`() {
+        val value = Json.parseToJsonElement(
+            """{"tree":{"type":"directory","name":"Library","path":"","children":[{"type":"directory","name":"Shows","path":"Shows","children":[]}]},"next_cursor":"100"}""",
+        ).jsonObject
+        val page = LibraryPage.fromJson(value)
+        assertEquals("100", page.nextCursor)
+        assertEquals("Shows", page.directory.children.single().path)
+
+        val finalPage = Json.parseToJsonElement(
+            """{"tree":{"type":"directory","name":"Library","path":"","children":[]}}""",
+        ).jsonObject
+        assertNull(LibraryPage.fromJson(finalPage).nextCursor)
+    }
+
+    @Test
     fun `capabilities choose a real model before passthrough`() {
         val value = Json.parseToJsonElement(
             """{"protocol_version":1,"server_name":"relay","models":[{"name":"passthrough","scale_factor":1},{"name":"anime-x2","scale_factor":2}],"quality_tiers":["lossless-hevc"],"library":true}""",

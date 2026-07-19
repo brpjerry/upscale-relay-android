@@ -11,6 +11,16 @@ class MpvPlayerEngineTest {
     }
 
     @Test
+    fun `relay load tolerates an indefinitely silent loopback stream`() {
+        val value = "http://server:8590/media/episode.mkv"
+        val source = fixedLengthOptionValue(value)
+        assertEquals(
+            "network-timeout=0,audio-file=$source,sub-files-append=$source",
+            relayLoadOptions(value),
+        )
+    }
+
+    @Test
     fun `forwarded mpv log lines have media URLs redacted`() {
         assertEquals(
             "Failed to open <url>",
