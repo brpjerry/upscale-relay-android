@@ -859,6 +859,30 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         seekTo((mutableUi.value.mpvMetrics.positionSeconds + seconds).coerceAtLeast(0.0))
     }
 
+    /**
+     * Seeks to the next (+1) or previous (-1) chapter mark. Previous restarts
+     * the current chapter when already well into it, like every player's back
+     * button. A no-op when the session has no chapters.
+     */
+    fun chapterStep(direction: Int) {
+        val chapters = mutableUi.value.session?.chapters.orEmpty()
+        if (chapters.isEmpty() || direction == 0) return
+        val position = mutableUi.value.mpvMetrics.positionSeconds
+        val current = chapters.indexOfLast { it.startSeconds <= position }
+        val target = if (direction > 0) {
+            chapters.getOrNull(current + 1)?.startSeconds
+        } else {
+            when {
+                current < 0 -> null
+                position - chapters[current].startSeconds > CHAPTER_RESTART_THRESHOLD_SECONDS ->
+                    chapters[current].startSeconds
+                current > 0 -> chapters[current - 1].startSeconds
+                else -> 0.0
+            }
+        }
+        if (target != null) seekTo(target)
+    }
+
     fun previewSeek(seconds: Double) {
         mutableUi.value = mutableUi.value.copy(seekPreviewSeconds = seconds)
     }
@@ -1020,6 +1044,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             launch {
                 value.stats.collectLatest { stats ->
                     mutableUi.update { it.copy(transportStats = stats) }
+                }
+            }
+            launch {
+                value.openingProgress.collectLatest { progress ->
+                    mutableUi.update { it.copy(openingProgress = progress) }
                 }
             }
             launch {
@@ -1265,6 +1294,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
                     override fun onRewind() = seekRelative(-10.0)
 
+                    override fun onSkipToNext() = chapterStep(1)
+
+                    override fun onSkipToPrevious() = chapterStep(-1)
+
                     override fun onStop() = closePlayback()
                 })
                 isActive = true
@@ -1413,13 +1446,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             publishedMetadataKey = metadataKey
         }
         val playing = !state.paused
+        val chapterActions = if (state.session?.chapters?.isNotEmpty() == true) {
+            PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS
+        } else 0L
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
                     PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
                         PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SEEK_TO or
                         PlaybackState.ACTION_FAST_FORWARD or PlaybackState.ACTION_REWIND or
-                        PlaybackState.ACTION_STOP,
+                        PlaybackState.ACTION_STOP or chapterActions,
                 )
                 .setState(
                     if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
@@ -1667,6 +1703,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val PROGRESS_SAVE_INTERVAL_MILLIS = 5_000L
         private const val RESUME_MIN_SECONDS = 10.0
         private const val RESUME_END_WINDOW_SECONDS = 90.0
+        private const val CHAPTER_RESTART_THRESHOLD_SECONDS = 3.0
     }
 
     private fun persist(block: suspend () -> Unit) {
@@ -1721,6 +1758,8 @@ data class RelayUiState(
     val directLocalFallback: Boolean = false,
     val autoResume: Boolean = true,
     val reconnecting: ReconnectStatus? = null,
+    // Server loading text while open_session runs (TensorRT engine build).
+    val openingProgress: String? = null,
     val performanceWarning: String? = null,
     val discoveredServers: List<DiscoveredServer> = emptyList(),
     val displayResampleSync: Boolean = false,

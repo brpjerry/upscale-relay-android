@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.5.5)"
+        description: "Release tag (e.g. v0.8.0)"
         required: true
 
 permissions:
@@ -44,5 +44,5 @@ jobs:
           gh release create "$TAG" \
             --title "Upscale Relay Android $TAG" \
             --generate-notes \
-            --notes "Unsigned release APK. Sign it before distribution; sideload as-is for personal use." \
+            --notes "Adds Matroska chapter discovery and chapter-aware playback for server and local SAF sources, plus a progress keepalive and loading indicator for long first-use TensorRT engine builds. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
             dist/*.apk

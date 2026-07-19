@@ -7,6 +7,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -27,6 +28,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.Base64
 
 internal class ControlChannel(
@@ -43,7 +45,18 @@ internal class ControlChannel(
     private val pending = ConcurrentHashMap<String, PendingReply>()
     private val opened = CompletableDeferred<Unit>()
     private val closed = AtomicBoolean(false)
+    private val lastActivityNanos = AtomicLong(System.nanoTime())
     private lateinit var webSocket: WebSocket
+
+    /**
+     * Invoked (from OkHttp's reader thread) with the server's loading text on
+     * every session_progress keepalive, and with null once the pending open
+     * resolves. Each keepalive also refreshes the open_session inactivity
+     * deadline — a first-use TensorRT engine build runs minutes and must not
+     * trip the timeout while the server is visibly working.
+     */
+    @Volatile
+    var onOpeningProgress: ((String?) -> Unit)? = null
 
     suspend fun connect(display: DisplaySize): Capabilities {
         val request = Request.Builder().url(controlUrl()).build()
@@ -89,6 +102,7 @@ internal class ControlChannel(
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
+        keepalive = true,
         message = buildJsonObject {
             put("type", "open_session")
             put("source", buildJsonObject {
@@ -117,12 +131,24 @@ internal class ControlChannel(
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
+        keepalive = true,
         message = buildJsonObject {
             put("type", "open_session")
             put("source", "uplink")
             put("file", buildJsonObject {
                 put("name", video.name)
                 video.durationSeconds?.let { put("duration_s", it) }
+                if (video.chapters.isNotEmpty()) {
+                    put("chapters", kotlinx.serialization.json.buildJsonArray {
+                        video.chapters.forEach { chapter ->
+                            add(buildJsonObject {
+                                put("start_s", chapter.startSeconds)
+                                chapter.endSeconds?.let { put("end_s", it) }
+                                chapter.title?.let { put("title", it) }
+                            })
+                        }
+                    })
+                }
             })
             put("video", buildJsonObject {
                 put("codec", video.codec)
@@ -194,6 +220,7 @@ internal class ControlChannel(
         timeoutMillis: Long,
         message: JsonObject,
         accept: (JsonObject) -> Boolean = { true },
+        keepalive: Boolean = false,
     ): JsonObject {
         val waiter = CompletableDeferred<JsonObject>()
         val reply = PendingReply(waiter, accept)
@@ -202,7 +229,23 @@ internal class ControlChannel(
         }
         try {
             send(message)
-            return deadline(timeoutMillis, "'$expectedType' reply") { waiter.await() }
+            if (!keepalive) {
+                return deadline(timeoutMillis, "'$expectedType' reply") { waiter.await() }
+            }
+            // Inactivity deadline: session_progress keepalives push it out,
+            // so a server that is visibly working (TensorRT engine build)
+            // never times out while a silent one still fails.
+            lastActivityNanos.set(System.nanoTime())
+            while (true) {
+                kotlinx.coroutines.withTimeoutOrNull(KEEPALIVE_POLL_MILLIS) { waiter.await() }
+                    ?.let { return it }
+                val idleMillis = (System.nanoTime() - lastActivityNanos.get()) / 1_000_000
+                if (idleMillis > timeoutMillis) {
+                    throw SocketTimeoutException(
+                        "'$expectedType' reply: no progress for $timeoutMillis ms",
+                    )
+                }
+            }
         } finally {
             pending.remove(expectedType, reply)
         }
@@ -256,6 +299,19 @@ internal class ControlChannel(
                     return
                 }
             val type = message["type"]?.toString()?.trim('"') ?: return
+            if (type == "session_progress") {
+                lastActivityNanos.set(System.nanoTime())
+                val text = message["message"]?.jsonPrimitive?.content
+                val elapsed = message["elapsed_s"]?.jsonPrimitive?.doubleOrNull
+                onOpeningProgress?.invoke(
+                    when {
+                        text == null -> null
+                        elapsed != null -> "$text (${elapsed.toInt()} s)"
+                        else -> text
+                    },
+                )
+                return
+            }
             if (type == "error") {
                 val error = RelayServerException(
                     code = message["code"]?.toString()?.trim('"') ?: "server_error",
@@ -292,6 +348,8 @@ internal class ControlChannel(
         }
     }
 }
+
+private const val KEEPALIVE_POLL_MILLIS = 2_000L
 
 private data class PendingReply(
     val deferred: CompletableDeferred<JsonObject>,

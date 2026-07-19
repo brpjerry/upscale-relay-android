@@ -128,6 +128,32 @@ data class LibraryNode(
     }
 }
 
+/**
+ * A chapter mark of the source media, in seconds of source-media time
+ * (session_opened.chapters). Seeking to one goes through the ordinary
+ * time_base conversion like any other seek target.
+ */
+data class ChapterInfo(
+    val startSeconds: Double,
+    val endSeconds: Double?,
+    val title: String?,
+) {
+    companion object {
+        fun fromJson(value: JsonObject): ChapterInfo? {
+            val start = value["start_s"]?.takeUnless { it is JsonNull }
+                ?.jsonPrimitive?.doubleOrNull ?: return null
+            if (start < 0) return null
+            return ChapterInfo(
+                startSeconds = start,
+                endSeconds = value["end_s"]?.takeUnless { it is JsonNull }
+                    ?.jsonPrimitive?.doubleOrNull,
+                title = value["title"]?.takeUnless { it is JsonNull }
+                    ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+}
+
 data class SessionInfo(
     val sessionId: String,
     val mediaPort: Int,
@@ -143,6 +169,7 @@ data class SessionInfo(
     val averageRate: Rational?,
     val fitMode: String,
     val resizeAlgorithm: String?,
+    val chapters: List<ChapterInfo> = emptyList(),
 ) {
     companion object {
         fun fromJson(value: JsonObject) = SessionInfo(
@@ -163,6 +190,12 @@ data class SessionInfo(
             fitMode = value["fit_mode"]?.jsonPrimitive?.content ?: "fit",
             resizeAlgorithm = value["resize_algorithm"]?.takeUnless { it is JsonNull }
                 ?.jsonPrimitive?.content,
+            chapters = value["chapters"]?.takeUnless { it is JsonNull }?.jsonArray
+                ?.mapNotNull { element ->
+                    runCatching { ChapterInfo.fromJson(element.jsonObject) }.getOrNull()
+                }
+                ?.sortedBy { it.startSeconds }
+                .orEmpty(),
         )
     }
 }

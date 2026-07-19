@@ -10,6 +10,8 @@ import org.upscalerelay.client.UplinkAccessUnit
 import org.upscalerelay.client.UplinkMediaSource
 import org.upscalerelay.client.UplinkPacketReader
 import org.upscalerelay.client.UplinkVideoInfo
+import org.upscalerelay.protocol.ChapterInfo
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -56,6 +58,7 @@ class AndroidMediaSource private constructor(
                     val extradata = (0..3).mapNotNull { index ->
                         format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
+                    val chapters = readChapters(resolver, uri)
                     return AndroidMediaSource(
                         resolver = resolver,
                         uri = uri,
@@ -71,6 +74,7 @@ class AndroidMediaSource private constructor(
                             averageRateNumerator = fps,
                             averageRateDenominator = fps?.let { 1 },
                             durationSeconds = durationUs?.div(1_000_000.0),
+                            chapters = chapters,
                         ),
                     )
                 } finally {
@@ -78,6 +82,20 @@ class AndroidMediaSource private constructor(
                 }
             }
         }
+
+        /**
+         * Best-effort Matroska chapter extraction (MediaExtractor has no
+         * chapter API). Non-MKV documents fail the EBML magic immediately and
+         * return an empty list.
+         */
+        private fun readChapters(resolver: ContentResolver, uri: Uri): List<ChapterInfo> =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaChapters.parse(stream.channel)
+                    }
+                }
+            }.getOrNull().orEmpty()
 
         private fun codecName(mime: String): String = when (mime) {
             MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"

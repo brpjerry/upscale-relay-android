@@ -40,12 +40,15 @@ hardware decoder and would burn battery in software.
 
 ## Building
 
-Prerequisites: JDK 17, Android SDK 37, and a physical arm64 device.
+Prerequisites: JDK 17, Android SDK 37, and a physical arm64 device. For
+command-line builds, expose the JDK through `JAVA_HOME` (or put `java` on
+`PATH`) and expose the Android SDK through `ANDROID_HOME`,
+`ANDROID_SDK_ROOT`, or an `sdk.dir` entry in `local.properties`.
 The Gradle wrapper JAR and mpv native binaries are not committed; both
-bootstrap paths are version- and SHA-256-pinned.
+bootstrap paths are version- and SHA-256-pinned. Run these commands from the
+Android repository root:
 
 ```powershell
-cd android_client
 .\bootstrap-wrapper.ps1
 .\native\fetch_mpv_native.ps1
 .\gradlew.bat :relay-protocol:test :relay-client:test :app:lintDebug :app:assembleDebug
@@ -53,7 +56,6 @@ cd android_client
 ```
 
 ```bash
-cd android_client
 ./bootstrap-wrapper.sh
 ./native/fetch_mpv_native.sh
 ./gradlew :relay-protocol:test :relay-client:test :app:assembleDebug

@@ -11,8 +11,8 @@ android {
         applicationId = "org.upscalerelay.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.5.5-phase5.5"
+        versionCode = 8
+        versionName = "0.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
     }
