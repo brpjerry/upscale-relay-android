@@ -474,6 +474,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             currentDirectory = null,
             capabilities = null,
             libraryRoot = null,
+            libraryNextCursor = null,
+            libraryLoading = false,
+            directoryCursorStack = emptyList(),
             selectedLibraryNode = null,
         )
         AppLog.i(TAG, "connect $host:$port display=${mutableUi.value.display.width}x${mutableUi.value.display.height}")
@@ -496,6 +499,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     libraryRoot = connected.root,
                     currentDirectory = connected.root,
                     directoryStack = emptyList(),
+                    directoryCursorStack = emptyList(),
+                    libraryNextCursor = connected.nextCursor,
+                    libraryLoading = false,
                     selectedLibraryNode = null,
                     selectedModel = selectedModel,
                     qualityTier = selectedQuality,
@@ -512,12 +518,67 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openDirectory(directory: LibraryNode) {
         if (directory.type != LibraryNode.Type.DIRECTORY) return
-        val current = mutableUi.value.currentDirectory ?: return
-        mutableUi.value = mutableUi.value.copy(
-            currentDirectory = directory,
-            directoryStack = mutableUi.value.directoryStack + current,
-            selectedLibraryNode = null,
-        )
+        val state = mutableUi.value
+        val current = state.currentDirectory ?: return
+        if (state.libraryLoading) return
+        val active = controller ?: return
+        mutableUi.value = state.copy(libraryLoading = true, error = null)
+        viewModelScope.launch {
+            runCatching { active.fetchLibraryPage(directory.path) }
+                .onSuccess { page ->
+                    if (active !== controller) return@onSuccess
+                    mutableUi.value = mutableUi.value.copy(
+                        currentDirectory = page.directory,
+                        directoryStack = state.directoryStack + current,
+                        directoryCursorStack = state.directoryCursorStack + state.libraryNextCursor,
+                        libraryNextCursor = page.nextCursor,
+                        libraryLoading = false,
+                        selectedLibraryNode = null,
+                    )
+                }
+                .onFailure { error ->
+                    if (active === controller) {
+                        mutableUi.value = mutableUi.value.copy(
+                            libraryLoading = false,
+                            error = "Could not load ${directory.name}: ${error.message}",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun loadMoreLibrary() {
+        val state = mutableUi.value
+        val cursor = state.libraryNextCursor ?: return
+        val directory = state.currentDirectory ?: return
+        if (state.libraryLoading) return
+        val active = controller ?: return
+        mutableUi.value = state.copy(libraryLoading = true, error = null)
+        viewModelScope.launch {
+            runCatching { active.fetchLibraryPage(directory.path, cursor) }
+                .onSuccess { page ->
+                    if (active !== controller || mutableUi.value.currentDirectory?.path != directory.path) {
+                        return@onSuccess
+                    }
+                    val merged = directory.copy(
+                        children = (directory.children + page.directory.children).distinctBy { it.path },
+                    )
+                    mutableUi.value = mutableUi.value.copy(
+                        currentDirectory = merged,
+                        libraryRoot = if (directory.path.isEmpty()) merged else mutableUi.value.libraryRoot,
+                        libraryNextCursor = page.nextCursor,
+                        libraryLoading = false,
+                    )
+                }
+                .onFailure { error ->
+                    if (active === controller) {
+                        mutableUi.value = mutableUi.value.copy(
+                            libraryLoading = false,
+                            error = "Could not load more files: ${error.message}",
+                        )
+                    }
+                }
+        }
     }
 
     fun selectLibraryNode(node: LibraryNode) {
@@ -535,13 +596,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutableUi.value = mutableUi.value.copy(
             currentDirectory = stack.last(),
             directoryStack = stack.dropLast(1),
+            libraryNextCursor = mutableUi.value.directoryCursorStack.lastOrNull(),
+            directoryCursorStack = mutableUi.value.directoryCursorStack.dropLast(1),
             selectedLibraryNode = null,
         )
     }
 
     fun openRecent(path: String) {
-        val file = mutableUi.value.libraryRoot?.findPath(path)
-        if (file?.type == LibraryNode.Type.FILE) openFile(file)
+        val connected = mutableUi.value.currentDirectory != null &&
+            mutableUi.value.capabilities?.hasLibrary == true
+        if (connected && path.isNotBlank()) openFile(LibraryNode(
+            type = LibraryNode.Type.FILE,
+            name = path.substringAfterLast('/'),
+            path = path,
+        ))
         else mutableUi.value = mutableUi.value.copy(
             destination = TabletDestination.SERVER,
             error = "Reconnect to the server to open this recent item.",
@@ -1175,7 +1243,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             androidQualities.any { it.id == selected }
         } ?: androidQualities.firstOrNull()?.id ?: "lossless-hevc"
         mutableUi.update {
-            it.copy(capabilities = connected.capabilities, libraryRoot = connected.root)
+            it.copy(
+                capabilities = connected.capabilities,
+                libraryRoot = connected.root,
+            )
         }
         val endpoint = when (origin) {
             is PlaybackOrigin.ServerFile -> next.preparePlayback(
@@ -1725,6 +1796,9 @@ data class RelayUiState(
     val libraryRoot: LibraryNode? = null,
     val currentDirectory: LibraryNode? = null,
     val directoryStack: List<LibraryNode> = emptyList(),
+    val directoryCursorStack: List<String?> = emptyList(),
+    val libraryNextCursor: String? = null,
+    val libraryLoading: Boolean = false,
     val endpoint: String? = null,
     val session: SessionInfo? = null,
     val playingPath: String? = null,

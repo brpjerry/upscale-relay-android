@@ -102,6 +102,10 @@ Ultra:
   new stream with `rebase-start-time=no`. The same original-media URL is
   attached through `audio-file` and `sub-files-append`, leaving audio as the
   synchronization clock.
+- Relay loads disable mpv's network read timeout for the private loopback
+  stream because an intentional user pause can leave it silent indefinitely.
+  Control/downlink liveness and the playback watchdog still detect real relay
+  failures; direct-local HTTP playback retains the ordinary timeout.
 - Cover is center-cropped on the server before the final resize and encode,
   so the client never decodes off-screen columns. Android keeps mpv's normal
   frame-dropping policy so missed presentation deadlines stay observable.

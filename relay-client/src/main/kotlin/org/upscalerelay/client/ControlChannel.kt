@@ -20,7 +20,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
-import org.upscalerelay.protocol.LibraryNode
+import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
 import java.io.Closeable
 import java.io.IOException
@@ -78,15 +78,24 @@ internal class ControlChannel(
         return Capabilities.fromJson(reply)
     }
 
-    suspend fun fetchLibrary(): LibraryNode {
-        val request = Request.Builder().url(httpUrl("library")).build()
+    suspend fun fetchLibrary(
+        path: String = "",
+        cursor: String? = null,
+        limit: Int = 100,
+    ): LibraryPage {
+        val url = httpUrl("library").newBuilder()
+            .addQueryParameter("path", path)
+            .addQueryParameter("limit", limit.toString())
+            .apply { if (cursor != null) addQueryParameter("cursor", cursor) }
+            .build()
+        val request = Request.Builder().url(url).build()
         return deadline(30_000, "GET /library") {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 client.newCall(request).execute().use {
                     if (!it.isSuccessful) throw IOException("GET /library failed with HTTP ${it.code}")
                     val body = it.body.string()
                     val root = json.parseToJsonElement(body).jsonObject
-                    LibraryNode.fromJson(root.getValue("tree").jsonObject)
+                    LibraryPage.fromJson(root)
                 }
             }
         }

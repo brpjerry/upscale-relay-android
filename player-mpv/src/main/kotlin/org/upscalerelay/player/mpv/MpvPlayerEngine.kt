@@ -228,11 +228,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     private fun loadNow(request: MpvLoadRequest) {
         val options = if (request.originalMediaUrl != null) {
-            // Relay playback never passes start=. Absolute Matroska PTS remain authoritative.
-            val source = fixedLengthOptionValue(request.originalMediaUrl)
-            // sub-files is a colon-separated path list on Android. Its -append
-            // variant accepts exactly one unescaped item, avoiding URL splitting.
-            "audio-file=$source,sub-files-append=$source"
+            relayLoadOptions(request.originalMediaUrl)
         } else {
             "start=${request.startSeconds ?: 0.0}"
         }
@@ -381,6 +377,22 @@ private data class MpvLoadRequest(
 
 /** mpv's fixed-length option syntax keeps commas and equals signs in URLs literal. */
 internal fun fixedLengthOptionValue(value: String): String = "%${value.length}%$value"
+
+/**
+ * Options for the live relay input. A user pause also pauses the server, so
+ * the private loopback TCP stream can legitimately be silent indefinitely.
+ * The ordinary ten-second network timeout would make FFmpeg abandon that
+ * video stream during a longer pause; external HTTP audio would then resume
+ * alone while newly relayed video backed up before mpv. Relay transport
+ * liveness is owned by the control/downlink sockets and playback watchdog.
+ */
+internal fun relayLoadOptions(originalMediaUrl: String): String {
+    // Relay playback never passes start=. Absolute Matroska PTS remain authoritative.
+    val source = fixedLengthOptionValue(originalMediaUrl)
+    // sub-files is a colon-separated path list on Android. Its -append
+    // variant accepts exactly one unescaped item, avoiding URL splitting.
+    return "network-timeout=0,audio-file=$source,sub-files-append=$source"
+}
 
 data class MpvTrack(
     val id: Int,
