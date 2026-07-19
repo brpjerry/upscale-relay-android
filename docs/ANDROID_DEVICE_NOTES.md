@@ -1,5 +1,28 @@
 # Android device validation notes
 
+## Matroska chapters and TensorRT loading results — 2026-07-19
+
+The release-candidate build was installed on the target Galaxy Tab S9 Ultra
+(`SM-X910`, Android 16) and tested against the matching Python server from a
+fresh TensorRT cache.
+
+- A first-use `2x_AnimeJaNai_HD_V3Sharp1_Compact` engine build kept the control
+  connection alive and displayed the indeterminate loader plus the server's
+  elapsed-time message. The session transitioned from `OPEN` to `PLAYING`
+  without a timeout and used `TensorrtExecutionProvider` with the uint8-wrapped
+  model.
+- A server-library MKV exposed all six embedded chapter titles and timestamps.
+  Selecting `Lucky Channel` created epoch 1 and settled at 1203.6 s with
+  0.024 ms A/V offset; the dedicated next-chapter control created epoch 3 and
+  landed at 1316.6 s in the 1311.9 s `ED` chapter. Both samples reported zero
+  decoder drops.
+- A generated local SAF MKV exposed all three embedded titles (`Cold Open`,
+  `Middle`, `Finale`) through the uplink-session echo. Selecting `Middle`
+  created epoch 1 and played from 8.23 s after its 5.00 s mark with zero
+  decoder or output drops.
+- The temporary 14 MB SAF fixture was removed after the run and every session
+  tore down cleanly.
+
 Status: **Phase 1 acceptance passed; Phase 2 core, Phase 3 tablet-shell,
 Phase 4 local-file, Phase 5 discovery/recovery, and Phase 5.5 device gates
 passed, including the phone/small-screen layouts on a Galaxy S24 Ultra and

@@ -9,6 +9,7 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -42,9 +43,13 @@ import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.automirrored.outlined.Toc
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Subtitles
@@ -110,6 +115,7 @@ import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.player.mpv.MpvSurfaceView
 import org.upscalerelay.player.mpv.MpvTrack
+import org.upscalerelay.protocol.ChapterInfo
 import org.upscalerelay.protocol.LibraryNode
 import java.util.Locale
 import kotlin.math.abs
@@ -930,8 +936,11 @@ private fun PlayerScreen(
     inPictureInPicture: Boolean = false,
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
+    var controlsLocked by remember { mutableStateOf(false) }
+    var lockedButtonVisible by remember { mutableStateOf(false) }
     var trackSheetVisible by remember { mutableStateOf(false) }
     var settingsSheetVisible by remember { mutableStateOf(false) }
+    var chapterSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
     val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds).coerceAtLeast(0.0)
     val position = (state.seekPreviewSeconds ?: state.mpvMetrics.positionSeconds)
@@ -951,10 +960,16 @@ private fun PlayerScreen(
         }
         return
     }
-    LaunchedEffect(controlsVisible, state.paused, state.seeking, trackSheetVisible, settingsSheetVisible) {
-        if (controlsVisible && !state.paused && !state.seeking && !trackSheetVisible && !settingsSheetVisible) {
+    LaunchedEffect(controlsVisible, controlsLocked, state.paused, state.seeking, trackSheetVisible, settingsSheetVisible, chapterSheetVisible) {
+        if (controlsVisible && !controlsLocked && !state.paused && !state.seeking && !trackSheetVisible && !settingsSheetVisible && !chapterSheetVisible) {
             delay(4_000)
             controlsVisible = false
+        }
+    }
+    LaunchedEffect(lockedButtonVisible, controlsLocked) {
+        if (controlsLocked && lockedButtonVisible) {
+            delay(4_000)
+            lockedButtonVisible = false
         }
     }
     LaunchedEffect(gestureMessage) {
@@ -974,12 +989,18 @@ private fun PlayerScreen(
             viewModel = viewModel,
             state = state,
             duration = duration,
-            enabled = state.gesturesEnabled,
-            onToggleControls = { controlsVisible = !controlsVisible },
+            enabled = state.gesturesEnabled && !controlsLocked,
+            onToggleControls = {
+                if (controlsLocked) {
+                    lockedButtonVisible = !lockedButtonVisible
+                } else {
+                    controlsVisible = !controlsVisible
+                }
+            },
             onShowControls = { controlsVisible = true },
             onMessage = { gestureMessage = it },
         )
-        if (controlsVisible) {
+        if (controlsVisible && !controlsLocked) {
             PlayerChrome(
                 viewModel = viewModel,
                 state = state,
@@ -987,9 +1008,29 @@ private fun PlayerScreen(
                 duration = duration,
                 onTracks = { trackSheetVisible = true },
                 onSettings = { settingsSheetVisible = true },
+                onChapters = { chapterSheetVisible = true },
+                onLock = {
+                    controlsLocked = true
+                    controlsVisible = false
+                    lockedButtonVisible = true
+                    gestureMessage = null
+                },
             )
         }
-        if (state.diagnosticsVisible && controlsVisible) {
+        if (controlsLocked && lockedButtonVisible) {
+            LockedControlsButton(
+                onUnlock = {
+                    controlsLocked = false
+                    lockedButtonVisible = false
+                    controlsVisible = true
+                },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(16.dp),
+            )
+        }
+        if (state.diagnosticsVisible && controlsVisible && !controlsLocked) {
             DiagnosticsOverlay(state, Modifier.align(Alignment.CenterStart))
         }
         gestureMessage?.let { message ->
@@ -1006,13 +1047,24 @@ private fun PlayerScreen(
                 CircularProgressIndicator(color = Color.White)
                 Spacer(Modifier.height(14.dp))
                 Text("Preparing ${state.qualityTier}…", color = Color.White)
+                // session_progress keepalive text, e.g. a first-use TensorRT
+                // engine build that runs for minutes.
+                state.openingProgress?.let { progress ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        progress,
+                        color = Color.LightGray,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 48.dp),
+                    )
+                }
             }
         }
         state.performanceWarning?.let { warning ->
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = if (controlsVisible) 92.dp else 24.dp),
+                    .padding(top = if (controlsVisible && !controlsLocked) 92.dp else 24.dp),
                 color = Color(0xdd3a2f12),
                 shape = MaterialTheme.shapes.large,
             ) {
@@ -1053,6 +1105,9 @@ private fun PlayerScreen(
     }
     if (settingsSheetVisible) {
         PlaybackSettingsSheet(viewModel, state) { settingsSheetVisible = false }
+    }
+    if (chapterSheetVisible) {
+        ChapterSheet(viewModel, state) { chapterSheetVisible = false }
     }
 }
 
@@ -1145,7 +1200,11 @@ private fun PlayerChrome(
     duration: Double,
     onTracks: () -> Unit,
     onSettings: () -> Unit,
+    onChapters: () -> Unit,
+    onLock: () -> Unit,
 ) {
+    val chapters = state.session?.chapters.orEmpty()
+    val currentChapter = chapters.lastOrNull { it.startSeconds <= position }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
@@ -1171,6 +1230,13 @@ private fun PlayerChrome(
                 )
                 Text(state.sessionDescription, color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
             }
+            if (chapters.isNotEmpty()) {
+                TextButton(onClick = onChapters) {
+                    Icon(Icons.AutoMirrored.Outlined.Toc, contentDescription = null, tint = Color.White)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Chapters", color = Color.White)
+                }
+            }
             TextButton(onClick = onTracks) {
                 Icon(Icons.Outlined.Subtitles, contentDescription = null, tint = Color.White)
                 Spacer(Modifier.width(8.dp))
@@ -1181,6 +1247,13 @@ private fun PlayerChrome(
                 Spacer(Modifier.width(8.dp))
                 Text("Playback", color = Color.White)
             }
+            IconButton(onClick = onLock) {
+                Icon(
+                    Icons.Outlined.Lock,
+                    contentDescription = "Lock player controls",
+                    tint = Color.White,
+                )
+            }
         }
         Spacer(Modifier.weight(1f))
         Column(
@@ -1190,16 +1263,53 @@ private fun PlayerChrome(
                 .navigationBarsPadding()
                 .padding(horizontal = 36.dp, vertical = 20.dp),
         ) {
-            Slider(
-                value = position.toFloat(),
-                onValueChange = { viewModel.previewSeek(it.toDouble()) },
-                onValueChangeFinished = viewModel::commitSeek,
-                valueRange = 0f..duration.coerceAtLeast(0.001).toFloat(),
-                enabled = duration > 0,
-            )
+            Box(Modifier.fillMaxWidth()) {
+                Slider(
+                    value = position.toFloat(),
+                    onValueChange = { viewModel.previewSeek(it.toDouble()) },
+                    onValueChangeFinished = viewModel::commitSeek,
+                    valueRange = 0f..duration.coerceAtLeast(0.001).toFloat(),
+                    enabled = duration > 0,
+                )
+                if (chapters.isNotEmpty() && duration > 0) {
+                    // Chapter boundaries as ticks over the seek bar (drawn on
+                    // top like mpv's OSC markers; touch stays with the Slider).
+                    Canvas(Modifier.matchParentSize()) {
+                        val tick = Color.White.copy(alpha = 0.65f)
+                        chapters.forEach { chapter ->
+                            val fraction = chapter.startSeconds / duration
+                            if (fraction <= 0.0 || fraction >= 1.0) return@forEach
+                            drawRect(
+                                color = tick,
+                                topLeft = Offset(
+                                    (fraction * size.width).toFloat() - 1.dp.toPx() / 2,
+                                    size.height / 2 - 5.dp.toPx(),
+                                ),
+                                size = androidx.compose.ui.geometry.Size(1.dp.toPx(), 10.dp.toPx()),
+                            )
+                        }
+                    }
+                }
+            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(formatTime(position), color = Color.White)
+                currentChapter?.let { chapter ->
+                    Text(
+                        "  ·  ${chapter.title ?: "Chapter ${chapters.indexOf(chapter) + 1}"}",
+                        color = Color.LightGray,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
                 Spacer(Modifier.weight(1f))
+                if (chapters.isNotEmpty()) {
+                    FilledTonalButton(onClick = { viewModel.chapterStep(-1) }) {
+                        Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous chapter")
+                    }
+                    Spacer(Modifier.width(16.dp))
+                }
                 FilledTonalButton(onClick = { viewModel.seekRelative(-10.0) }) {
                     Icon(Icons.Filled.Replay10, contentDescription = "Back 10 seconds")
                 }
@@ -1214,6 +1324,12 @@ private fun PlayerChrome(
                 FilledTonalButton(onClick = { viewModel.seekRelative(10.0) }) {
                     Icon(Icons.Filled.Forward10, contentDescription = "Forward 10 seconds")
                 }
+                if (chapters.isNotEmpty()) {
+                    Spacer(Modifier.width(16.dp))
+                    FilledTonalButton(onClick = { viewModel.chapterStep(1) }) {
+                        Icon(Icons.Filled.SkipNext, contentDescription = "Next chapter")
+                    }
+                }
                 Spacer(Modifier.weight(1f))
                 if (state.seeking) {
                     CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
@@ -1221,6 +1337,26 @@ private fun PlayerChrome(
                 }
                 Text(formatTime(duration), color = Color.White)
             }
+        }
+    }
+}
+
+@Composable
+private fun LockedControlsButton(
+    onUnlock: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        color = Color(0xcc111111),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        IconButton(onClick = onUnlock) {
+            Icon(
+                Icons.Outlined.Lock,
+                contentDescription = "Unlock player controls",
+                tint = Color.White,
+            )
         }
     }
 }
@@ -1252,6 +1388,58 @@ private fun TrackSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
                 RadioSetting(track.label, track.selected) { viewModel.selectSubtitleTrack(track.id) }
             }
             DelayControl("Subtitle delay", state.mpvMetrics.subtitleDelaySeconds) { viewModel.adjustSubtitleDelay(it) }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChapterSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
+    val chapters = state.session?.chapters.orEmpty()
+    val position = state.seekPreviewSeconds ?: state.mpvMetrics.positionSeconds
+    val currentIndex = chapters.indexOfLast { it.startSeconds <= position }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp)
+                .navigationBarsPadding(),
+        ) {
+            Text("Chapters", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(16.dp))
+            chapters.forEachIndexed { index, chapter ->
+                val selected = index == currentIndex
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            viewModel.seekTo(chapter.startSeconds)
+                            onDismiss()
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${index + 1}.",
+                        Modifier.width(36.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        chapter.title ?: "Chapter ${index + 1}",
+                        Modifier.weight(1f),
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        formatTime(chapter.startSeconds),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Spacer(Modifier.height(24.dp))
         }
     }

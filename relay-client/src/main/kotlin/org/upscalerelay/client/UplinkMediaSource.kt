@@ -1,5 +1,6 @@
 package org.upscalerelay.client
 
+import org.upscalerelay.protocol.ChapterInfo
 import java.io.Closeable
 
 /** Encoded local-video metadata required by protocol v1 open_session. */
@@ -14,6 +15,9 @@ data class UplinkVideoInfo(
     val averageRateNumerator: Int?,
     val averageRateDenominator: Int?,
     val durationSeconds: Double?,
+    // Sent as open_session.file.chapters; the server echoes them back in
+    // session_opened so both playback sources read chapters the same way.
+    val chapters: List<ChapterInfo> = emptyList(),
 )
 
 data class UplinkAccessUnit(

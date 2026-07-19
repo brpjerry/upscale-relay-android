@@ -46,6 +46,27 @@ class MessagesTest {
     }
 
     @Test
+    fun `session chapters are parsed sorted with junk entries dropped`() {
+        val value = Json.parseToJsonElement(
+            """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"0123456789abcdef0123456789abcdef01","downlink_codec":"hevc","downlink_width":1920,"downlink_height":1080,"epoch":0,"chapters":[{"start_s":95.5,"end_s":null,"title":null},{"start_s":0.0,"end_s":95.5,"title":"Opening"},{"start_s":-2.0,"title":"bad"},{"title":"no start"},{"start_s":10.0,"title":""}]}""",
+        ).jsonObject
+        val chapters = SessionInfo.fromJson(value).chapters
+        assertEquals(3, chapters.size)
+        assertEquals(ChapterInfo(0.0, 95.5, "Opening"), chapters[0])
+        assertEquals(ChapterInfo(10.0, null, null), chapters[1]) // blank title dropped
+        assertEquals(ChapterInfo(95.5, null, null), chapters[2])
+    }
+
+    @Test
+    fun `missing or null chapters mean an empty list`() {
+        val base = """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1,"epoch":0"""
+        val absent = Json.parseToJsonElement("$base}").jsonObject
+        val explicitNull = Json.parseToJsonElement("""$base,"chapters":null}""").jsonObject
+        assertEquals(emptyList<ChapterInfo>(), SessionInfo.fromJson(absent).chapters)
+        assertEquals(emptyList<ChapterInfo>(), SessionInfo.fromJson(explicitNull).chapters)
+    }
+
+    @Test
     fun `structured quality options preserve labels and Android support`() {
         val value = Json.parseToJsonElement(
             """{"protocol_version":1,"server_name":"relay","models":[],"quality_tiers":["hevc-qp2","lossless-ffv1"],"quality_options":[{"id":"hevc-qp2","label":"HEVC ~350 Mbps","codec":"hevc","lossless":false,"android_supported":true,"p95_mbps":350},{"id":"lossless-ffv1","label":"Lossless FFV1","codec":"ffv1","lossless":true,"android_supported":false,"p95_mbps":null}]}""",

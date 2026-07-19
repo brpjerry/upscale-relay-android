@@ -38,6 +38,10 @@ class RelaySessionController(
     val failure: StateFlow<FailureDetail?> = mutableFailure.asStateFlow()
     private val mutableStats = MutableStateFlow(TransportStats())
     val stats: StateFlow<TransportStats> = mutableStats.asStateFlow()
+    private val mutableOpeningProgress = MutableStateFlow<String?>(null)
+
+    /** Server loading text while open_session runs (TensorRT engine build). */
+    val openingProgress: StateFlow<String?> = mutableOpeningProgress.asStateFlow()
     private val playerBuffer = AtomicReference(PlayerBufferSnapshot())
     private val closed = AtomicBoolean(false)
     private val currentEpoch = AtomicInteger(0)
@@ -63,6 +67,7 @@ class RelaySessionController(
         stateMachine.transition(SessionState.CONNECTING)
         return try {
             val channel = ControlChannel(host, port, ::fail)
+            channel.onOpeningProgress = { text -> mutableOpeningProgress.value = text }
             control = channel
             val caps = channel.connect(display)
             require(caps.protocolVersion == MediaFraming.PROTOCOL_VERSION) {
@@ -159,6 +164,8 @@ class RelaySessionController(
         } catch (error: Throwable) {
             fail(error)
             throw error
+        } finally {
+            mutableOpeningProgress.value = null
         }
     }
 
@@ -246,6 +253,8 @@ class RelaySessionController(
             if (uplink == null) source.closeQuietly()
             fail(error)
             throw error
+        } finally {
+            mutableOpeningProgress.value = null
         }
     }
 
