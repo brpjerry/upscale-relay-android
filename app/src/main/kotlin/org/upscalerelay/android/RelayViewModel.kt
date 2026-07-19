@@ -80,6 +80,26 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var localDocumentUri: String? = null
     private var localTreeUri: Uri? = null
     private var localDirectoryStack: List<Pair<Uri, String>> = emptyList()
+    // Provider-order listing of the current local directory; the UI list is
+    // re-derived from it whenever the sort preference changes.
+    private var localEntriesRaw: List<LocalDocumentEntry> = emptyList()
+    private var seekTargetSetAt = 0L
+    private var autoAdvanceJob: Job? = null
+
+    // Last browsed server-library directory, mirrored from DataStore so the
+    // first connect after an app restart can restore it.
+    private var persistedLibraryPath: String = ""
+
+    // First-visible item index/offset per browser list (keyed "server:<path>"
+    // or "local:<name>"), so leaving for the player and coming back — or
+    // reconnecting — lands on the same spot instead of the top.
+    private val listScrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+
+    fun savedListScroll(key: String): Pair<Int, Int> = listScrollPositions[key] ?: (0 to 0)
+
+    fun saveListScroll(key: String, index: Int, offset: Int) {
+        listScrollPositions[key] = index to offset
+    }
 
     // Phase 5: discovery, automatic reconnect/resume, and playback watchdogs.
     private val discovery = ServerDiscovery(application)
@@ -168,6 +188,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 mutableUi.value = mutableUi.value.copy(playerState = state)
+                if (state == MpvPlaybackState.ENDED) maybeAutoAdvance()
             }
         }
         val connectivity = application.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -204,6 +225,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         preferredSubtitle = value.preferredSubtitle,
                         diagnosticsVisible = value.diagnosticsVisible,
                         gesturesEnabled = value.gesturesEnabled,
+                        librarySort = LibrarySort.entries.firstOrNull { it.name == value.librarySort }
+                            ?: LibrarySort.NAME,
                         displayResampleSync = value.displayResampleSync,
                         interpolationEnabled = value.interpolationEnabled,
                         interpolationScaler = value.interpolationScaler,
@@ -221,6 +244,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 playbackPositions = value.playbackPositions
+                persistedLibraryPath = value.lastLibraryPath
                 syncFileLogging(value.fileLoggingEnabled)
                 playerEngine.setDeband(value.debandEnabled)
                 playerEngine.setVideoSyncPreferences(
@@ -436,6 +460,75 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         persist { preferences.setGesturesEnabled(value) }
     }
 
+    fun setLibrarySort(value: LibrarySort) {
+        if (mutableUi.value.librarySort == value) return
+        mutableUi.update { it.copy(librarySort = value) }
+        mutableUi.update { it.copy(localEntries = sortedLocalEntries(localEntriesRaw)) }
+        persist { preferences.setLibrarySort(value.name) }
+        refreshServerDirectoryForSort()
+    }
+
+    /**
+     * The GET /library sort key for the current preference, or null when the
+     * server predates sorting (its default name order applies).
+     */
+    private fun serverSortParam(): String? {
+        val keys = mutableUi.value.capabilities?.librarySortKeys.orEmpty()
+        val wanted = when (mutableUi.value.librarySort) {
+            LibrarySort.NAME -> "name"
+            LibrarySort.DATE -> "mtime"
+        }
+        return wanted.takeIf { it in keys }
+    }
+
+    private fun sortedLocalEntries(entries: List<LocalDocumentEntry>): List<LocalDocumentEntry> =
+        when (mutableUi.value.librarySort) {
+            LibrarySort.NAME -> entries.sortedWith(
+                compareByDescending<LocalDocumentEntry> { it.isDirectory }
+                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+            )
+            LibrarySort.DATE -> entries.sortedWith(
+                compareByDescending<LocalDocumentEntry> { it.isDirectory }
+                    .thenByDescending { it.lastModifiedMillis ?: 0L }
+                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+            )
+        }
+
+    /** Re-fetches the open server directory in the newly selected order. */
+    private fun refreshServerDirectoryForSort() {
+        val state = mutableUi.value
+        val directory = state.currentDirectory ?: return
+        val active = controller ?: return
+        if (state.capabilities?.hasLibrary != true || serverSortParam() == null) return
+        if (state.libraryLoading) return
+        mutableUi.update { it.copy(libraryLoading = true, error = null) }
+        viewModelScope.launch {
+            runCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
+                .onSuccess { page ->
+                    if (active !== controller) return@onSuccess
+                    mutableUi.update {
+                        it.copy(
+                            currentDirectory = page.directory,
+                            libraryRoot = if (directory.path.isEmpty()) page.directory else it.libraryRoot,
+                            libraryNextCursor = page.nextCursor,
+                            libraryLoading = false,
+                            selectedLibraryNode = null,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    if (active === controller) {
+                        mutableUi.update {
+                            it.copy(
+                                libraryLoading = false,
+                                error = "Could not re-sort the library: ${error.message}",
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
     fun clearRecents() {
         persist { preferences.clearRecents() }
     }
@@ -458,6 +551,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun connectInternal(host: String, port: Int) {
+        // Remember the directory that was open (exiting a video and manual
+        // reconnects both come through here) so it can be re-opened on the
+        // fresh connection instead of dumping the user at the library root.
+        // With no in-session directory (first connect after an app restart)
+        // the persisted last-browsed path takes its place.
+        val previousDirectoryPath = (mutableUi.value.currentDirectory?.path ?: persistedLibraryPath)
+            .takeIf { it.isNotEmpty() }
         // OkHttp's WebSocket close path may touch the socket synchronously.
         // Retrying therefore must not dispose the previous controller on the
         // Android main thread.
@@ -471,6 +571,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             paused = false,
             seeking = false,
             seekPreviewSeconds = null,
+            seekTargetSeconds = null,
             currentDirectory = null,
             capabilities = null,
             libraryRoot = null,
@@ -483,7 +584,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val next = RelaySessionController(host, port)
         controller = next
         collectController(next)
-        runCatching { next.connect(mutableUi.value.display) }
+        val rootSort = when (mutableUi.value.librarySort) {
+            LibrarySort.NAME -> "name"
+            LibrarySort.DATE -> "mtime"
+        }
+        runCatching { next.connect(mutableUi.value.display, rootSort) }
             .onSuccess { connected ->
                 val selectedModel = mutableUi.value.selectedModel.takeIf { selected ->
                     connected.capabilities.models.any { it.name == selected }
@@ -510,10 +615,70 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     preferences.setModel(selectedModel)
                     preferences.setQualityTier(selectedQuality)
                 }
+                if (previousDirectoryPath != null && connected.capabilities.hasLibrary) {
+                    mutableUi.update { it.copy(libraryLoading = true) }
+                    restoreServerDirectory(next, previousDirectoryPath)
+                    mutableUi.update { it.copy(libraryLoading = false) }
+                }
             }
             .onFailure { error ->
                 mutableUi.value = mutableUi.value.copy(busy = false, error = error.message)
             }
+    }
+
+    /**
+     * Re-opens the directory that was open before a reconnect, walking each
+     * path segment against the fresh library so the Up chain gets current
+     * listings. Any failed segment (the layout changed on the server) leaves
+     * the root listing shown — the pre-restore default.
+     */
+    private suspend fun restoreServerDirectory(active: RelaySessionController, path: String) {
+        val restored = runCatching {
+            var parent = mutableUi.value.currentDirectory ?: return
+            var parentCursor = mutableUi.value.libraryNextCursor
+            val stack = mutableListOf<LibraryNode>()
+            val cursors = mutableListOf<String?>()
+            var currentPath = ""
+            for (segment in path.split('/')) {
+                currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+                val page = active.fetchLibraryPage(currentPath, sort = serverSortParam())
+                stack += parent
+                cursors += parentCursor
+                parent = page.directory
+                parentCursor = page.nextCursor
+            }
+            // Page in enough children that the remembered scroll position
+            // exists again; LazyListState clamps if the list still ends up
+            // shorter than before.
+            val savedIndex = savedListScroll("server:$path").first
+            var extraPages = 0
+            while (parentCursor != null &&
+                parent.children.size <= savedIndex &&
+                extraPages < RESTORE_MAX_EXTRA_PAGES
+            ) {
+                val more = active.fetchLibraryPage(path, parentCursor, sort = serverSortParam())
+                parent = parent.copy(
+                    children = (parent.children + more.directory.children).distinctBy { it.path },
+                )
+                parentCursor = more.nextCursor
+                extraPages += 1
+            }
+            Triple(parent, stack.toList(), cursors.toList() to parentCursor)
+        }.getOrElse { error ->
+            AppLog.i(TAG, "library restore of '$path' fell back to root: ${error.message}")
+            return
+        }
+        if (active !== controller) return
+        val (directory, stack, cursorInfo) = restored
+        mutableUi.update {
+            it.copy(
+                currentDirectory = directory,
+                directoryStack = stack,
+                directoryCursorStack = cursorInfo.first,
+                libraryNextCursor = cursorInfo.second,
+                selectedLibraryNode = null,
+            )
+        }
     }
 
     fun openDirectory(directory: LibraryNode) {
@@ -524,7 +689,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val active = controller ?: return
         mutableUi.value = state.copy(libraryLoading = true, error = null)
         viewModelScope.launch {
-            runCatching { active.fetchLibraryPage(directory.path) }
+            runCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
                 .onSuccess { page ->
                     if (active !== controller) return@onSuccess
                     mutableUi.value = mutableUi.value.copy(
@@ -535,6 +700,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         libraryLoading = false,
                         selectedLibraryNode = null,
                     )
+                    persist { preferences.setLastLibraryPath(page.directory.path) }
                 }
                 .onFailure { error ->
                     if (active === controller) {
@@ -555,7 +721,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val active = controller ?: return
         mutableUi.value = state.copy(libraryLoading = true, error = null)
         viewModelScope.launch {
-            runCatching { active.fetchLibraryPage(directory.path, cursor) }
+            runCatching { active.fetchLibraryPage(directory.path, cursor, sort = serverSortParam()) }
                 .onSuccess { page ->
                     if (active !== controller || mutableUi.value.currentDirectory?.path != directory.path) {
                         return@onSuccess
@@ -600,6 +766,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             directoryCursorStack = mutableUi.value.directoryCursorStack.dropLast(1),
             selectedLibraryNode = null,
         )
+        persist { preferences.setLastLibraryPath(stack.last().path) }
     }
 
     fun openRecent(path: String) {
@@ -633,10 +800,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 val (tree, root, name) = rootInfo
                 localTreeUri = tree
                 localDirectoryStack = listOf(root to name)
+                localEntriesRaw = entries
                 mutableUi.value = mutableUi.value.copy(
                     busy = false,
                     localDirectoryName = name,
-                    localEntries = entries,
+                    localEntries = sortedLocalEntries(entries),
                     localCanGoUp = false,
                 )
                 persist { preferences.addRecentLocalRootUri(uriValue) }
@@ -663,10 +831,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { entries ->
                 localDirectoryStack = localDirectoryStack + (entry.uri.toUri() to entry.name)
+                localEntriesRaw = entries
                 mutableUi.value = mutableUi.value.copy(
                     busy = false,
                     localDirectoryName = entry.name,
-                    localEntries = entries,
+                    localEntries = sortedLocalEntries(entries),
                     localCanGoUp = true,
                 )
             }.onFailure { error ->
@@ -691,10 +860,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { entries ->
                 localDirectoryStack = nextStack
+                localEntriesRaw = entries
                 mutableUi.value = mutableUi.value.copy(
                     busy = false,
                     localDirectoryName = name,
-                    localEntries = entries,
+                    localEntries = sortedLocalEntries(entries),
                     localCanGoUp = nextStack.size > 1,
                 )
             }.onFailure { error ->
@@ -734,6 +904,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 playingPath = uriValue,
                 localPlayback = true,
                 directLocalFallback = false,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = null,
             )
             var bridge: LocalDocumentHttpServer? = null
             runCatching {
@@ -808,7 +980,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun openFile(file: LibraryNode) {
         if (file.type != LibraryNode.Type.FILE || mutableUi.value.busy) return
         viewModelScope.launch {
-            mutableUi.value = mutableUi.value.copy(busy = true, error = null, playingPath = file.path)
+            mutableUi.value = mutableUi.value.copy(
+                busy = true,
+                error = null,
+                playingPath = file.path,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = null,
+            )
             val currentController = requireNotNull(controller)
             runCatching {
                 // Setting playingPath asks the Activity to enter sensor
@@ -971,7 +1149,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 val duration = mutableUi.value.mpvMetrics.durationSeconds
                 val target = seconds.coerceIn(0.0, duration.takeIf { it > 0 } ?: Double.MAX_VALUE)
                 playerEngine.seekDirect(target)
-                mutableUi.value = mutableUi.value.copy(seekPreviewSeconds = null)
+                seekTargetSetAt = SystemClock.elapsedRealtime()
+                mutableUi.value = mutableUi.value.copy(
+                    seekPreviewSeconds = null,
+                    seekTargetSeconds = target,
+                )
                 return@launch
             }
             val currentController = controller ?: return@launch
@@ -982,7 +1164,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             }
             val targetSeconds = seconds.coerceIn(0.0, session.durationSeconds ?: Double.MAX_VALUE)
             val targetPts = (targetSeconds / timeBase.value).roundToLong()
-            mutableUi.value = mutableUi.value.copy(seeking = true, seekPreviewSeconds = null)
+            seekTargetSetAt = SystemClock.elapsedRealtime()
+            mutableUi.value = mutableUi.value.copy(
+                seeking = true,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = targetSeconds,
+            )
             AppLog.i(TAG, "seek to %.1fs".format(targetSeconds))
             try {
                 currentController.expectPlayerReload()
@@ -1015,6 +1202,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             mutableUi.value = mutableUi.value.copy(busy = true, endpoint = null, playingPath = null)
             activeOrigin = null
             reconnectExhausted = false
+            autoAdvanceJob?.cancelAndJoin()
+            autoAdvanceJob = null
             reconnectJob?.cancelAndJoin()
             reconnectJob = null
             restartJob?.cancelAndJoin()
@@ -1045,6 +1234,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val position = mutableUi.value.mpvMetrics.positionSeconds
         AppLog.i(TAG, "direct local fallback at %.1fs".format(position))
         viewModelScope.launch {
+            autoAdvanceJob?.cancelAndJoin()
+            autoAdvanceJob = null
             reconnectJob?.cancelAndJoin()
             reconnectJob = null
             restartJob?.cancelAndJoin()
@@ -1063,6 +1254,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 busy = false,
                 directLocalFallback = true,
                 paused = false,
+                seeking = false,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = null,
                 reconnecting = null,
                 performanceWarning = null,
             )
@@ -1074,6 +1268,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             activeOrigin = null
             reconnectExhausted = false
+            autoAdvanceJob?.cancelAndJoin()
+            autoAdvanceJob = null
             reconnectJob?.cancelAndJoin()
             reconnectJob = null
             restartJob?.cancelAndJoin()
@@ -1298,6 +1494,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 qualityTier = finalEndpoint.qualityTier,
                 paused = false,
                 seeking = false,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = null,
                 busy = false,
                 error = null,
                 performanceWarning = null,
@@ -1344,6 +1542,131 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 mutableUi.update {
                     it.copy(reconnecting = null, error = error.message ?: "Unable to apply the new settings.")
                 }
+            }
+        }
+    }
+
+    /**
+     * After a natural end-of-file, plays the next video file of the same
+     * directory in alphabetical order. Server files walk the library pages;
+     * local files walk the SAF directory the video was opened from.
+     */
+    private fun maybeAutoAdvance() {
+        val state = mutableUi.value
+        val origin = activeOrigin ?: return
+        if (state.playingPath == null || state.busy) return
+        if (state.directLocalFallback) return // the relay server is gone; stay on this file
+        if (reconnectJob?.isActive == true || restartJob?.isActive == true) return
+        if (seekJob?.isActive == true || autoAdvanceJob?.isActive == true) return
+        // Only a true end-of-file advances. A downlink that dies mid-file also
+        // surfaces as END_FILE, and that is the reconnect path's business.
+        val duration = state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds
+        if (duration <= 0 ||
+            state.mpvMetrics.positionSeconds < duration - AUTO_ADVANCE_END_WINDOW_SECONDS
+        ) {
+            return
+        }
+        autoAdvanceJob = viewModelScope.launch {
+            when (origin) {
+                is PlaybackOrigin.ServerFile -> {
+                    val active = controller ?: return@launch
+                    val parent =
+                        if ('/' in origin.path) origin.path.substringBeforeLast('/') else ""
+                    val next = runCatching { findNextServerFile(active, parent, origin.path) }
+                        .getOrNull() ?: return@launch
+                    startNextPlayback(
+                        origin = PlaybackOrigin.ServerFile(next.path),
+                        displayPath = next.path,
+                        local = false,
+                    )
+                }
+                is PlaybackOrigin.LocalDocument -> {
+                    val next = findNextLocalFile(origin.uriValue) ?: return@launch
+                    startNextPlayback(
+                        origin = PlaybackOrigin.LocalDocument(next.uri),
+                        displayPath = next.name,
+                        local = true,
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun findNextServerFile(
+        controller: RelaySessionController,
+        directory: String,
+        currentPath: String,
+    ): LibraryNode? {
+        var cursor: String? = null
+        var seenCurrent = false
+        repeat(AUTO_ADVANCE_MAX_PAGES) {
+            // Explicit name order regardless of the browse-sort preference:
+            // "the next video" after an episode means the alphabetical next.
+            val sort = "name".takeIf { it in mutableUi.value.capabilities?.librarySortKeys.orEmpty() }
+            val page = controller.fetchLibraryPage(directory, cursor, sort = sort)
+            for (child in page.directory.children) {
+                if (child.type != LibraryNode.Type.FILE) continue
+                if (seenCurrent) return child
+                if (child.path == currentPath) seenCurrent = true
+            }
+            cursor = page.nextCursor ?: return null
+        }
+        return null
+    }
+
+    private suspend fun findNextLocalFile(currentUri: String): LocalDocumentEntry? {
+        val tree = localTreeUri ?: return null
+        val directory = localDirectoryStack.lastOrNull()?.first ?: return null
+        val siblings = runCatching {
+            withContext(Dispatchers.IO) {
+                LocalDocumentBrowser.children(getApplication(), tree, directory)
+            }
+        }.getOrNull() ?: return null
+        val files = siblings.filterNot { it.isDirectory }
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+        val index = files.indexOfFirst { it.uri == currentUri }
+        if (index < 0 || index == files.lastIndex) return null
+        return files[index + 1]
+    }
+
+    private suspend fun startNextPlayback(
+        origin: PlaybackOrigin,
+        displayPath: String,
+        local: Boolean,
+    ) {
+        AppLog.i(TAG, "auto-advancing to '${displayPath.substringAfterLast('/')}'")
+        activeOrigin = origin
+        mutableUi.update {
+            it.copy(
+                playingPath = displayPath,
+                localPlayback = local,
+                directLocalFallback = false,
+                paused = false,
+                seeking = false,
+                seekPreviewSeconds = null,
+                seekTargetSeconds = null,
+                reconnecting = ReconnectStatus(1, 1, "Playing next video"),
+                error = null,
+            )
+        }
+        try {
+            restartPlayback(origin, 0.0)
+            mutableUi.update { it.copy(reconnecting = null) }
+            persist {
+                when (origin) {
+                    is PlaybackOrigin.ServerFile -> preferences.addRecent(origin.path)
+                    is PlaybackOrigin.LocalDocument -> preferences.addRecentLocalUri(origin.uriValue)
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            AppLog.e(TAG, "auto-advance failed: ${error.message}")
+            mutableUi.update {
+                it.copy(
+                    reconnecting = null,
+                    error = "Could not play the next video: ${error.message}",
+                )
             }
         }
     }
@@ -1572,6 +1895,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     PlayerBufferSnapshot(metrics.cacheDurationMillis, metrics.bitrateBitsPerSecond),
                 )
                 mutableUi.value = mutableUi.value.copy(mpvMetrics = metrics, tracks = tracks)
+                releaseSeekTargetIfCaughtUp(metrics)
                 metricsTickCount += 1
                 if (AppLog.active && metricsTickCount % 10 == 0L) {
                     val transport = value?.stats?.value
@@ -1599,6 +1923,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 writeDiagnostics(value?.stats?.value ?: TransportStats(), metrics)
                 delay(1_000)
             }
+        }
+    }
+
+    /**
+     * Hands the seek bar back to mpv once its reported position has caught up
+     * with the committed seek target (or the reload clearly went elsewhere).
+     */
+    private fun releaseSeekTargetIfCaughtUp(mpv: MpvMetrics) {
+        val target = mutableUi.value.seekTargetSeconds ?: return
+        if (mutableUi.value.seeking || seekJob?.isActive == true) return
+        val caughtUp = mutableUi.value.playerState == MpvPlaybackState.PLAYING &&
+            kotlin.math.abs(mpv.positionSeconds - target) < SEEK_TARGET_SNAP_SECONDS
+        val expired = SystemClock.elapsedRealtime() - seekTargetSetAt > SEEK_TARGET_TIMEOUT_MILLIS
+        if (caughtUp || expired) {
+            mutableUi.update { it.copy(seekTargetSeconds = null) }
         }
     }
 
@@ -1757,6 +2096,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { connectivity.unregisterNetworkCallback(callback) }
         }
         runBlocking(Dispatchers.IO) {
+            autoAdvanceJob?.cancelAndJoin()
             reconnectJob?.cancelAndJoin()
             restartJob?.cancelAndJoin()
             metricsJob?.cancelAndJoin()
@@ -1775,6 +2115,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val RESUME_MIN_SECONDS = 10.0
         private const val RESUME_END_WINDOW_SECONDS = 90.0
         private const val CHAPTER_RESTART_THRESHOLD_SECONDS = 3.0
+        private const val SEEK_TARGET_SNAP_SECONDS = 8.0
+        private const val SEEK_TARGET_TIMEOUT_MILLIS = 15_000L
+        private const val AUTO_ADVANCE_END_WINDOW_SECONDS = 60.0
+        private const val AUTO_ADVANCE_MAX_PAGES = 20
+        private const val RESTORE_MAX_EXTRA_PAGES = 10
     }
 
     private fun persist(block: suspend () -> Unit) {
@@ -1783,6 +2128,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 enum class TabletDestination { SERVER, LOCAL, RECENT, SETTINGS }
+
+/** File-picker ordering: alphabetical, or newest first by modification time. */
+enum class LibrarySort { NAME, DATE }
 
 data class RelayUiState(
     val host: String = "192.168.0.115",
@@ -1812,6 +2160,10 @@ data class RelayUiState(
     val paused: Boolean = false,
     val seeking: Boolean = false,
     val seekPreviewSeconds: Double? = null,
+    // The last committed seek target. Keeps the seek bar at the user's chosen
+    // position while the relay session restarts, instead of mirroring mpv's
+    // transient 0:00 during the reload.
+    val seekTargetSeconds: Double? = null,
     val tracks: List<MpvTrack> = emptyList(),
     val preferencesLoaded: Boolean = false,
     val destination: TabletDestination = TabletDestination.SERVER,
@@ -1822,6 +2174,7 @@ data class RelayUiState(
     val preferredSubtitle: String = "",
     val diagnosticsVisible: Boolean = false,
     val gesturesEnabled: Boolean = true,
+    val librarySort: LibrarySort = LibrarySort.NAME,
     val recentPaths: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),

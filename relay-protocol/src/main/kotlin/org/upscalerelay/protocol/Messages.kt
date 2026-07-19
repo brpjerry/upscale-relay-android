@@ -52,6 +52,8 @@ data class Capabilities(
     val hasLibrary: Boolean,
     val resizeAlgorithms: List<String>,
     val defaultResizeAlgorithm: String,
+    /** Sort keys GET /library accepts ("name", "mtime"); empty on old servers. */
+    val librarySortKeys: List<String> = emptyList(),
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -98,6 +100,8 @@ data class Capabilities(
                     ?.map { it.jsonPrimitive.content } ?: listOf("lanczos"),
                 defaultResizeAlgorithm = value["default_resize_algorithm"]
                     ?.jsonPrimitive?.content ?: "lanczos",
+                librarySortKeys = value["library_sort"]?.jsonArray
+                    ?.map { it.jsonPrimitive.content } ?: emptyList(),
             )
         }
     }
