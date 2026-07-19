@@ -9,10 +9,12 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,12 +30,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -51,7 +55,9 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SortByAlpha
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
@@ -60,11 +66,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -74,7 +82,6 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -95,13 +102,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -201,6 +213,29 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+/**
+ * A LazyListState whose scroll position outlives the composable: it is seeded
+ * from and saved back to the view model, so opening the player (which removes
+ * the browser from composition) or reconnecting does not reset the list.
+ */
+@Composable
+private fun rememberPersistedListState(viewModel: RelayViewModel, key: String): LazyListState {
+    val listState = remember(key) {
+        val (index, offset) = viewModel.savedListScroll(key)
+        LazyListState(index, offset)
+    }
+    DisposableEffect(key) {
+        onDispose {
+            viewModel.saveListScroll(
+                key,
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
+        }
+    }
+    return listState
 }
 
 /** True for phone-sized windows; the shell swaps rail for a bottom bar. */
@@ -335,7 +370,9 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
             ) { Text("Choose folder") }
         }
         Spacer(Modifier.height(20.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val localListState =
+            rememberPersistedListState(viewModel, "local:${state.localDirectoryName.orEmpty()}")
+        LazyColumn(state = localListState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.localDirectoryName?.let { directoryName ->
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -344,7 +381,18 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
                                 Text("← Up")
                             }
                         }
-                        Text(directoryName, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            directoryName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SortToggle(
+                            sort = state.librarySort,
+                            enabled = !state.busy,
+                            onChange = viewModel::setLibrarySort,
+                        )
                     }
                 }
                 if (state.localEntries.isEmpty()) {
@@ -506,10 +554,21 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
+            // Date order needs server-side support; old servers only sort by
+            // name, so the toggle is hidden rather than silently wrong.
+            if ("mtime" in state.capabilities?.librarySortKeys.orEmpty()) {
+                SortToggle(
+                    sort = state.librarySort,
+                    enabled = !state.busy && !state.libraryLoading,
+                    onChange = viewModel::setLibrarySort,
+                )
+            }
         }
         Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val listState = rememberPersistedListState(viewModel, "server:${directory.path}")
+        LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(directory.children, key = { it.path }) { node ->
                 LibraryItem(
                     node = node,
@@ -532,6 +591,31 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
                 }
             }
         }
+    }
+}
+
+/** Two-way switch between alphabetical and newest-first file ordering. */
+@Composable
+private fun SortToggle(sort: LibrarySort, enabled: Boolean, onChange: (LibrarySort) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = sort == LibrarySort.NAME,
+            onClick = { onChange(LibrarySort.NAME) },
+            enabled = enabled,
+            label = { Text("A–Z") },
+            leadingIcon = {
+                Icon(Icons.Outlined.SortByAlpha, contentDescription = null, Modifier.size(18.dp))
+            },
+        )
+        FilterChip(
+            selected = sort == LibrarySort.DATE,
+            onClick = { onChange(LibrarySort.DATE) },
+            enabled = enabled,
+            label = { Text("Newest") },
+            leadingIcon = {
+                Icon(Icons.Outlined.Schedule, contentDescription = null, Modifier.size(18.dp))
+            },
+        )
     }
 }
 
@@ -954,7 +1038,10 @@ private fun PlayerScreen(
     var chapterSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
     val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds).coerceAtLeast(0.0)
-    val position = (state.seekPreviewSeconds ?: state.mpvMetrics.positionSeconds)
+    // Show what the user asked for, not what the pipeline momentarily reports:
+    // an active scrub wins, then a committed-but-still-restarting seek target,
+    // and only then mpv's own clock.
+    val position = (state.seekPreviewSeconds ?: state.seekTargetSeconds ?: state.mpvMetrics.positionSeconds)
         .coerceIn(0.0, duration.coerceAtLeast(0.001))
 
     // Back always returns to the library — including from the ENDED state,
@@ -1041,9 +1128,6 @@ private fun PlayerScreen(
                     .padding(16.dp),
             )
         }
-        if (state.diagnosticsVisible && controlsVisible && !controlsLocked) {
-            DiagnosticsOverlay(state, Modifier.align(Alignment.CenterStart))
-        }
         gestureMessage?.let { message ->
             Surface(
                 modifier = Modifier.align(Alignment.Center),
@@ -1066,6 +1150,7 @@ private fun PlayerScreen(
                         progress,
                         color = Color.LightGray,
                         style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 48.dp),
                     )
                 }
@@ -1080,10 +1165,17 @@ private fun PlayerScreen(
                 shape = MaterialTheme.shapes.large,
             ) {
                 Row(
-                    Modifier.padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(warning, color = Color(0xffffdf9e), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        warning,
+                        color = Color(0xffffdf9e),
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
                     TextButton(onClick = viewModel::dismissPerformanceWarning) {
                         Text("Dismiss", color = Color.White)
                     }
@@ -1272,81 +1364,245 @@ private fun PlayerChrome(
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xee000000))))
                 .navigationBarsPadding()
-                .padding(horizontal = 36.dp, vertical = 20.dp),
+                .padding(horizontal = 36.dp, vertical = 18.dp),
         ) {
-            Box(Modifier.fillMaxWidth()) {
-                Slider(
-                    value = position.toFloat(),
-                    onValueChange = { viewModel.previewSeek(it.toDouble()) },
-                    onValueChangeFinished = viewModel::commitSeek,
-                    valueRange = 0f..duration.coerceAtLeast(0.001).toFloat(),
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(formatTime(position), color = Color.White, style = MaterialTheme.typography.labelLarge)
+                PlayerSeekBar(
+                    position = position,
+                    duration = duration,
+                    chapters = chapters,
                     enabled = duration > 0,
+                    onScrub = { viewModel.previewSeek(it) },
+                    onScrubFinished = viewModel::commitSeek,
+                    onScrubCancelled = viewModel::cancelSeekPreview,
+                    modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
                 )
-                if (chapters.isNotEmpty() && duration > 0) {
-                    // Chapter boundaries as ticks over the seek bar (drawn on
-                    // top like mpv's OSC markers; touch stays with the Slider).
-                    Canvas(Modifier.matchParentSize()) {
-                        val tick = Color.White.copy(alpha = 0.65f)
-                        chapters.forEach { chapter ->
-                            val fraction = chapter.startSeconds / duration
-                            if (fraction <= 0.0 || fraction >= 1.0) return@forEach
-                            drawRect(
-                                color = tick,
-                                topLeft = Offset(
-                                    (fraction * size.width).toFloat() - 1.dp.toPx() / 2,
-                                    size.height / 2 - 5.dp.toPx(),
-                                ),
-                                size = androidx.compose.ui.geometry.Size(1.dp.toPx(), 10.dp.toPx()),
+                Text(formatTime(duration), color = Color.White, style = MaterialTheme.typography.labelLarge)
+            }
+            Spacer(Modifier.height(4.dp))
+            // A Box keeps the transport cluster truly centered: with weight
+            // spacers, uneven side content pushed it off-center.
+            Box(Modifier.fillMaxWidth()) {
+                currentChapter?.let { chapter ->
+                    Row(
+                        Modifier.align(Alignment.CenterStart).fillMaxWidth(0.26f),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.Toc,
+                            contentDescription = null,
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            chapter.title ?: "Chapter ${chapters.indexOf(chapter) + 1}",
+                            color = Color.LightGray,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Row(
+                    Modifier.align(Alignment.Center),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    if (chapters.isNotEmpty()) {
+                        PlayerRoundButton(Icons.Filled.SkipPrevious, "Previous chapter") {
+                            viewModel.chapterStep(-1)
+                        }
+                    }
+                    PlayerRoundButton(Icons.Filled.Replay10, "Back 10 seconds") {
+                        viewModel.seekRelative(-10.0)
+                    }
+                    FilledIconButton(
+                        onClick = viewModel::togglePaused,
+                        enabled = !state.seeking,
+                        modifier = Modifier.size(64.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = Color.White,
+                            contentColor = Color.Black,
+                            disabledContainerColor = Color.White.copy(alpha = 0.7f),
+                            disabledContentColor = Color.Black,
+                        ),
+                    ) {
+                        if (state.seeking) {
+                            CircularProgressIndicator(
+                                Modifier.size(26.dp),
+                                color = Color.Black,
+                                strokeWidth = 2.5.dp,
                             )
+                        } else {
+                            Icon(
+                                if (state.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                                contentDescription = if (state.paused) "Play" else "Pause",
+                                modifier = Modifier.size(34.dp),
+                            )
+                        }
+                    }
+                    PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds") {
+                        viewModel.seekRelative(10.0)
+                    }
+                    if (chapters.isNotEmpty()) {
+                        PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter") {
+                            viewModel.chapterStep(1)
                         }
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(formatTime(position), color = Color.White)
-                currentChapter?.let { chapter ->
-                    Text(
-                        "  ·  ${chapter.title ?: "Chapter ${chapters.indexOf(chapter) + 1}"}",
-                        color = Color.LightGray,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+            if (state.diagnosticsVisible) {
+                Text(
+                    diagnosticsLine(state),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    color = Color.White.copy(alpha = 0.55f),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerRoundButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+    FilledTonalIconButton(
+        onClick = onClick,
+        modifier = Modifier.size(48.dp),
+        colors = IconButtonDefaults.filledTonalIconButtonColors(
+            containerColor = Color.White.copy(alpha = 0.14f),
+            contentColor = Color.White,
+        ),
+    ) {
+        Icon(icon, contentDescription = description)
+    }
+}
+
+/**
+ * Intent-first scrub bar: a rounded track with an accent-gradient elapsed
+ * segment, chapter dots, and a grow-on-touch thumb with a time bubble. All
+ * values render from the caller's `position`, which already prefers the
+ * user's scrub/seek target over raw player state.
+ */
+@Composable
+private fun PlayerSeekBar(
+    position: Double,
+    duration: Double,
+    chapters: List<ChapterInfo>,
+    enabled: Boolean,
+    onScrub: (Double) -> Unit,
+    onScrubFinished: () -> Unit,
+    onScrubCancelled: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var dragging by remember { mutableStateOf(false) }
+    var barWidthPx by remember { mutableStateOf(0) }
+    var bubbleWidthPx by remember { mutableStateOf(0) }
+    val accent = MaterialTheme.colorScheme.primary
+    val accentBright = lerp(accent, Color.White, 0.4f)
+    val trackHeight by animateDpAsState(if (dragging) 6.dp else 4.dp, label = "seekTrackHeight")
+    val thumbRadius by animateDpAsState(if (dragging) 9.dp else 6.dp, label = "seekThumbRadius")
+    val fraction = if (duration > 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f
+
+    fun secondsAt(x: Float): Double {
+        if (duration <= 0 || barWidthPx <= 0) return 0.0
+        return (x / barWidthPx).coerceIn(0f, 1f) * duration
+    }
+
+    Box(
+        modifier
+            .height(44.dp)
+            .onSizeChanged { barWidthPx = it.width }
+            .pointerInput(enabled, duration) {
+                if (!enabled) return@pointerInput
+                detectTapGestures { offset ->
+                    onScrub(secondsAt(offset.x))
+                    onScrubFinished()
+                }
+            }
+            .pointerInput(enabled, duration) {
+                if (!enabled) return@pointerInput
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        dragging = true
+                        onScrub(secondsAt(offset.x))
+                    },
+                    onHorizontalDrag = { change, _ ->
+                        change.consume()
+                        onScrub(secondsAt(change.position.x))
+                    },
+                    onDragEnd = {
+                        dragging = false
+                        onScrubFinished()
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        onScrubCancelled()
+                    },
+                )
+            },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val cy = size.height / 2f
+            val stroke = trackHeight.toPx()
+            val thumbX = fraction * size.width
+            drawLine(
+                color = Color.White.copy(alpha = 0.22f),
+                start = Offset(0f, cy),
+                end = Offset(size.width, cy),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+            if (thumbX > 0f) {
+                drawLine(
+                    brush = Brush.horizontalGradient(listOf(accent, accentBright)),
+                    start = Offset(0f, cy),
+                    end = Offset(thumbX, cy),
+                    strokeWidth = stroke,
+                    cap = StrokeCap.Round,
+                )
+            }
+            if (duration > 0) {
+                chapters.forEach { chapter ->
+                    val chapterFraction = (chapter.startSeconds / duration).toFloat()
+                    if (chapterFraction <= 0f || chapterFraction >= 1f) return@forEach
+                    val x = chapterFraction * size.width
+                    drawCircle(
+                        color = if (x <= thumbX) Color.Black.copy(alpha = 0.45f)
+                        else Color.White.copy(alpha = 0.85f),
+                        radius = 1.6.dp.toPx(),
+                        center = Offset(x, cy),
                     )
                 }
-                Spacer(Modifier.weight(1f))
-                if (chapters.isNotEmpty()) {
-                    FilledTonalButton(onClick = { viewModel.chapterStep(-1) }) {
-                        Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous chapter")
-                    }
-                    Spacer(Modifier.width(16.dp))
-                }
-                FilledTonalButton(onClick = { viewModel.seekRelative(-10.0) }) {
-                    Icon(Icons.Filled.Replay10, contentDescription = "Back 10 seconds")
-                }
-                Spacer(Modifier.width(16.dp))
-                Button(onClick = viewModel::togglePaused, enabled = !state.seeking, modifier = Modifier.heightIn(min = 56.dp)) {
-                    Icon(
-                        if (state.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
-                        contentDescription = if (state.paused) "Play" else "Pause",
-                    )
-                }
-                Spacer(Modifier.width(16.dp))
-                FilledTonalButton(onClick = { viewModel.seekRelative(10.0) }) {
-                    Icon(Icons.Filled.Forward10, contentDescription = "Forward 10 seconds")
-                }
-                if (chapters.isNotEmpty()) {
-                    Spacer(Modifier.width(16.dp))
-                    FilledTonalButton(onClick = { viewModel.chapterStep(1) }) {
-                        Icon(Icons.Filled.SkipNext, contentDescription = "Next chapter")
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                if (state.seeking) {
-                    CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
-                    Spacer(Modifier.width(12.dp))
-                }
-                Text(formatTime(duration), color = Color.White)
+            }
+            val radius = thumbRadius.toPx()
+            if (dragging) {
+                drawCircle(Color.White.copy(alpha = 0.25f), radius * 2f, Offset(thumbX, cy))
+            }
+            drawCircle(Color.White, radius, Offset(thumbX, cy))
+        }
+        if (dragging) {
+            val bubbleX = (fraction * barWidthPx - bubbleWidthPx / 2f)
+                .coerceIn(0f, (barWidthPx - bubbleWidthPx).coerceAtLeast(0).toFloat())
+                .roundToInt()
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .offset { IntOffset(bubbleX, -36.dp.roundToPx()) }
+                    .onSizeChanged { bubbleWidthPx = it.width },
+                color = Color(0xee1c1e22),
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Text(
+                    formatTime(position),
+                    Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                )
             }
         }
     }
@@ -1588,22 +1844,17 @@ private fun PlayerError(
     }
 }
 
-@Composable
-private fun DiagnosticsOverlay(state: RelayUiState, modifier: Modifier = Modifier) {
+/** Compact one-line diagnostics summary shown under the player controls. */
+private fun diagnosticsLine(state: RelayUiState): String {
     val mpv = state.mpvMetrics
     val transport = state.transportStats
-    val text = buildString {
-        appendLine("${state.sessionState} / ${state.playerState}")
-        appendLine("hwdec=${mpv.hardwareDecoder.ifEmpty { "pending" }}  ${mpv.codedWidth}×${mpv.codedHeight}")
-        appendLine("rx=${format(transport.averageMegabitsPerSecond)} Mbps  cache=${mpv.cacheDurationMillis} ms")
-        append("drops=${mpv.outputDroppedFrames}/${mpv.decoderDroppedFrames}  av=${format(mpv.avSyncSeconds * 1000)} ms")
-    }
-    Text(
-        text = text,
-        modifier = modifier.background(Color(0xbb000000)).padding(12.dp),
-        color = Color.White,
-        style = MaterialTheme.typography.bodySmall,
-    )
+    return "${state.sessionState}/${state.playerState}" +
+        " · hwdec ${mpv.hardwareDecoder.ifEmpty { "pending" }}" +
+        " · ${mpv.codedWidth}×${mpv.codedHeight}" +
+        " · rx ${format(transport.averageMegabitsPerSecond)} Mbps" +
+        " · cache ${mpv.cacheDurationMillis} ms" +
+        " · drops ${mpv.outputDroppedFrames}/${mpv.decoderDroppedFrames}" +
+        " · av ${format(mpv.avSyncSeconds * 1000)} ms"
 }
 
 private fun format(value: Double): String = String.format(Locale.US, "%.1f", value)

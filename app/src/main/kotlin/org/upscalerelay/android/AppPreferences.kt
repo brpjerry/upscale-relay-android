@@ -34,7 +34,9 @@ data class AppPreferences(
     val interpolationScaler: String = "oversample",
     val backgroundPlayback: Boolean = true,
     val fileLoggingEnabled: Boolean = false,
+    val librarySort: String = "NAME",
     val lastDestination: String = "",
+    val lastLibraryPath: String = "",
     val recentPaths: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),
@@ -68,7 +70,9 @@ class AppPreferencesStore(context: Context) {
     suspend fun setInterpolationScaler(value: String) = set(Keys.INTERPOLATION_SCALER, value)
     suspend fun setBackgroundPlayback(value: Boolean) = set(Keys.BACKGROUND_PLAYBACK, value)
     suspend fun setFileLoggingEnabled(value: Boolean) = set(Keys.FILE_LOGGING, value)
+    suspend fun setLibrarySort(value: String) = set(Keys.LIBRARY_SORT, value)
     suspend fun setLastDestination(value: String) = set(Keys.LAST_DESTINATION, value)
+    suspend fun setLastLibraryPath(value: String) = set(Keys.LAST_LIBRARY_PATH, value)
 
     suspend fun addRecent(path: String) {
         dataStore.edit { preferences ->
@@ -140,7 +144,9 @@ class AppPreferencesStore(context: Context) {
         interpolationScaler = preferences[Keys.INTERPOLATION_SCALER] ?: "oversample",
         backgroundPlayback = preferences[Keys.BACKGROUND_PLAYBACK] ?: true,
         fileLoggingEnabled = preferences[Keys.FILE_LOGGING] ?: false,
+        librarySort = preferences[Keys.LIBRARY_SORT] ?: "NAME",
         lastDestination = preferences[Keys.LAST_DESTINATION].orEmpty(),
+        lastLibraryPath = preferences[Keys.LAST_LIBRARY_PATH].orEmpty(),
         recentPaths = decodeRecents(preferences[Keys.RECENTS].orEmpty()),
         recentLocalUris = decodeRecents(preferences[Keys.LOCAL_RECENTS].orEmpty()),
         recentLocalRootUris = decodeRecents(preferences[Keys.LOCAL_ROOT_RECENTS].orEmpty()),
@@ -166,7 +172,9 @@ class AppPreferencesStore(context: Context) {
         val INTERPOLATION_SCALER = stringPreferencesKey("interpolation_scaler")
         val BACKGROUND_PLAYBACK = booleanPreferencesKey("background_playback")
         val FILE_LOGGING = booleanPreferencesKey("file_logging_enabled")
+        val LIBRARY_SORT = stringPreferencesKey("library_sort")
         val LAST_DESTINATION = stringPreferencesKey("last_destination")
+        val LAST_LIBRARY_PATH = stringPreferencesKey("last_library_path")
         val RECENTS = stringPreferencesKey("recent_paths")
         val LOCAL_RECENTS = stringPreferencesKey("recent_local_uris")
         val LOCAL_ROOT_RECENTS = stringPreferencesKey("recent_local_root_uris")

@@ -82,11 +82,13 @@ internal class ControlChannel(
         path: String = "",
         cursor: String? = null,
         limit: Int = 100,
+        sort: String? = null,
     ): LibraryPage {
         val url = httpUrl("library").newBuilder()
             .addQueryParameter("path", path)
             .addQueryParameter("limit", limit.toString())
             .apply { if (cursor != null) addQueryParameter("cursor", cursor) }
+            .apply { if (sort != null) addQueryParameter("sort", sort) }
             .build()
         val request = Request.Builder().url(url).build()
         return deadline(30_000, "GET /library") {

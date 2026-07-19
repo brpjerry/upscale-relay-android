@@ -63,7 +63,7 @@ class RelaySessionController(
     private var activeResizeAlgorithm: String? = null
     private var originalMediaUrl: String? = null
 
-    suspend fun connect(display: DisplaySize): ConnectedLibrary {
+    suspend fun connect(display: DisplaySize, librarySort: String? = null): ConnectedLibrary {
         check(!closed.get())
         stateMachine.transition(SessionState.CONNECTING)
         return try {
@@ -75,7 +75,9 @@ class RelaySessionController(
                 "server protocol v${caps.protocolVersion} is not supported"
             }
             require("lossless-hevc" in caps.qualityTiers) { "server does not support lossless-hevc" }
-            val page = if (caps.hasLibrary) channel.fetchLibrary() else LibraryPage(
+            // Only pass a sort the server advertises; old servers get defaults.
+            val rootSort = librarySort?.takeIf { it in caps.librarySortKeys }
+            val page = if (caps.hasLibrary) channel.fetchLibrary(sort = rootSort) else LibraryPage(
                 directory = LibraryNode(
                     type = LibraryNode.Type.DIRECTORY,
                     name = "Server library unavailable",
@@ -96,8 +98,9 @@ class RelaySessionController(
         path: String,
         cursor: String? = null,
         limit: Int = LIBRARY_PAGE_SIZE,
+        sort: String? = null,
     ): LibraryPage = requireNotNull(control) { "not connected" }
-        .fetchLibrary(path, cursor, limit)
+        .fetchLibrary(path, cursor, limit, sort)
 
     suspend fun preparePlayback(
         path: String,
