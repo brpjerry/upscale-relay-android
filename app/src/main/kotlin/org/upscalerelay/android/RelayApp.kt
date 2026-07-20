@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.os.Build
 import android.media.AudioManager
 import android.content.Intent
 import androidx.activity.compose.BackHandler
@@ -40,6 +41,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -88,6 +90,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -125,6 +129,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
+import org.upscalerelay.player.mpv.MpvPlaybackState
 import org.upscalerelay.player.mpv.MpvSurfaceView
 import org.upscalerelay.player.mpv.MpvTrack
 import org.upscalerelay.protocol.ChapterInfo
@@ -141,7 +146,19 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
     LandscapePlaybackOrientation(active = playing && !inPictureInPicture)
     SystemBars(dark = dark, immersive = playing)
 
-    MaterialTheme(colorScheme = if (dark) phaseThreeDarkColors() else phaseThreeLightColors()) {
+    // Material You on Android 12+: take the palette from the system so the
+    // app matches the rest of the device. The static schemes below are the
+    // pre-12 fallback; they only overrode four roles, which left every other
+    // surface on Material's purple-tinted baseline — the source of the odd
+    // near-white shades.
+    val themeContext = LocalContext.current
+    val colorScheme = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (dark) dynamicDarkColorScheme(themeContext) else dynamicLightColorScheme(themeContext)
+        dark -> phaseThreeDarkColors()
+        else -> phaseThreeLightColors()
+    }
+    MaterialTheme(colorScheme = colorScheme) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
@@ -162,15 +179,27 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
 private fun phaseThreeDarkColors(): ColorScheme = darkColorScheme(
     primary = Color(0xff9ecaff),
     secondary = Color(0xffb8c8dc),
+    background = Color(0xff111418),
     surface = Color(0xff111418),
     surfaceVariant = Color(0xff252a31),
+    surfaceContainerLowest = Color(0xff0c0f12),
+    surfaceContainerLow = Color(0xff181c21),
+    surfaceContainer = Color(0xff1c2127),
+    surfaceContainerHigh = Color(0xff262b32),
+    surfaceContainerHighest = Color(0xff30363e),
 )
 
 private fun phaseThreeLightColors() = lightColorScheme(
     primary = Color(0xff245f99),
     secondary = Color(0xff4f6072),
+    background = Color(0xfff8f9fd),
     surface = Color(0xfff8f9fd),
     surfaceVariant = Color(0xffe8edf4),
+    surfaceContainerLowest = Color(0xffffffff),
+    surfaceContainerLow = Color(0xfff2f4f9),
+    surfaceContainer = Color(0xffecEff6),
+    surfaceContainerHigh = Color(0xffe6e9f0),
+    surfaceContainerHighest = Color(0xffe0e4eb),
 )
 
 @Composable
@@ -626,7 +655,10 @@ private fun ConnectPanel(viewModel: RelayViewModel, state: RelayUiState) {
             Modifier.fillMaxWidth(if (isCompactWidth()) 1f else 0.72f),
             colors = CardDefaults.cardColors(),
         ) {
-            Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                Modifier.fillMaxWidth().padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Text("Connect to your relay", style = MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -1127,6 +1159,30 @@ private fun PlayerScreen(
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(16.dp),
             )
+        }
+        // Buffering indicator: mpv is starved (mid-play rebuffer) or still
+        // loading after a seek/reload. Independent of the controls layer so
+        // stalls are visible even with the chrome hidden. The pre-endpoint
+        // phase has its own "Preparing" overlay below.
+        val buffering = state.endpoint != null && state.error == null &&
+            state.reconnecting == null && !state.paused &&
+            (
+                state.mpvMetrics.pausedForCache ||
+                    state.playerState == MpvPlaybackState.LOADING ||
+                    state.playerState == MpvPlaybackState.LOADED
+                )
+        if (buffering) {
+            Surface(
+                modifier = Modifier.align(Alignment.Center),
+                color = Color(0x66000000),
+                shape = CircleShape,
+            ) {
+                CircularProgressIndicator(
+                    Modifier.padding(18.dp).size(44.dp),
+                    color = Color.White,
+                    strokeWidth = 4.dp,
+                )
+            }
         }
         gestureMessage?.let { message ->
             Surface(
@@ -1791,10 +1847,19 @@ private fun ReconnectOverlay(
 ) {
     Box(Modifier.fillMaxSize().background(Color(0x88000000)), contentAlignment = Alignment.Center) {
         Card(Modifier.fillMaxWidth(0.55f)) {
-            Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            // fillMaxWidth so the content centers in the card; a wrap-width
+            // Column would hug the card's left edge.
+            Column(
+                Modifier.fillMaxWidth().padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(16.dp))
-                Text(status.reason, style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    status.reason,
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     if (status.maxAttempts > 1) {
@@ -1804,6 +1869,7 @@ private fun ReconnectOverlay(
                         "Restarting playback at the current position."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(24.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1827,10 +1893,13 @@ private fun PlayerError(
 ) {
     Box(Modifier.fillMaxSize().background(Color(0xaa000000)), contentAlignment = Alignment.Center) {
         Card(Modifier.fillMaxWidth(0.55f)) {
-            Column(Modifier.padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                Modifier.fillMaxWidth().padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Text("Playback failed", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(12.dp))
-                Text(message)
+                Text(message, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(24.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton(onClick = onBack) { Text("Back to library") }
