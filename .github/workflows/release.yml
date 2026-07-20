@@ -44,5 +44,5 @@ jobs:
           gh release create "$TAG" \
             --title "Upscale Relay Android $TAG" \
             --generate-notes \
-            --notes "Adds paginated, on-demand remote-library browsing with per-directory loading, cursor-preserving navigation, and a Load more progress state. Relay playback now disables mpv's network read timeout for the private loopback stream so long user pauses do not abandon video. Requires the v0.9 paginated server-library API; legacy full-tree servers are no longer supported. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
+            --notes "Files with saved playback history now show a watch percentage and last-played time in the server library, local browser, and both recents lists; fully watched files stay pinned at 100% instead of losing their history. The number of files that keep watch history is configurable in Settings (50-1000, default 50). Existing resume points migrate in place and gain labels the next time each file plays. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
             dist/*.apk

@@ -20,16 +20,39 @@ class PhaseThreeStateTest {
     @Test
     fun `playback positions round-trip with awkward keys and stay bounded`() {
         val positions = linkedMapOf(
-            "server:Shows/A, B=1 [x].mkv" to 123.45,
-            "local:content://provider/tree/primary%3AMovies/doc/a b.mkv" to 6.0,
+            "server:Shows/A, B=1 [x].mkv" to PlaybackProgress(123.45, 3600.0, 1_721_000_000_000L),
+            "local:content://provider/tree/primary%3AMovies/doc/a b.mkv" to PlaybackProgress(6.0),
         )
         assertEquals(positions, decodePositions(encodePositions(positions)))
 
-        val many = LinkedHashMap<String, Double>()
-        (1..MAX_POSITIONS + 10).forEach { many["file-$it"] = it.toDouble() }
+        val many = LinkedHashMap<String, PlaybackProgress>()
+        (1..MAX_POSITIONS + 10).forEach { many["file-$it"] = PlaybackProgress(it.toDouble()) }
         assertEquals(MAX_POSITIONS, decodePositions(encodePositions(many)).size)
-        assertEquals(emptyMap<String, Double>(), decodePositions(""))
-        assertEquals(emptyMap<String, Double>(), decodePositions("corrupt line without separator"))
+        assertEquals(emptyMap<String, PlaybackProgress>(), decodePositions(""))
+        assertEquals(
+            emptyMap<String, PlaybackProgress>(),
+            decodePositions("corrupt line without separator"),
+        )
+    }
+
+    @Test
+    fun `decode honours a configurable history limit`() {
+        val many = LinkedHashMap<String, PlaybackProgress>()
+        (1..MAX_POSITIONS + 70).forEach { many["file-$it"] = PlaybackProgress(it.toDouble()) }
+        val encoded = encodePositions(many)
+        assertEquals(MAX_POSITIONS + 70, decodePositions(encoded, MAX_POSITIONS_LIMIT).size)
+        assertEquals(10, decodePositions(encoded, 10).size)
+        // Insertion order is most recent first, so a lower limit keeps the newest.
+        assertEquals("file-1", decodePositions(encoded, 10).keys.first())
+    }
+
+    @Test
+    fun `legacy two-field position lines decode with unknown duration and timestamp`() {
+        val separator = Char(31)
+        assertEquals(
+            mapOf("server:old.mkv" to PlaybackProgress(42.5)),
+            decodePositions("server:old.mkv${separator}42.5"),
+        )
     }
 
     @Test
