@@ -86,6 +86,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var seekTargetSetAt = 0L
     private var autoAdvanceJob: Job? = null
 
+    // Automatic reconnect for the browse screen: armed each time a control
+    // connection reaches BROWSING, spent on the first reconnect attempt so a
+    // dead server cannot cause a retry storm. Playback has its own loop.
+    private var browseReconnectJob: Job? = null
+    private var browseReconnectArmed = false
+    private var appInForeground = true
+
     // Last browsed server-library directory, mirrored from DataStore so the
     // first connect after an app restart can restore it.
     private var persistedLibraryPath: String = ""
@@ -136,7 +143,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var resumeOnFocusGain = false
     private var publishedMetadataKey: String? = null
     private val lifecycleObserver = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) {
+            appInForeground = true
+            // Sleeping on the browse screen kills the control socket; if the
+            // failure was already detected while asleep, reconnect on wake.
+            // (When it is detected only after wake, the failure collector
+            // calls maybeBrowseReconnect instead.)
+            maybeBrowseReconnect("app foregrounded")
+        }
+
         override fun onStop(owner: LifecycleOwner) {
+            appInForeground = false
             // Explicit policy: with background playback off, leaving the app
             // pauses; with it on, the foreground service keeps audio running
             // while the detached Surface parks video in the null vo.
@@ -195,6 +212,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 networkEpoch.update { it + 1 }
+                // A restored network is a fresh chance for the browse screen:
+                // Wi-Fi often re-associates seconds after the wake-triggered
+                // attempts have already spent their budget.
+                viewModelScope.launch {
+                    browseReconnectArmed = true
+                    maybeBrowseReconnect("network available")
+                }
             }
         }
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback) }
@@ -539,6 +563,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connect() {
         if (mutableUi.value.busy) return
+        browseReconnectJob?.cancel()
         viewModelScope.launch {
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull()
@@ -1302,6 +1327,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             launch {
                 value.state.collectLatest { state ->
                     AppLog.d(TAG, "controller state=$state")
+                    if (state == SessionState.BROWSING) browseReconnectArmed = true
                     mutableUi.update { it.copy(sessionState = state) }
                 }
             }
@@ -1323,6 +1349,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             mutableUi.update {
                                 it.copy(error = failureMessage(failure), busy = false)
                             }
+                            // The failure event itself proves the connection
+                            // died; the FAILED state may not have propagated
+                            // to the UI state yet.
+                            maybeBrowseReconnect("connection failure", connectionKnownDead = true)
                         }
                     }
                 }
@@ -1406,6 +1436,47 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     error = "${failure.kind.label} — automatic reconnect gave up ($lastError)",
                 )
             }
+        }
+    }
+
+    /**
+     * Reconnects the browse-screen control connection after it died (tablet
+     * sleep, network drop). One-shot per established session: armed on
+     * BROWSING, spent here, so a dead server gets a bounded attempt budget
+     * instead of a retry storm. connectInternal re-opens the last directory.
+     */
+    private fun maybeBrowseReconnect(trigger: String, connectionKnownDead: Boolean = false) {
+        val state = mutableUi.value
+        if (!appInForeground || !browseReconnectArmed) return
+        if (!state.preferencesLoaded || !state.autoResume) return
+        if (state.playingPath != null || state.busy) return
+        // On wake the UI state is the only signal; a failure event is proof
+        // by itself (FAILED may not have propagated to the UI state yet).
+        if (!connectionKnownDead &&
+            state.sessionState != SessionState.FAILED &&
+            state.sessionState != SessionState.DISCONNECTED
+        ) {
+            return
+        }
+        if (browseReconnectJob?.isActive == true) return
+        if (reconnectJob?.isActive == true || restartJob?.isActive == true) return
+        browseReconnectArmed = false
+        AppLog.i(TAG, "browse reconnect ($trigger)")
+        browseReconnectJob = viewModelScope.launch {
+            val host = mutableUi.value.host.trim()
+            val port = mutableUi.value.port.toIntOrNull() ?: 8590
+            repeat(BROWSE_RECONNECT_ATTEMPTS) { attempt ->
+                // Give Wi-Fi a moment to come back after wake; later attempts
+                // back off but return early once a network appears.
+                awaitRetryWindow(if (attempt == 0) 750L else attempt * 3_000L)
+                if (mutableUi.value.busy || mutableUi.value.playingPath != null) return@launch
+                runCatching { connectInternal(host, port) }
+                if (controller?.state?.value == SessionState.BROWSING) {
+                    AppLog.i(TAG, "browse reconnect succeeded on attempt ${attempt + 1}")
+                    return@launch
+                }
+            }
+            AppLog.w(TAG, "browse reconnect gave up after $BROWSE_RECONNECT_ATTEMPTS attempts")
         }
     }
 
@@ -2096,6 +2167,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { connectivity.unregisterNetworkCallback(callback) }
         }
         runBlocking(Dispatchers.IO) {
+            browseReconnectJob?.cancelAndJoin()
             autoAdvanceJob?.cancelAndJoin()
             reconnectJob?.cancelAndJoin()
             restartJob?.cancelAndJoin()
@@ -2120,6 +2192,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val AUTO_ADVANCE_END_WINDOW_SECONDS = 60.0
         private const val AUTO_ADVANCE_MAX_PAGES = 20
         private const val RESTORE_MAX_EXTRA_PAGES = 10
+        private const val BROWSE_RECONNECT_ATTEMPTS = 3
     }
 
     private fun persist(block: suspend () -> Unit) {
