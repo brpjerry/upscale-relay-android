@@ -122,7 +122,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var lastPausedForCache = false
     private var rebufferTimestamps: List<Long> = emptyList()
     private var metricsStartedAt = 0L
-    private var playbackPositions: Map<String, Double> = emptyMap()
+    private var playbackPositions: Map<String, PlaybackProgress> = emptyMap()
     private var lastProgressSaveAt = 0L
     private var decoderDropsWindow: Pair<Long, Long> = 0L to 0L
     private var warningDismissed = false
@@ -199,9 +199,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 if (state == MpvPlaybackState.PLAYING) controller?.markRendering()
                 if (state == MpvPlaybackState.ENDED) {
                     AppLog.i(TAG, "playback ended (natural EOS)")
-                    // A completed playthrough starts from the beginning next time.
+                    // A completed playthrough keeps a 100% entry (position ==
+                    // duration); resume ignores it, so the next open still
+                    // starts from the beginning.
                     activeOrigin?.let { origin ->
-                        persist { preferences.clearPlaybackPosition(progressKey(origin)) }
+                        val duration = mutableUi.value.session?.durationSeconds
+                            ?: mutableUi.value.mpvMetrics.durationSeconds
+                        persist {
+                            if (duration > 0) {
+                                preferences.setPlaybackPosition(progressKey(origin), duration, duration)
+                            } else {
+                                preferences.clearPlaybackPosition(progressKey(origin))
+                            }
+                        }
                     }
                 }
                 mutableUi.value = mutableUi.value.copy(playerState = state)
@@ -264,6 +274,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         recentPaths = value.recentPaths,
                         recentLocalUris = value.recentLocalUris,
                         recentLocalRootUris = value.recentLocalRootUris,
+                        playbackProgress = value.playbackPositions,
+                        playbackHistoryLimit = value.playbackHistoryLimit,
                         preferencesLoaded = true,
                     )
                 }
@@ -482,6 +494,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun setGesturesEnabled(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(gesturesEnabled = value)
         persist { preferences.setGesturesEnabled(value) }
+    }
+
+    fun setPlaybackHistoryLimit(value: Int) {
+        val limit = value.coerceIn(1, MAX_POSITIONS_LIMIT)
+        mutableUi.update { it.copy(playbackHistoryLimit = limit) }
+        // Excess entries are trimmed lazily: decode caps at the limit, and the
+        // next position save persists the trimmed list.
+        persist { preferences.setPlaybackHistoryLimit(limit) }
     }
 
     fun setLibrarySort(value: LibrarySort) {
@@ -1862,7 +1882,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         endpoint: PlaybackEndpoint,
         key: String,
     ): PlaybackEndpoint {
-        val saved = playbackPositions[key] ?: return endpoint
+        val saved = playbackPositions[key]?.positionSeconds ?: return endpoint
         val duration = endpoint.session.durationSeconds ?: return endpoint
         val timeBase = endpoint.session.timeBase ?: return endpoint
         if (saved < RESUME_MIN_SECONDS || saved > duration - RESUME_END_WINDOW_SECONDS) {
@@ -1886,9 +1906,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val key = progressKey(origin)
         val duration = state.session?.durationSeconds ?: mpv.durationSeconds
         if (duration > 0 && position > duration - RESUME_END_WINDOW_SECONDS) {
-            persist { preferences.clearPlaybackPosition(key) }
+            // Inside the credits window the file counts as fully played: pin
+            // the entry at 100% rather than deleting it so history remains.
+            persist { preferences.setPlaybackPosition(key, duration, duration) }
         } else {
-            persist { preferences.setPlaybackPosition(key, position) }
+            persist { preferences.setPlaybackPosition(key, position, duration.coerceAtLeast(0.0)) }
         }
     }
 
@@ -2251,6 +2273,10 @@ data class RelayUiState(
     val recentPaths: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),
+    // Saved watch state keyed like progressKey ("server:<path>"/"local:<uri>"),
+    // for the percentage + last-played labels in the file lists.
+    val playbackProgress: Map<String, PlaybackProgress> = emptyMap(),
+    val playbackHistoryLimit: Int = MAX_POSITIONS,
     val localDirectoryName: String? = null,
     val localEntries: List<LocalDocumentEntry> = emptyList(),
     val localCanGoUp: Boolean = false,

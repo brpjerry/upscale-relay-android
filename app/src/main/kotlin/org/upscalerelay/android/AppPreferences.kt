@@ -40,7 +40,20 @@ data class AppPreferences(
     val recentPaths: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),
-    val playbackPositions: Map<String, Double> = emptyMap(),
+    val playbackPositions: Map<String, PlaybackProgress> = emptyMap(),
+    val playbackHistoryLimit: Int = MAX_POSITIONS,
+)
+
+/**
+ * Saved watch state for one file. Completed playthroughs keep an entry with
+ * position == duration (shown as 100%) rather than being deleted, so the
+ * history survives; resume logic already ignores points inside the end
+ * window. Duration/timestamp are 0 for entries written before they existed.
+ */
+data class PlaybackProgress(
+    val positionSeconds: Double,
+    val durationSeconds: Double = 0.0,
+    val lastPlayedAtMillis: Long = 0L,
 )
 
 class AppPreferencesStore(context: Context) {
@@ -71,6 +84,8 @@ class AppPreferencesStore(context: Context) {
     suspend fun setBackgroundPlayback(value: Boolean) = set(Keys.BACKGROUND_PLAYBACK, value)
     suspend fun setFileLoggingEnabled(value: Boolean) = set(Keys.FILE_LOGGING, value)
     suspend fun setLibrarySort(value: String) = set(Keys.LIBRARY_SORT, value)
+    suspend fun setPlaybackHistoryLimit(value: Int) =
+        set(Keys.PLAYBACK_HISTORY_LIMIT, value.coerceIn(1, MAX_POSITIONS_LIMIT))
     suspend fun setLastDestination(value: String) = set(Keys.LAST_DESTINATION, value)
     suspend fun setLastLibraryPath(value: String) = set(Keys.LAST_LIBRARY_PATH, value)
 
@@ -100,23 +115,32 @@ class AppPreferencesStore(context: Context) {
     }
 
     /** Stores the resume point for a file; most recent first, bounded. */
-    suspend fun setPlaybackPosition(key: String, seconds: Double) {
+    suspend fun setPlaybackPosition(key: String, seconds: Double, durationSeconds: Double) {
         dataStore.edit { preferences ->
-            val current = decodePositions(preferences[Keys.PLAYBACK_POSITIONS].orEmpty())
-            val next = linkedMapOf(key to seconds)
-            current.forEach { (k, v) -> if (k != key && next.size < MAX_POSITIONS) next[k] = v }
+            val limit = historyLimit(preferences)
+            val current = decodePositions(preferences[Keys.PLAYBACK_POSITIONS].orEmpty(), limit)
+            val next = linkedMapOf(
+                key to PlaybackProgress(seconds, durationSeconds, System.currentTimeMillis()),
+            )
+            current.forEach { (k, v) -> if (k != key && next.size < limit) next[k] = v }
             preferences[Keys.PLAYBACK_POSITIONS] = encodePositions(next)
         }
     }
 
     suspend fun clearPlaybackPosition(key: String) {
         dataStore.edit { preferences ->
-            val current = decodePositions(preferences[Keys.PLAYBACK_POSITIONS].orEmpty())
+            val current = decodePositions(
+                preferences[Keys.PLAYBACK_POSITIONS].orEmpty(),
+                historyLimit(preferences),
+            )
             if (key in current) {
                 preferences[Keys.PLAYBACK_POSITIONS] = encodePositions(current - key)
             }
         }
     }
+
+    private fun historyLimit(preferences: Preferences): Int =
+        (preferences[Keys.PLAYBACK_HISTORY_LIMIT] ?: MAX_POSITIONS).coerceIn(1, MAX_POSITIONS_LIMIT)
 
     private suspend fun <T> set(key: Preferences.Key<T>, value: T) {
         dataStore.edit { it[key] = value }
@@ -150,7 +174,11 @@ class AppPreferencesStore(context: Context) {
         recentPaths = decodeRecents(preferences[Keys.RECENTS].orEmpty()),
         recentLocalUris = decodeRecents(preferences[Keys.LOCAL_RECENTS].orEmpty()),
         recentLocalRootUris = decodeRecents(preferences[Keys.LOCAL_ROOT_RECENTS].orEmpty()),
-        playbackPositions = decodePositions(preferences[Keys.PLAYBACK_POSITIONS].orEmpty()),
+        playbackPositions = decodePositions(
+            preferences[Keys.PLAYBACK_POSITIONS].orEmpty(),
+            historyLimit(preferences),
+        ),
+        playbackHistoryLimit = historyLimit(preferences),
     )
 
     private object Keys {
@@ -179,6 +207,7 @@ class AppPreferencesStore(context: Context) {
         val LOCAL_RECENTS = stringPreferencesKey("recent_local_uris")
         val LOCAL_ROOT_RECENTS = stringPreferencesKey("recent_local_root_uris")
         val PLAYBACK_POSITIONS = stringPreferencesKey("playback_positions")
+        val PLAYBACK_HISTORY_LIMIT = intPreferencesKey("playback_history_limit")
     }
 }
 
@@ -188,18 +217,32 @@ internal fun decodeRecents(value: String): List<String> =
 internal fun updateRecentPaths(current: List<String>, path: String): List<String> =
     (listOf(path) + current.filterNot { it == path }).take(MAX_RECENTS)
 
-/** One "key<US>seconds" entry per line, insertion order = most recent first. */
-internal fun decodePositions(value: String): Map<String, Double> = buildMap {
+/**
+ * One "key<US>seconds<US>duration<US>lastPlayedMillis" entry per line,
+ * insertion order = most recent first. Legacy lines carry only the seconds
+ * field; keys never contain the separator.
+ */
+internal fun decodePositions(
+    value: String,
+    limit: Int = MAX_POSITIONS,
+): Map<String, PlaybackProgress> = buildMap {
     value.lineSequence().forEach { line ->
-        val separator = line.lastIndexOf('\u001F')
-        if (separator <= 0) return@forEach
-        val seconds = line.substring(separator + 1).toDoubleOrNull() ?: return@forEach
-        if (size < MAX_POSITIONS) put(line.substring(0, separator), seconds)
+        val parts = line.split('\u001F')
+        if (parts.size < 2 || parts[0].isEmpty()) return@forEach
+        val seconds = parts[1].toDoubleOrNull() ?: return@forEach
+        val duration = parts.getOrNull(2)?.toDoubleOrNull() ?: 0.0
+        val playedAt = parts.getOrNull(3)?.toLongOrNull() ?: 0L
+        if (size < limit) put(parts[0], PlaybackProgress(seconds, duration, playedAt))
     }
 }
 
-internal fun encodePositions(value: Map<String, Double>) =
-    value.entries.joinToString("\n") { (k, v) -> "$k\u001F$v" }
+internal fun encodePositions(value: Map<String, PlaybackProgress>) =
+    value.entries.joinToString("\n") { (k, v) ->
+        "$k\u001F${v.positionSeconds}\u001F${v.durationSeconds}\u001F${v.lastPlayedAtMillis}"
+    }
 
 internal const val MAX_RECENTS = 20
+
+/** Default watch-history size; the setting can raise it to the hard cap. */
 internal const val MAX_POSITIONS = 50
+internal const val MAX_POSITIONS_LIMIT = 1000

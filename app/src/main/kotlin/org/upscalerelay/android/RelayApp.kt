@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo
 import android.os.Build
 import android.media.AudioManager
 import android.content.Intent
+import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -452,6 +453,7 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall,
                                     )
+                                    PlaybackHistoryText(state.playbackProgress["local:${entry.uri}"])
                                 }
                             }
                         }
@@ -497,12 +499,44 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall,
                             )
+                            PlaybackHistoryText(state.playbackProgress["local:$value"])
                         }
                     }
                 }
             }
         }
     }
+}
+
+/** Preset watch-history sizes offered in Settings (bounded by MAX_POSITIONS_LIMIT). */
+private val PLAYBACK_HISTORY_CHOICES = listOf(50, 100, 250, 500, 1000)
+
+/** "72% watched · 2 hours ago" line for a file with saved playback history. */
+private fun playbackHistoryLabel(progress: PlaybackProgress?): String? {
+    progress ?: return null
+    val percent = progress.durationSeconds.takeIf { it > 0 }?.let { duration ->
+        (progress.positionSeconds / duration * 100).roundToInt().coerceIn(0, 100)
+    }
+    val playedAt = progress.lastPlayedAtMillis.takeIf { it > 0 }?.let {
+        DateUtils.getRelativeTimeSpanString(it).toString()
+    }
+    return when {
+        percent != null && playedAt != null -> "$percent% watched · $playedAt"
+        percent != null -> "$percent% watched"
+        playedAt != null -> "Played $playedAt"
+        else -> null
+    }
+}
+
+/** Secondary-styled history line, rendered only when there is history. */
+@Composable
+private fun PlaybackHistoryText(progress: PlaybackProgress?) {
+    val label = playbackHistoryLabel(progress) ?: return
+    Text(
+        label,
+        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.bodySmall,
+    )
 }
 
 private fun localUriLabel(value: String): String {
@@ -601,6 +635,7 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
             items(directory.children, key = { it.path }) { node ->
                 LibraryItem(
                     node = node,
+                    progress = state.playbackProgress["server:${node.path}"],
                     selected = state.selectedLibraryNode?.path == node.path,
                     enabled = !state.busy && !state.libraryLoading,
                 ) {
@@ -761,7 +796,13 @@ private fun InlineError(message: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun LibraryItem(node: LibraryNode, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun LibraryItem(
+    node: LibraryNode,
+    progress: PlaybackProgress?,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
         colors = CardDefaults.cardColors(
@@ -776,7 +817,10 @@ private fun LibraryItem(node: LibraryNode, selected: Boolean, enabled: Boolean, 
                 tint = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.width(16.dp))
-            Text(node.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Column {
+                Text(node.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                PlaybackHistoryText(progress)
+            }
         }
     }
 }
@@ -850,6 +894,7 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
                         Column(Modifier.padding(18.dp)) {
                             Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium)
                             Text(path, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            PlaybackHistoryText(state.playbackProgress["server:$path"])
                         }
                     }
                 }
@@ -970,6 +1015,21 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                    }
+                    Text("Watch history size", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "How many files keep a saved position and watched label.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PLAYBACK_HISTORY_CHOICES.forEach { choice ->
+                            FilterChip(
+                                selected = state.playbackHistoryLimit == choice,
+                                onClick = { viewModel.setPlaybackHistoryLimit(choice) },
+                                label = { Text(choice.toString()) },
+                            )
+                        }
                     }
                     VideoSyncPreferenceControls(viewModel, state)
                 }
