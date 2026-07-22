@@ -44,5 +44,5 @@ jobs:
           gh release create "$TAG" \
             --title "Upscale Relay Android $TAG" \
             --generate-notes \
-            --notes "Files with saved playback history now show a watch percentage and last-played time in the server library, local browser, and both recents lists; fully watched files stay pinned at 100% instead of losing their history. The number of files that keep watch history is configurable in Settings (50-1000, default 50). Existing resume points migrate in place and gain labels the next time each file plays. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
+            --notes "Playback history no longer jumps to 100% when the server connection drops mid-file (for example when the tablet sleeps and the relay disconnects): a mid-file end-of-stream now keeps the real watched position, and only a genuine end-of-file near the duration pins the entry at 100%. Files can also be marked as fully watched directly from the library, local browser, and recents lists with a long-press. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
             dist/*.apk

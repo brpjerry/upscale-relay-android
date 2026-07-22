@@ -198,20 +198,34 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             playerEngine.state.collectLatest { state ->
                 if (state == MpvPlaybackState.PLAYING) controller?.markRendering()
                 if (state == MpvPlaybackState.ENDED) {
-                    AppLog.i(TAG, "playback ended (natural EOS)")
-                    // A completed playthrough keeps a 100% entry (position ==
-                    // duration); resume ignores it, so the next open still
-                    // starts from the beginning.
-                    activeOrigin?.let { origin ->
-                        val duration = mutableUi.value.session?.durationSeconds
-                            ?: mutableUi.value.mpvMetrics.durationSeconds
-                        persist {
-                            if (duration > 0) {
+                    // mpv fires END_FILE for a true end-of-file *and* for a
+                    // downlink that dies mid-file (e.g. the server dropping
+                    // while the tablet sleeps). Only a genuine EOF near the
+                    // duration may pin the entry at 100%; a mid-file END_FILE
+                    // must keep the real position maybeSaveProgress last
+                    // recorded, and the reconnect path takes it from there.
+                    val reconnecting =
+                        reconnectJob?.isActive == true || restartJob?.isActive == true
+                    val duration = mutableUi.value.session?.durationSeconds
+                        ?: mutableUi.value.mpvMetrics.durationSeconds
+                    val position = mutableUi.value.mpvMetrics.positionSeconds
+                    val atEnd = duration > 0 && position >= duration - RESUME_END_WINDOW_SECONDS
+                    if (!reconnecting && atEnd) {
+                        AppLog.i(TAG, "playback ended (natural EOS)")
+                        // A completed playthrough keeps a 100% entry (position
+                        // == duration); resume ignores it, so the next open
+                        // still starts from the beginning.
+                        activeOrigin?.let { origin ->
+                            persist {
                                 preferences.setPlaybackPosition(progressKey(origin), duration, duration)
-                            } else {
-                                preferences.clearPlaybackPosition(progressKey(origin))
                             }
                         }
+                    } else {
+                        AppLog.i(
+                            TAG,
+                            "playback ended without EOS (pos=%.1f dur=%.1f reconnecting=%b); keeping saved progress"
+                                .format(position, duration, reconnecting),
+                        )
                     }
                 }
                 mutableUi.value = mutableUi.value.copy(playerState = state)
@@ -494,6 +508,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun setGesturesEnabled(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(gesturesEnabled = value)
         persist { preferences.setGesturesEnabled(value) }
+    }
+
+    /**
+     * Long-press action: records the file as fully watched right now. Files
+     * never played have no duration on record; equal sentinel values still
+     * render as 100% and sit below the resume threshold, and real values
+     * take over the next time the file plays.
+     */
+    fun markWatched(key: String) {
+        val duration = playbackPositions[key]?.durationSeconds?.takeIf { it > 0 } ?: 1.0
+        persist { preferences.setPlaybackPosition(key, duration, duration) }
     }
 
     fun setPlaybackHistoryLimit(value: Int) {

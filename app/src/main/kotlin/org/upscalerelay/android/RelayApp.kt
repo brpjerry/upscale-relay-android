@@ -13,8 +13,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -110,6 +112,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -434,9 +438,12 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
                 // appear in the tree listing and in the recents below.
                 items(state.localEntries, key = { "entry:${it.uri}" }) { entry ->
                     Card(
-                        modifier = Modifier.fillMaxWidth().clickable(enabled = !state.busy) {
-                            viewModel.openLocalEntry(entry)
-                        },
+                        modifier = Modifier.fillMaxWidth().fileCardClicks(
+                            enabled = !state.busy,
+                            onLongClick = if (entry.isDirectory) null else {
+                                { viewModel.markWatched("local:${entry.uri}") }
+                            },
+                        ) { viewModel.openLocalEntry(entry) },
                     ) {
                         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(
@@ -486,9 +493,10 @@ private fun LocalDestination(viewModel: RelayViewModel, state: RelayUiState) {
             } else {
                 items(state.recentLocalUris, key = { "file:$it" }) { value ->
                     Card(
-                        modifier = Modifier.fillMaxWidth().clickable(enabled = !state.busy) {
-                            viewModel.openRecentLocal(value)
-                        },
+                        modifier = Modifier.fillMaxWidth().fileCardClicks(
+                            enabled = !state.busy,
+                            onLongClick = { viewModel.markWatched("local:$value") },
+                        ) { viewModel.openRecentLocal(value) },
                     ) {
                         Column(Modifier.padding(16.dp)) {
                             Text(localUriLabel(value), fontWeight = FontWeight.Medium)
@@ -526,6 +534,27 @@ private fun playbackHistoryLabel(progress: PlaybackProgress?): String? {
         playedAt != null -> "Played $playedAt"
         else -> null
     }
+}
+
+/**
+ * Tap-to-open plus optional long-press (mark as watched) for a file card,
+ * with long-press haptics. Directories pass a null onLongClick.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Modifier.fileCardClicks(
+    enabled: Boolean,
+    onLongClick: (() -> Unit)?,
+    onClick: () -> Unit,
+): Modifier {
+    val haptics = LocalHapticFeedback.current
+    return combinedClickable(
+        enabled = enabled,
+        onLongClick = onLongClick?.let {
+            { haptics.performHapticFeedback(HapticFeedbackType.LongPress); it() }
+        },
+        onClick = onClick,
+    )
 }
 
 /** Secondary-styled history line, rendered only when there is history. */
@@ -638,6 +667,9 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
                     progress = state.playbackProgress["server:${node.path}"],
                     selected = state.selectedLibraryNode?.path == node.path,
                     enabled = !state.busy && !state.libraryLoading,
+                    onMarkWatched = if (node.type == LibraryNode.Type.FILE) {
+                        { viewModel.markWatched("server:${node.path}") }
+                    } else null,
                 ) {
                     if (node.type == LibraryNode.Type.DIRECTORY) viewModel.openDirectory(node)
                     else viewModel.selectLibraryNode(node)
@@ -801,10 +833,12 @@ private fun LibraryItem(
     progress: PlaybackProgress?,
     selected: Boolean,
     enabled: Boolean,
+    onMarkWatched: (() -> Unit)?,
     onClick: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier.fillMaxWidth()
+            .fileCardClicks(enabled = enabled, onLongClick = onMarkWatched, onClick = onClick),
         colors = CardDefaults.cardColors(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
             else MaterialTheme.colorScheme.surfaceVariant,
@@ -890,7 +924,12 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(state.recentPaths, key = { it }) { path ->
-                    Card(Modifier.fillMaxWidth().clickable { viewModel.openRecent(path) }) {
+                    Card(
+                        Modifier.fillMaxWidth().fileCardClicks(
+                            enabled = true,
+                            onLongClick = { viewModel.markWatched("server:$path") },
+                        ) { viewModel.openRecent(path) },
+                    ) {
                         Column(Modifier.padding(18.dp)) {
                             Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium)
                             Text(path, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
