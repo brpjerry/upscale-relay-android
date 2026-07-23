@@ -19,7 +19,10 @@ jobs:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
       RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
       RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      # A key alias is not sensitive, and holding it as a secret made Actions
+      # redact the string everywhere it appeared — including inside the
+      # published APK's filename in the logs.
+      RELEASE_KEY_ALIAS: ${{ vars.RELEASE_KEY_ALIAS }}
       RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
@@ -58,12 +61,31 @@ jobs:
       - name: Remove decoded keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
+      # Prose for a release lives in release-notes/<tag>.md (optional). Without
+      # one, the release carries the generated changelog plus the signing line.
+      # The signing line is derived from the artifact actually built, so it can
+      # never claim the wrong thing the way hardcoded notes did.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          apk=$(ls dist/*.apk)
+          case "$apk" in
+            *-unsigned.apk)
+              signing_note="Unsigned release APK; sign it before distribution or sideload as-is for personal use."
+              ;;
+            *)
+              signing_note="Signed release APK."
+              ;;
+          esac
+          notes_file="release-notes/${TAG}.md"
+          if [ -f "$notes_file" ]; then
+            printf '%s\n\n%s\n' "$(cat "$notes_file")" "$signing_note" > "$RUNNER_TEMP/notes.md"
+          else
+            printf '%s\n' "$signing_note" > "$RUNNER_TEMP/notes.md"
+          fi
           gh release create "$TAG" \
             --title "Upscale Relay Android $TAG" \
             --generate-notes \
-            --notes "Playback history no longer jumps to 100% when the server connection drops mid-file (for example when the tablet sleeps and the relay disconnects): a mid-file end-of-stream now keeps the real watched position, and only a genuine end-of-file near the duration pins the entry at 100%. Files can also be marked as fully watched directly from the library, local browser, and recents lists with a long-press. Unsigned release APK; sign it before distribution or sideload as-is for personal use." \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             dist/*.apk
