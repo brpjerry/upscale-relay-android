@@ -61,6 +61,7 @@ import org.upscalerelay.protocol.LibraryNode
 import org.upscalerelay.protocol.SessionInfo
 import java.io.File
 import java.time.Instant
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
@@ -511,14 +512,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Long-press action: records the file as fully watched right now. Files
-     * never played have no duration on record; equal sentinel values still
-     * render as 100% and sit below the resume threshold, and real values
-     * take over the next time the file plays.
+     * Long-press action: toggles the file between fully watched (100%) and
+     * unwatched (0%). Files never played have no duration on record; equal
+     * sentinel values still render as 100% and sit below the resume threshold,
+     * and real values take over the next time the file plays.
      */
     fun markWatched(key: String) {
-        val duration = playbackPositions[key]?.durationSeconds?.takeIf { it > 0 } ?: 1.0
-        persist { preferences.setPlaybackPosition(key, duration, duration) }
+        val existing = playbackPositions[key]
+        val duration = existing?.durationSeconds?.takeIf { it > 0 } ?: 1.0
+        // Treat anything the UI would round to 100% as watched, so the toggle
+        // mirrors what the user sees on the card.
+        val watched = existing != null && existing.durationSeconds > 0 &&
+            (existing.positionSeconds / existing.durationSeconds * 100).roundToInt() >= 100
+        val target = if (watched) 0.0 else duration
+        persist { preferences.setPlaybackPosition(key, target, duration) }
     }
 
     fun setPlaybackHistoryLimit(value: Int) {
