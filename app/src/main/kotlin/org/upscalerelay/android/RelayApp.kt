@@ -1417,7 +1417,7 @@ private fun PlayerTouchLayer(
                                 val seconds = (startPosition + totalDrag.x / size.width.coerceAtLeast(1) * 600.0)
                                     .coerceIn(0.0, duration.coerceAtLeast(0.0))
                                 viewModel.previewSeek(seconds)
-                                onMessage("Seek  ${formatTime(seconds)}")
+                                onMessage("${formatTime(seconds)}  (${formatDelta(seconds - startPosition)})")
                             } else if (size.height > 0) {
                                 val changeFraction = -totalDrag.y / size.height
                                 if (dragStart.x < size.width / 2f) {
@@ -1655,6 +1655,7 @@ private fun PlayerSeekBar(
     modifier: Modifier = Modifier,
 ) {
     var dragging by remember { mutableStateOf(false) }
+    var scrubStart by remember { mutableStateOf(0.0) }
     var barWidthPx by remember { mutableStateOf(0) }
     var bubbleWidthPx by remember { mutableStateOf(0) }
     val accent = MaterialTheme.colorScheme.primary
@@ -1683,6 +1684,7 @@ private fun PlayerSeekBar(
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
                     onDragStart = { offset ->
+                        scrubStart = position
                         dragging = true
                         onScrub(secondsAt(offset.x))
                     },
@@ -1753,7 +1755,7 @@ private fun PlayerSeekBar(
                 shape = MaterialTheme.shapes.small,
             ) {
                 Text(
-                    formatTime(position),
+                    "${formatTime(position)}  (${formatDelta(position - scrubStart)})",
                     Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium,
@@ -2034,4 +2036,10 @@ private fun formatTime(seconds: Double): String {
     val remaining = total % 60
     return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, remaining)
     else "%d:%02d".format(minutes, remaining)
+}
+
+/** Signed offset from a starting position, e.g. "+1:40" or "-3:20". */
+private fun formatDelta(seconds: Double): String {
+    val sign = if (seconds < 0) "-" else "+"
+    return "$sign${formatTime(abs(seconds))}"
 }

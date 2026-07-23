@@ -62,6 +62,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             check(initialized && !closed)
             reloading = true
             pendingLoad = null
+            resetStreamMetricsLocked()
             MPVLib.command(arrayOf("stop"))
             mutableState.value = MpvPlaybackState.LOADING
         }
@@ -232,8 +233,31 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         } else {
             "start=${request.startSeconds ?: 0.0}"
         }
+        resetStreamMetricsLocked()
         MPVLib.command(arrayOf("loadfile", request.localUrl, "replace", "-1", options))
         reloading = false
+    }
+
+    /**
+     * Clears the metrics that describe the stream being retired. mpv stops
+     * emitting demuxer-cache-duration while the next file loads, so without
+     * this the diagnostics keep reporting the previous epoch's cache — a
+     * seek that has buffered nothing still reads as several seconds full,
+     * and the buffer report hands the server that same stale number.
+     *
+     * Only stream-scoped progress is reset. Track/codec identity, cumulative
+     * drop counters, and user-owned delays survive the reload.
+     */
+    private fun resetStreamMetricsLocked() {
+        metrics = metrics.copy(
+            bitrateBitsPerSecond = 0,
+            cacheDurationMillis = 0,
+            cacheBufferingPercent = 0,
+            pausedForCache = false,
+            positionSeconds = 0.0,
+            avSyncSeconds = 0.0,
+            audioPtsSeconds = 0.0,
+        )
     }
 
     private fun observeMetrics() {
