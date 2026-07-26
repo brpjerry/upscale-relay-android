@@ -5,19 +5,16 @@ import org.junit.Test
 
 class MpvPlayerEngineTest {
     @Test
-    fun `fixed length option preserves punctuation in media URLs`() {
-        val value = "http://server:8590/media/Shows/A, B=1.mkv"
-        assertEquals("%${value.length}%$value", fixedLengthOptionValue(value))
+    fun `relay load tolerates an indefinitely silent loopback stream`() {
+        assertEquals("network-timeout=0", relayLoadOptions())
     }
 
     @Test
-    fun `relay load tolerates an indefinitely silent loopback stream`() {
-        val value = "http://server:8590/media/episode.mkv"
-        val source = fixedLengthOptionValue(value)
-        assertEquals(
-            "network-timeout=0,audio-file=$source,sub-files-append=$source",
-            relayLoadOptions(value),
-        )
+    fun `relay load does not attach the original media up front`() {
+        // Attaching here would leave mpv's external demuxers at the start of
+        // the original file rather than at the epoch's position.
+        assertEquals(false, relayLoadOptions().contains("audio-file"))
+        assertEquals(false, relayLoadOptions().contains("sub-files"))
     }
 
     @Test

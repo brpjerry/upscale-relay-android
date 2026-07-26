@@ -311,9 +311,11 @@ uses SSA; no PGS or VobSub sample was available.
 - Rapid UI seeks cancel and join the preceding request before allocating the
   next epoch. mpv is stopped first, the old input is allowed 150 ms to tear
   down, and the replacement is loaded without `start=`.
-- mpv uses `rebase-start-time=no`, audio-clock synchronization, and per-load
-  `audio-file` plus `sub-files-append` options pointing at the original server
-  file. Cover is center-cropped server-side before resize/encode, so the
+- mpv uses `rebase-start-time=no`, audio-clock synchronization, and the
+  original server file as its external audio/subtitle source. That source is
+  attached with `audio-add` / `sub-add` **after** playback starts, not through
+  per-load `audio-file` / `sub-files-append` options — see the seek-latency
+  note below. Cover is center-cropped server-side before resize/encode, so the
   Android decoder does not process off-screen overflow. Android retains mpv's
   normal frame-drop policy so missed presentation deadlines stay observable.
   Commas and equals signs in URLs use mpv's fixed-length option syntax.
@@ -334,10 +336,41 @@ Target-device results are recorded in
 The lossless tier completed more than 30 aggregate minutes and natural EOS with
 audio attached, zero decoder drops, no cache rebuffer, and measured A/V error
 near zero. A 25-action seek storm converged on epoch 25 in the original server
-session with no stale frames or deadlock. A normal relative seek took about 5
-seconds and a far seek about 13 seconds; the stress storm's final reload took
-about 28 seconds, so reload latency remains a performance-polish item rather
-than a correctness failure.
+session with no stale frames or deadlock.
+
+### Seek latency: external tracks are attached after playback starts (2026-07-26)
+
+Seeks originally took 5–28 seconds to show a frame, and the cost scaled with
+the seek *target* rather than the seek distance. Server-side profiling
+(`upscale-relay/docs/SEEK_LATENCY_PLAN.md`) accounted for at most ~0.9 s of
+it; the rest was mpv waiting on the external audio track.
+
+mpv positions an external demuxer at the current playback time **when the
+track is selected**, and during `loadfile` that time is still zero. Passing
+the original file as `audio-file` / `sub-files-append` therefore opened those
+demuxers at the start of the file, while the relay stream began at the seek
+target. `--start` would normally reposition them, but the loopback stream is a
+live one-shot socket, so the seek is rejected (`Cached seek not possible` /
+`Cannot seek in this stream`) and mpv instead reached the epoch by decoding
+forward through everything before it.
+
+`MpvPlayerEngine` now loads the relay stream alone and issues `audio-add` /
+`sub-add` on the first `PLAYBACK_RESTART` of each load, when the position is
+known; each external demuxer then performs one HTTP range seek. Measured on
+the Tab S9 Ultra against a 23:40 file:
+
+| Seek target | Video frame shown | Audio ready |
+|---|---|---|
+| 305 s (before) | +2.9 s | +12.8 s |
+| 678 s (before) | +3.3 s | +19.6 s |
+| any (after) | +1.0 s | **+1.5 s** |
+
+Verified on the device: an eight-action seek storm stayed in `PLAYING` with
+A/V error of 10–25 µs, zero decoder drops, ~4 output drops per epoch, a full
+10 s buffer, correct subtitles, and a non-default audio track that survived
+subsequent seeks. A 90-second pause and resume kept external audio alive even
+though the external demuxers now use the ordinary `network-timeout` rather
+than the relay stream's per-load `network-timeout=0`.
 
 ### Acceptance gate
 

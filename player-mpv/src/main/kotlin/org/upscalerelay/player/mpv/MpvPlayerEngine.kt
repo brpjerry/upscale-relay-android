@@ -7,6 +7,7 @@ import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.concurrent.thread
 
 class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserver, AutoCloseable {
     private val applicationContext = context.applicationContext
@@ -23,6 +24,16 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var pendingLoad: MpvLoadRequest? = null
     private var reloading = false
     private var metrics = MpvMetrics()
+    /** Original-media URL still waiting to be attached to the running epoch. */
+    private var pendingExternalMedia: String? = null
+    /** Bumped by every load/stop so a late attach cannot target a retired one. */
+    private var loadGeneration = 0L
+    // Track choices the caller made for the current file. Re-applied whenever
+    // the original media is re-attached, so a seek does not silently revert to
+    // whichever track mpv would pick on its own.
+    private var chosenAudioId: Int? = null
+    private var chosenSubtitleId: Int? = null
+    private var subtitleChoiceMade = false
 
     fun initialize(): Unit = synchronized(lock) {
         check(!closed) { "player is closed" }
@@ -62,6 +73,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             check(initialized && !closed)
             reloading = true
             pendingLoad = null
+            pendingExternalMedia = null
+            loadGeneration += 1
             resetStreamMetricsLocked()
             MPVLib.command(arrayOf("stop"))
             mutableState.value = MpvPlaybackState.LOADING
@@ -110,10 +123,13 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     fun selectAudioTrack(id: Int) = synchronized(lock) {
+        chosenAudioId = id
         if (initialized && !closed) MPVLib.setPropertyString("aid", id.toString())
     }
 
     fun selectSubtitleTrack(id: Int?) = synchronized(lock) {
+        chosenSubtitleId = id
+        subtitleChoiceMade = true
         if (initialized && !closed) MPVLib.setPropertyString("sid", id?.toString() ?: "no")
     }
 
@@ -142,6 +158,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     fun stop(): Unit = synchronized(lock) {
         if (!initialized || closed) return
         pendingLoad = null
+        pendingExternalMedia = null
+        loadGeneration += 1
         reloading = false
         MPVLib.setPropertyBoolean("pause", false)
         MPVLib.command(arrayOf("stop"))
@@ -229,13 +247,64 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     private fun loadNow(request: MpvLoadRequest) {
         val options = if (request.originalMediaUrl != null) {
-            relayLoadOptions(request.originalMediaUrl)
+            relayLoadOptions()
         } else {
             "start=${request.startSeconds ?: 0.0}"
         }
         resetStreamMetricsLocked()
+        loadGeneration += 1
+        pendingExternalMedia = request.originalMediaUrl
+        // A reload is the same file at a new epoch, so its track choices carry
+        // over. Anything else is a different file whose ids mean nothing here.
+        if (!reloading) {
+            chosenAudioId = null
+            chosenSubtitleId = null
+            subtitleChoiceMade = false
+        }
         MPVLib.command(arrayOf("loadfile", request.localUrl, "replace", "-1", options))
         reloading = false
+    }
+
+    /**
+     * Adds the original file as mpv's external audio/subtitle source once the
+     * epoch is actually playing.
+     *
+     * It cannot be passed to `loadfile`: mpv positions an external demuxer at
+     * the current playback time when the track is selected, and during load
+     * that time is still zero. The relay stream carries only the tail of the
+     * file starting at the seek target, and it is a live one-shot socket that
+     * mpv cannot seek ("Cannot seek in this stream"), so the `--start` seek
+     * which would otherwise reposition the external demuxers is rejected. The
+     * external tracks were therefore left parked at the beginning of the
+     * original file and mpv reached the epoch by decoding everything before it
+     * — tens of seconds of black screen after a far seek, scaling with the
+     * seek target, while the epoch's own first frame was already decoded.
+     *
+     * Attaching after playback starts makes the same selection happen at a
+     * known-good position, so each demuxer issues one HTTP range seek instead.
+     */
+    private fun attachExternalMedia(generation: Long, mediaUrl: String) {
+        thread(name = "relay-mpv-external-media", isDaemon = true) {
+            val audioId: Int?
+            val subtitleId: Int?
+            val subtitleChosen: Boolean
+            synchronized(lock) {
+                if (closed || !initialized || loadGeneration != generation) return@thread
+                audioId = chosenAudioId
+                subtitleId = chosenSubtitleId
+                subtitleChosen = subtitleChoiceMade
+            }
+            // mpv opens the URL synchronously inside these commands, so they
+            // must not run on the event-callback thread. Adding mid-playback
+            // needs "select": "auto" only marks the file as a candidate and
+            // leaves the track unselected. Where the caller already has a
+            // choice, add without selecting and apply that choice instead, so
+            // a seek cannot revert the track or re-show disabled subtitles.
+            MPVLib.command(arrayOf("audio-add", mediaUrl, if (audioId == null) "select" else "auto"))
+            MPVLib.command(arrayOf("sub-add", mediaUrl, if (subtitleChosen) "auto" else "select"))
+            audioId?.let { MPVLib.setPropertyString("aid", it.toString()) }
+            if (subtitleChosen) MPVLib.setPropertyString("sid", subtitleId?.toString() ?: "no")
+        }
     }
 
     /**
@@ -345,8 +414,15 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     override fun event(eventId: Int) {
+        var attach: Pair<Long, String>? = null
         synchronized(lock) {
             if (eventId == MPVLib.MpvEvent.END_FILE && reloading) return@synchronized
+            if (eventId == MPVLib.MpvEvent.PLAYBACK_RESTART) {
+                // Only the first restart of a load owns the attach; later ones
+                // (underruns, track switches) must not add the file twice.
+                pendingExternalMedia?.let { attach = loadGeneration to it }
+                pendingExternalMedia = null
+            }
             mutableState.value = when (eventId) {
                 MPVLib.MpvEvent.FILE_LOADED -> MpvPlaybackState.LOADED
                 MPVLib.MpvEvent.PLAYBACK_RESTART -> MpvPlaybackState.PLAYING
@@ -355,6 +431,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 else -> return@synchronized
             }
         }
+        attach?.let { (generation, url) -> attachExternalMedia(generation, url) }
     }
 
     override fun logMessage(prefix: String, level: Int, text: String) {
@@ -399,9 +476,6 @@ private data class MpvLoadRequest(
     val startSeconds: Double?,
 )
 
-/** mpv's fixed-length option syntax keeps commas and equals signs in URLs literal. */
-internal fun fixedLengthOptionValue(value: String): String = "%${value.length}%$value"
-
 /**
  * Options for the live relay input. A user pause also pauses the server, so
  * the private loopback TCP stream can legitimately be silent indefinitely.
@@ -409,14 +483,12 @@ internal fun fixedLengthOptionValue(value: String): String = "%${value.length}%$
  * video stream during a longer pause; external HTTP audio would then resume
  * alone while newly relayed video backed up before mpv. Relay transport
  * liveness is owned by the control/downlink sockets and playback watchdog.
+ *
+ * The original media is deliberately absent: see [MpvPlayerEngine]'s
+ * attachExternalMedia for why audio and subtitles are added after playback
+ * starts rather than through `audio-file` / `sub-files-append` here.
  */
-internal fun relayLoadOptions(originalMediaUrl: String): String {
-    // Relay playback never passes start=. Absolute Matroska PTS remain authoritative.
-    val source = fixedLengthOptionValue(originalMediaUrl)
-    // sub-files is a colon-separated path list on Android. Its -append
-    // variant accepts exactly one unescaped item, avoiding URL splitting.
-    return "network-timeout=0,audio-file=$source,sub-files-append=$source"
-}
+internal fun relayLoadOptions(): String = "network-timeout=0"
 
 data class MpvTrack(
     val id: Int,
