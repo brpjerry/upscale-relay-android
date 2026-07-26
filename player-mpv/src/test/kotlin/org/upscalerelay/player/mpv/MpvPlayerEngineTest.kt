@@ -6,7 +6,7 @@ import org.junit.Test
 class MpvPlayerEngineTest {
     @Test
     fun `relay load tolerates an indefinitely silent loopback stream`() {
-        assertEquals("network-timeout=0", relayLoadOptions())
+        assertEquals("network-timeout=0,pause=yes", relayLoadOptions())
     }
 
     @Test
@@ -15,6 +15,13 @@ class MpvPlayerEngineTest {
         // the original file rather than at the epoch's position.
         assertEquals(false, relayLoadOptions().contains("audio-file"))
         assertEquals(false, relayLoadOptions().contains("sub-files"))
+    }
+
+    @Test
+    fun `relay load holds the epoch paused until its audio is attached`() {
+        // Without this the picture runs on alone while the attach completes
+        // and mpv reconciles the drift by dropping frames on every start.
+        assertEquals(true, relayLoadOptions().contains("pause=yes"))
     }
 
     @Test

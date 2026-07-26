@@ -99,9 +99,11 @@ Ultra:
   queue, and drops stale packets. mpv gets a new IPv4 loopback listener per
   epoch.
 - mpv stops before the old listener is closed, waits 150 ms, then loads the
-  new stream with `rebase-start-time=no`. The same original-media URL is
-  attached through `audio-file` and `sub-files-append`, leaving audio as the
-  synchronization clock.
+  new stream with `rebase-start-time=no`, leaving audio as the
+  synchronization clock. The original-media URL is attached *after* playback
+  starts, with `audio-add` / `sub-add` on the first `PLAYBACK_RESTART`, and
+  the epoch loads `pause=yes` so nothing advances until those tracks are in
+  place. Both halves are load-bearing — see CLAUDE.md.
 - Relay loads disable mpv's network read timeout for the private loopback
   stream because an intentional user pause can leave it silent indefinitely.
   Control/downlink liveness and the playback watchdog still detect real relay
