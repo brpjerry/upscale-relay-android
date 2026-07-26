@@ -25,6 +25,20 @@ class SessionStateMachineTest {
     }
 
     @Test
+    fun `a seek requested while paused lands back in paused`() {
+        val states = SessionStateMachine()
+        states.transition(SessionState.CONNECTING)
+        states.transition(SessionState.BROWSING)
+        states.transition(SessionState.OPENING)
+        states.transition(SessionState.BUFFERING)
+        states.transition(SessionState.PLAYING)
+        states.transition(SessionState.PAUSED)
+        states.transition(SessionState.SEEKING)
+        states.transition(SessionState.PAUSED)
+        assertEquals(SessionState.PAUSED, states.state.value)
+    }
+
+    @Test
     fun `invalid transition is rejected`() {
         val states = SessionStateMachine()
         assertThrows(IllegalArgumentException::class.java) {

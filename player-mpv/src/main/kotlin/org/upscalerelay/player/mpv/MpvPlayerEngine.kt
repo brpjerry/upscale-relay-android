@@ -26,8 +26,12 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var metrics = MpvMetrics()
     /** Original-media URL still waiting to be attached to the running epoch. */
     private var pendingExternalMedia: String? = null
+    /** True from the attach being dispatched until its commands have run. */
+    private var attachInFlight = false
     /** Bumped by every load/stop so a late attach cannot target a retired one. */
     private var loadGeneration = 0L
+    /** The caller's pause intent, applied once the attach releases the hold. */
+    private var callerPaused = false
     // Track choices the caller made for the current file. Re-applied whenever
     // the original media is re-attached, so a seek does not silently revert to
     // whichever track mpv would pick on its own.
@@ -74,6 +78,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             reloading = true
             pendingLoad = null
             pendingExternalMedia = null
+            attachInFlight = false
             loadGeneration += 1
             resetStreamMetricsLocked()
             MPVLib.command(arrayOf("stop"))
@@ -82,8 +87,16 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     fun setPaused(paused: Boolean) = synchronized(lock) {
-        if (initialized && !closed) MPVLib.setPropertyBoolean("pause", paused)
+        callerPaused = paused
+        // While an epoch is still waiting for its audio, mpv is held paused on
+        // purpose; the attach applies this intent when it releases the hold.
+        if (initialized && !closed && !holdingForExternalMediaLocked()) {
+            MPVLib.setPropertyBoolean("pause", paused)
+        }
     }
+
+    private fun holdingForExternalMediaLocked(): Boolean =
+        pendingExternalMedia != null || attachInFlight
 
     fun seekDirect(seconds: Double) = synchronized(lock) {
         if (initialized && !closed) MPVLib.setPropertyDouble("time-pos", seconds.coerceAtLeast(0.0))
@@ -159,8 +172,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         if (!initialized || closed) return
         pendingLoad = null
         pendingExternalMedia = null
+        attachInFlight = false
         loadGeneration += 1
         reloading = false
+        callerPaused = false
         MPVLib.setPropertyBoolean("pause", false)
         MPVLib.command(arrayOf("stop"))
         metrics = metrics.copy(paused = false)
@@ -254,6 +269,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         resetStreamMetricsLocked()
         loadGeneration += 1
         pendingExternalMedia = request.originalMediaUrl
+        attachInFlight = false
         // A reload is the same file at a new epoch, so its track choices carry
         // over. Anything else is a different file whose ids mean nothing here.
         if (!reloading) {
@@ -289,21 +305,37 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             val subtitleId: Int?
             val subtitleChosen: Boolean
             synchronized(lock) {
-                if (closed || !initialized || loadGeneration != generation) return@thread
+                if (closed || !initialized || loadGeneration != generation) {
+                    // Nothing to release: whoever retired this load owns pause.
+                    attachInFlight = false
+                    return@thread
+                }
                 audioId = chosenAudioId
                 subtitleId = chosenSubtitleId
                 subtitleChosen = subtitleChoiceMade
             }
-            // mpv opens the URL synchronously inside these commands, so they
-            // must not run on the event-callback thread. Adding mid-playback
-            // needs "select": "auto" only marks the file as a candidate and
-            // leaves the track unselected. Where the caller already has a
-            // choice, add without selecting and apply that choice instead, so
-            // a seek cannot revert the track or re-show disabled subtitles.
-            MPVLib.command(arrayOf("audio-add", mediaUrl, if (audioId == null) "select" else "auto"))
-            MPVLib.command(arrayOf("sub-add", mediaUrl, if (subtitleChosen) "auto" else "select"))
-            audioId?.let { MPVLib.setPropertyString("aid", it.toString()) }
-            if (subtitleChosen) MPVLib.setPropertyString("sid", subtitleId?.toString() ?: "no")
+            try {
+                // mpv opens the URL synchronously inside these commands, so
+                // they must not run on the event-callback thread. Adding
+                // mid-playback needs "select": "auto" only marks the file as a
+                // candidate and leaves the track unselected. Where the caller
+                // already has a choice, add without selecting and apply that
+                // choice instead, so a seek cannot revert the track or
+                // re-show disabled subtitles.
+                MPVLib.command(arrayOf("audio-add", mediaUrl, if (audioId == null) "select" else "auto"))
+                MPVLib.command(arrayOf("sub-add", mediaUrl, if (subtitleChosen) "auto" else "select"))
+                audioId?.let { MPVLib.setPropertyString("aid", it.toString()) }
+                if (subtitleChosen) MPVLib.setPropertyString("sid", subtitleId?.toString() ?: "no")
+            } finally {
+                // Release the load-time pause hold even if a command failed;
+                // leaving it set would strand playback on the first frame.
+                synchronized(lock) {
+                    attachInFlight = false
+                    if (initialized && !closed && loadGeneration == generation) {
+                        MPVLib.setPropertyBoolean("pause", callerPaused)
+                    }
+                }
+            }
         }
     }
 
@@ -420,7 +452,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             if (eventId == MPVLib.MpvEvent.PLAYBACK_RESTART) {
                 // Only the first restart of a load owns the attach; later ones
                 // (underruns, track switches) must not add the file twice.
-                pendingExternalMedia?.let { attach = loadGeneration to it }
+                pendingExternalMedia?.let {
+                    attach = loadGeneration to it
+                    attachInFlight = true
+                }
                 pendingExternalMedia = null
             }
             mutableState.value = when (eventId) {
@@ -487,8 +522,15 @@ private data class MpvLoadRequest(
  * The original media is deliberately absent: see [MpvPlayerEngine]'s
  * attachExternalMedia for why audio and subtitles are added after playback
  * starts rather than through `audio-file` / `sub-files-append` here.
+ *
+ * The epoch starts paused for the same reason. mpv shows the first frame and
+ * reports playback-restart either way, but without the hold the picture runs
+ * on alone for the second the attach takes, and mpv then has to reconcile a
+ * second of drift against a freshly started audio track — an audible A/V
+ * desynchronisation warning and tens of dropped frames on every stream start.
+ * attachExternalMedia lifts the pause once the tracks are in place.
  */
-internal fun relayLoadOptions(): String = "network-timeout=0"
+internal fun relayLoadOptions(): String = "network-timeout=0,pause=yes"
 
 data class MpvTrack(
     val id: Int,

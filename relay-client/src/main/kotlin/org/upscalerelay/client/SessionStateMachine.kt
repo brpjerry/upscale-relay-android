@@ -44,8 +44,11 @@ class SessionStateMachine {
                 SessionState.SEEKING, SessionState.PLAYING, SessionState.PAUSED,
                 SessionState.CLOSING, SessionState.FAILED,
             ),
+            // PAUSED because a seek requested while paused stays paused: the
+            // new epoch is buffered but nothing plays until the user resumes.
             SessionState.SEEKING to setOf(
-                SessionState.BUFFERING, SessionState.SEEKING, SessionState.CLOSING, SessionState.FAILED,
+                SessionState.BUFFERING, SessionState.SEEKING, SessionState.PAUSED,
+                SessionState.CLOSING, SessionState.FAILED,
             ),
             SessionState.PLAYING to setOf(
                 SessionState.SEEKING, SessionState.PAUSED, SessionState.CLOSING, SessionState.FAILED,
