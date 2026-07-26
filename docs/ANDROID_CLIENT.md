@@ -398,7 +398,11 @@ the Phase 2 protocol, epoch, and libmpv paths remain unchanged.
   delay controls, and model/tier/framing defaults.
 - Horizontal drags preview and commit protocol seeks; left- and right-side
   vertical drags adjust window brightness and media volume. Gestures can be
-  disabled without removing tap-to-show controls.
+  disabled without removing tap-to-show controls. A drag claims exactly one
+  control once it has travelled 24 dp, and holds it until the finger lifts
+  (2026-07-25): a brightness swipe that drifts sideways can no longer trip a
+  seek. Deltas are measured from the claim point, so taking over does not jump
+  the control by the latch distance.
 - The shell follows Android's system light/dark mode. There is no separate app
   theme, TalkBack milestone, phone layout, keyboard/S Pen/DeX handling,
   background playback, or lock-screen integration in this phase; those are
@@ -578,6 +582,30 @@ the same day.
   automatically ~15 s after Wi-Fi returned, position-continuous, with
   `auto_resume_count` incremented. The behavior is preference-gated
   ("Reconnect automatically during playback", default on).
+- **Recovery before prompts (2026-07-25).** A recoverable failure never
+  opens with an error banner: the failure event goes to the playback resume
+  loop first, then to the browse-screen reconnect, and only a loop that runs
+  out of attempts surfaces the taxonomy label. Failed library requests route
+  the same way. A budget spent while the app is in the background — the
+  tablet closed long enough for the control socket to die, with the radio
+  down so every attempt fails instantly — is held rather than reported: the
+  failure is stashed and retried from `onStart`, which also re-arms the
+  one-shot browse budget, so opening the tablet reconnects instead of
+  presenting a prompt. Attempts inside a loop connect quietly (no
+  per-attempt banner), and the browse loop shows the same recovery overlay
+  as playback with **Stop trying**. A non-recoverable kind is the carve-out:
+  the browser still reconnects (the socket is dead either way) but the
+  message is reported, and neither the loop nor a quiet `connectInternal`
+  clears `error`, so a server rejection survives the reconnect that follows
+  it. Verified on the tablet: a `pipeline_error` from `open_session` left
+  "Server rejected the request — pipeline_error: …" on screen above a
+  library that had already reconnected underneath it.
+- **Device verification (2026-07-25, Tab S9 Ultra).** Screen-off dropped the
+  control socket after 11 s (Samsung standby Wi-Fi power save); the client
+  logged `browse reconnect deferred to foreground` and raised nothing. Waking
+  ~107 s later logged `browse reconnect (app foregrounded)` and was back in
+  `BROWSING` 1.2 s afterwards, on the same directory, with no error prompt at
+  any point.
 - **Mid-play settings.** Model, quality, framing, and downscale-filter
   changes from the active player's sheet now restart the session at the
   current position through the same reopen path and confirm the new value in
@@ -698,6 +726,32 @@ still need hands on the device.
   to the stored position through the epoch protocol before mpv attaches —
   for both server-library and local sources. Verified on the phone in both
   modes: reopening resumed at the saved position instead of zero.
+- **Settings and history backup (2026-07-25, added at owner request).**
+  Settings → Backup exports everything DataStore holds — connection details,
+  playback and player preferences, the three recent lists, and the watch
+  history — as pretty-printed JSON through `CreateDocument`, so the file
+  lands in Downloads or wherever else the user keeps backups; import reads it
+  back through `OpenDocument`. `BackupCodec` groups the file the way the
+  settings screen is grouped and writes an ISO timestamp beside every
+  epoch-millis field, because the point is a file a person can edit. Decoding
+  is deliberately forgiving and non-destructive: a missing section or key
+  keeps what the device already has, out-of-range values (port, fit mode,
+  interpolation scaler, sort, destination, history limit) fall back to the
+  same default the store would use, and history rows that would corrupt the
+  separator-delimited record — an embedded `U+001F` or newline, an empty key,
+  a missing or negative position — are dropped rather than written. Only the
+  format marker and a future format version are hard errors. Verified on the
+  tablet end to end: exported to Downloads, hand-edited the JSON on a PC
+  (host, port, quality tier, gestures, history limit, a watch position, plus
+  a hand-written history row), re-imported and saw every edit applied, then
+  restored the original file and got the exact prior state back.
+- **Auto-advance skips finished files (2026-07-25).** After a natural
+  end-of-file, the walk to the next file of the directory passes over
+  anything whose saved progress reads as 100% — played through or marked
+  watched by long-press — for both server-library and local sources. The
+  test matches the percentage on the file card, so what the list shows as
+  finished is what autoplay skips. When every later file is finished,
+  playback simply stops rather than replaying one.
 
 - **System media integration.** A platform `MediaSession` (owned by the
   playback ViewModel) mirrors title/duration metadata and live position, and
@@ -743,6 +797,20 @@ still need hands on the device.
   dot-directories are filtered from the Local browser, opaque downloads
   document ids display as "Downloads video", and the server header shows
   Connected/Connecting/Disconnected instead of state-machine names.
+- **One loading affordance (2026-07-25).** Every wait renders through a
+  single `LoadingOverlay` — a black semi-transparent scrim with a spinner, a
+  label, and optional detail and actions — instead of per-site spinners in
+  the connect and play buttons, the library page footer, the player's
+  buffering puck, its "Preparing" column, and the transport play/pause
+  button. Short waits stay invisible: the overlay appears only after 250 ms,
+  so a directory that lists in 80 ms or a rebuffer that clears immediately
+  never flashes a dim. Waits with nothing else on screen (session prepare,
+  reconnect) show immediately. The overlay dims without swallowing touches,
+  since a connect attempt can sit on a 15-second timeout and the navigation
+  rail has to stay reachable. The card wraps its content to a capped measure,
+  so "Buffering…" stays compact while a reconnect paragraph still reads well.
+  Verified on the tablet across session prepare (including the TensorRT
+  keepalive text in the detail line), seek, and buffering.
 - **Defect found by the 5.5 pass, explained retroactively:** the Phase 4
   "Back from ENDED exits the app" observation was actually a LazyColumn
   duplicate-key crash — the same document URI appeared in both the Movies

@@ -11,6 +11,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.phaseThreeDataStore by preferencesDataStore(name = "phase_three")
@@ -88,6 +89,48 @@ class AppPreferencesStore(context: Context) {
         set(Keys.PLAYBACK_HISTORY_LIMIT, value.coerceIn(1, MAX_POSITIONS_LIMIT))
     suspend fun setLastDestination(value: String) = set(Keys.LAST_DESTINATION, value)
     suspend fun setLastLibraryPath(value: String) = set(Keys.LAST_LIBRARY_PATH, value)
+
+    /** One-shot read for the backup export. */
+    suspend fun snapshot(): AppPreferences = values.first()
+
+    /**
+     * Writes a whole [AppPreferences] in one transaction, for a backup
+     * restore. Every key is set, so the caller decides what "absent from the
+     * file" means by passing the current value through (see [BackupCodec]).
+     */
+    suspend fun importAll(value: AppPreferences) {
+        dataStore.edit { preferences ->
+            preferences[Keys.HOST] = value.host
+            preferences[Keys.PORT] = value.port
+            preferences[Keys.AUTO_CONNECT] = value.autoConnect
+            preferences[Keys.AUTO_RESUME] = value.autoResume
+            preferences[Keys.MODEL] = value.model
+            preferences[Keys.QUALITY_TIER] = value.qualityTier
+            preferences[Keys.FIT_MODE] = value.fitMode
+            preferences[Keys.RESIZE_ALGORITHM] = value.resizeAlgorithm
+            preferences[Keys.DEBAND_ENABLED] = value.debandEnabled
+            preferences[Keys.SUBTITLES_ENABLED] = value.subtitlesEnabled
+            preferences[Keys.PREFERRED_SUBTITLE] = value.preferredSubtitle
+            preferences[Keys.DIAGNOSTICS_VISIBLE] = value.diagnosticsVisible
+            preferences[Keys.GESTURES_ENABLED] = value.gesturesEnabled
+            preferences[Keys.DISPLAY_RESAMPLE_SYNC] = value.displayResampleSync
+            preferences[Keys.INTERPOLATION_ENABLED] = value.interpolationEnabled
+            preferences[Keys.INTERPOLATION_SCALER] = value.interpolationScaler
+            preferences[Keys.BACKGROUND_PLAYBACK] = value.backgroundPlayback
+            preferences[Keys.FILE_LOGGING] = value.fileLoggingEnabled
+            preferences[Keys.LIBRARY_SORT] = value.librarySort
+            preferences[Keys.LAST_DESTINATION] = value.lastDestination
+            preferences[Keys.LAST_LIBRARY_PATH] = value.lastLibraryPath
+            preferences[Keys.PLAYBACK_HISTORY_LIMIT] =
+                value.playbackHistoryLimit.coerceIn(1, MAX_POSITIONS_LIMIT)
+            preferences[Keys.RECENTS] = value.recentPaths.take(MAX_RECENTS).joinToString("\n")
+            preferences[Keys.LOCAL_RECENTS] =
+                value.recentLocalUris.take(MAX_RECENTS).joinToString("\n")
+            preferences[Keys.LOCAL_ROOT_RECENTS] =
+                value.recentLocalRootUris.take(MAX_RECENTS).joinToString("\n")
+            preferences[Keys.PLAYBACK_POSITIONS] = encodePositions(value.playbackPositions)
+        }
+    }
 
     suspend fun addRecent(path: String) {
         dataStore.edit { preferences ->

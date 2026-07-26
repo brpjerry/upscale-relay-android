@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -39,12 +40,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -175,7 +176,10 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
                 // Wait for persisted state before drawing any destination so
                 // restoration never flashes an obsolete screen.
                 !state.preferencesLoaded -> Box(Modifier.fillMaxSize())
-                else -> TabletShell(viewModel, state)
+                else -> Box(Modifier.fillMaxSize()) {
+                    TabletShell(viewModel, state)
+                    ShellLoadingOverlay(viewModel, state)
+                }
             }
         }
     }
@@ -322,6 +326,36 @@ private fun TabletShell(viewModel: RelayViewModel, state: RelayUiState) {
         }
         VerticalDivider()
         Box(Modifier.weight(1f).fillMaxHeight()) { DestinationContent(viewModel, state) }
+    }
+}
+
+/**
+ * The browse shell's share of the single loading overlay: connecting, opening
+ * a file or folder, paging the library, and the automatic reconnect that
+ * follows a tablet waking up with a dead control socket.
+ */
+@Composable
+private fun ShellLoadingOverlay(viewModel: RelayViewModel, state: RelayUiState) {
+    val reconnecting = state.reconnecting
+    // The overlay dims but does not swallow touches: every control underneath
+    // already disables itself while busy, and a connect attempt can sit on a
+    // 15-second timeout — long enough that the navigation rail has to stay
+    // reachable.
+    when {
+        reconnecting != null -> LoadingOverlay(
+            label = reconnecting.reason,
+            detail = "Attempt ${reconnecting.attempt} of ${reconnecting.maxAttempts}. " +
+                "The library reopens where you left it.",
+            appearAfterMillis = 0,
+        ) {
+            OutlinedButton(onClick = viewModel::cancelAutoResume) { Text("Stop trying") }
+        }
+        // One branch for both flags: a connect hands over to a library
+        // restore mid-flight, and two call sites would blink the overlay off
+        // and restart its appearance delay between the two.
+        state.busy || state.libraryLoading -> LoadingOverlay(
+            label = if (state.capabilities == null) "Connecting…" else "Loading…",
+        )
     }
 }
 
@@ -675,14 +709,15 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
                     else viewModel.selectLibraryNode(node)
                 }
             }
-            if (state.libraryLoading || state.libraryNextCursor != null) {
+            if (state.libraryNextCursor != null) {
+                // Paging shows the shared loading overlay, not a second
+                // spinner down here.
                 item(key = "library-page-footer") {
                     Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
-                        if (state.libraryLoading) {
-                            CircularProgressIndicator(Modifier.size(28.dp))
-                        } else {
-                            TextButton(onClick = viewModel::loadMoreLibrary) { Text("Load more") }
-                        }
+                        TextButton(
+                            onClick = viewModel::loadMoreLibrary,
+                            enabled = !state.libraryLoading,
+                        ) { Text("Load more") }
                     }
                 }
             }
@@ -755,10 +790,6 @@ private fun ConnectPanel(viewModel: RelayViewModel, state: RelayUiState) {
                 }
                 Spacer(Modifier.height(24.dp))
                 Button(onClick = viewModel::connect, enabled = !state.busy && state.preferencesLoaded) {
-                    if (state.busy) {
-                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(10.dp))
-                    }
                     Text(if (state.busy) "Connecting" else "Connect")
                 }
                 if (state.discoveredServers.isNotEmpty()) {
@@ -896,10 +927,6 @@ private fun LibraryDetail(
             )
             Spacer(Modifier.height(24.dp))
             Button(onClick = { viewModel.openFile(node) }, enabled = !state.busy) {
-                if (state.busy) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(10.dp))
-                }
                 Text(if (state.busy) "Opening" else "Play")
             }
         }
@@ -1072,6 +1099,54 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                     }
                     VideoSyncPreferenceControls(viewModel, state)
                 }
+            }
+            item { BackupSection(viewModel, state) }
+        }
+    }
+}
+
+/**
+ * Export/import of everything the app persists. The document picker handles
+ * the destination, so the file can land in Downloads or anywhere else the
+ * user keeps backups, and import reads it from wherever it ended up.
+ */
+@Composable
+private fun BackupSection(viewModel: RelayViewModel, state: RelayUiState) {
+    val exportPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri -> if (uri != null) viewModel.exportData(uri) }
+    // Anything goes on the way in: a backup copied from a PC often arrives
+    // as octet-stream, and the contents are validated on read anyway.
+    val importPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) viewModel.importData(uri) }
+
+    SettingsSection("Backup") {
+        Text(
+            "Save the connection details, playback and player settings, recent " +
+                "files, and watch history to a JSON file you can read, edit, and " +
+                "restore — here or on another tablet.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = { exportPicker.launch(viewModel.suggestedBackupFileName()) }) {
+                Text("Export data")
+            }
+            OutlinedButton(onClick = { importPicker.launch(arrayOf("*/*")) }) {
+                Text("Import data")
+            }
+        }
+        state.backupStatus?.let { status ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    status.message,
+                    modifier = Modifier.weight(1f),
+                    color = if (status.failed) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = viewModel::dismissBackupStatus) { Text("Dismiss") }
             }
         }
     }
@@ -1259,30 +1334,6 @@ private fun PlayerScreen(
                     .padding(16.dp),
             )
         }
-        // Buffering indicator: mpv is starved (mid-play rebuffer) or still
-        // loading after a seek/reload. Independent of the controls layer so
-        // stalls are visible even with the chrome hidden. The pre-endpoint
-        // phase has its own "Preparing" overlay below.
-        val buffering = state.endpoint != null && state.error == null &&
-            state.reconnecting == null && !state.paused &&
-            (
-                state.mpvMetrics.pausedForCache ||
-                    state.playerState == MpvPlaybackState.LOADING ||
-                    state.playerState == MpvPlaybackState.LOADED
-                )
-        if (buffering) {
-            Surface(
-                modifier = Modifier.align(Alignment.Center),
-                color = Color(0x66000000),
-                shape = CircleShape,
-            ) {
-                CircularProgressIndicator(
-                    Modifier.padding(18.dp).size(44.dp),
-                    color = Color.White,
-                    strokeWidth = 4.dp,
-                )
-            }
-        }
         gestureMessage?.let { message ->
             Surface(
                 modifier = Modifier.align(Alignment.Center),
@@ -1290,25 +1341,6 @@ private fun PlayerScreen(
                 shape = MaterialTheme.shapes.large,
             ) {
                 Text(message, Modifier.padding(horizontal = 28.dp, vertical = 18.dp), color = Color.White)
-            }
-        }
-        if (state.endpoint == null && state.error == null && state.reconnecting == null) {
-            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(color = Color.White)
-                Spacer(Modifier.height(14.dp))
-                Text("Preparing ${state.qualityTier}…", color = Color.White)
-                // session_progress keepalive text, e.g. a first-use TensorRT
-                // engine build that runs for minutes.
-                state.openingProgress?.let { progress ->
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        progress,
-                        color = Color.LightGray,
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 48.dp),
-                    )
-                }
             }
         }
         state.performanceWarning?.let { warning ->
@@ -1337,24 +1369,38 @@ private fun PlayerScreen(
                 }
             }
         }
-        state.reconnecting?.let { status ->
-            ReconnectOverlay(
-                status = status,
+        // One waiting affordance for the whole player, in priority order:
+        // recovery, then failure, then the pre-endpoint prepare, then seeks,
+        // then mid-play rebuffers. It sits outside the controls layer so a
+        // stall stays visible with the chrome hidden.
+        val buffering = !state.paused && (
+            state.mpvMetrics.pausedForCache ||
+                state.playerState == MpvPlaybackState.LOADING ||
+                state.playerState == MpvPlaybackState.LOADED
+            )
+        when {
+            state.reconnecting != null -> ReconnectOverlay(
+                status = state.reconnecting,
                 canFallback = state.localPlayback && !state.directLocalFallback,
                 onFallback = viewModel::playLocalFallback,
                 onCancel = viewModel::cancelAutoResume,
             )
-        }
-        if (state.reconnecting == null) {
-            state.error?.let { error ->
-                PlayerError(
-                    message = error,
-                    onBack = viewModel::closePlayback,
-                    onRetry = viewModel::retry,
-                    canFallback = state.localPlayback && !state.directLocalFallback,
-                    onFallback = viewModel::playLocalFallback,
-                )
-            }
+            state.error != null -> PlayerError(
+                message = state.error,
+                onBack = viewModel::closePlayback,
+                onRetry = viewModel::retry,
+                canFallback = state.localPlayback && !state.directLocalFallback,
+                onFallback = viewModel::playLocalFallback,
+            )
+            state.endpoint == null -> LoadingOverlay(
+                label = "Preparing ${state.qualityTier}…",
+                // session_progress keepalive text, e.g. a first-use TensorRT
+                // engine build that runs for minutes.
+                detail = state.openingProgress,
+                appearAfterMillis = 0,
+            )
+            state.seeking -> LoadingOverlay("Seeking…")
+            buffering -> LoadingOverlay("Buffering…")
         }
     }
 
@@ -1368,6 +1414,15 @@ private fun PlayerScreen(
         ChapterSheet(viewModel, state) { chapterSheetVisible = false }
     }
 }
+
+/**
+ * The control a player drag has claimed. One drag drives one control from the
+ * moment it is claimed until the finger lifts; the others stay masked.
+ */
+private enum class PlayerDrag { UNDECIDED, SEEK, BRIGHTNESS, VOLUME }
+
+/** Travel a drag must cover before it claims a control. */
+private const val GESTURE_LATCH_DP = 24
 
 @Composable
 private fun PlayerTouchLayer(
@@ -1389,7 +1444,12 @@ private fun PlayerTouchLayer(
     var startPosition by remember { mutableStateOf(0.0) }
     var startBrightness by remember { mutableStateOf(0.5f) }
     var startVolume by remember { mutableStateOf(0) }
-    var horizontalSeek by remember { mutableStateOf(false) }
+    // The control this drag has claimed, and the travel already spent
+    // claiming it. A drag owns one control until the finger lifts: a swipe
+    // that started vertical must not seek because it drifted sideways on the
+    // way up, and vice versa.
+    var dragMode by remember { mutableStateOf(PlayerDrag.UNDECIDED) }
+    var latchOffset by remember { mutableStateOf(Offset.Zero) }
 
     Box(
         Modifier
@@ -1407,42 +1467,63 @@ private fun PlayerTouchLayer(
                             startBrightness = activity?.window?.attributes?.screenBrightness
                                 ?.takeIf { it >= 0f } ?: 0.5f
                             startVolume = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-                            horizontalSeek = false
+                            dragMode = PlayerDrag.UNDECIDED
+                            latchOffset = Offset.Zero
                         },
                         onDrag = { change, amount ->
                             change.consume()
                             totalDrag += amount
-                            if (abs(totalDrag.x) > abs(totalDrag.y)) {
-                                horizontalSeek = true
-                                val seconds = (startPosition + totalDrag.x / size.width.coerceAtLeast(1) * 600.0)
-                                    .coerceIn(0.0, duration.coerceAtLeast(0.0))
-                                viewModel.previewSeek(seconds)
-                                onMessage("${formatTime(seconds)}  (${formatDelta(seconds - startPosition)})")
-                            } else if (size.height > 0) {
-                                val changeFraction = -totalDrag.y / size.height
-                                if (dragStart.x < size.width / 2f) {
-                                    val next = (startBrightness + changeFraction).coerceIn(0.02f, 1f)
+                            if (dragMode == PlayerDrag.UNDECIDED) {
+                                // Ignore the first few millimetres: the axis of
+                                // a fresh touch is noisy, and claiming on it is
+                                // what produced the accidental seeks.
+                                val latch = GESTURE_LATCH_DP.dp.toPx()
+                                if (abs(totalDrag.x) >= latch || abs(totalDrag.y) >= latch) {
+                                    dragMode = when {
+                                        abs(totalDrag.x) > abs(totalDrag.y) -> PlayerDrag.SEEK
+                                        dragStart.x < size.width / 2f -> PlayerDrag.BRIGHTNESS
+                                        else -> PlayerDrag.VOLUME
+                                    }
+                                    // Measure from where the claim was made, so
+                                    // the control does not jump by the latch
+                                    // distance the moment it takes over.
+                                    latchOffset = totalDrag
+                                }
+                            }
+                            val travel = totalDrag - latchOffset
+                            when (dragMode) {
+                                PlayerDrag.UNDECIDED -> Unit
+                                PlayerDrag.SEEK -> {
+                                    val seconds = (startPosition + travel.x / size.width.coerceAtLeast(1) * 600.0)
+                                        .coerceIn(0.0, duration.coerceAtLeast(0.0))
+                                    viewModel.previewSeek(seconds)
+                                    onMessage("${formatTime(seconds)}  (${formatDelta(seconds - startPosition)})")
+                                }
+                                PlayerDrag.BRIGHTNESS -> if (size.height > 0) {
+                                    val next = (startBrightness - travel.y / size.height).coerceIn(0.02f, 1f)
                                     activity?.window?.let { window ->
                                         val attributes = window.attributes
                                         attributes.screenBrightness = next
                                         window.attributes = attributes
                                     }
                                     onMessage("Brightness  ${(next * 100).roundToInt()}%")
-                                } else {
+                                }
+                                PlayerDrag.VOLUME -> if (size.height > 0) {
                                     val maximum = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                                    val next = (startVolume + changeFraction * maximum).roundToInt().coerceIn(0, maximum)
+                                    val next = (startVolume - travel.y / size.height * maximum)
+                                        .roundToInt().coerceIn(0, maximum)
                                     audio.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
                                     onMessage("Volume  ${(next * 100f / maximum).roundToInt()}%")
                                 }
                             }
                         },
                         onDragEnd = {
-                            if (horizontalSeek) viewModel.commitSeek()
-                            horizontalSeek = false
+                            if (dragMode == PlayerDrag.SEEK) viewModel.commitSeek()
+                            dragMode = PlayerDrag.UNDECIDED
                         },
                         onDragCancel = {
                             viewModel.cancelSeekPreview()
-                            horizontalSeek = false
+                            dragMode = PlayerDrag.UNDECIDED
                         },
                     )
                 },
@@ -1584,19 +1665,13 @@ private fun PlayerChrome(
                             disabledContentColor = Color.Black,
                         ),
                     ) {
-                        if (state.seeking) {
-                            CircularProgressIndicator(
-                                Modifier.size(26.dp),
-                                color = Color.Black,
-                                strokeWidth = 2.5.dp,
-                            )
-                        } else {
-                            Icon(
-                                if (state.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
-                                contentDescription = if (state.paused) "Play" else "Pause",
-                                modifier = Modifier.size(34.dp),
-                            )
-                        }
+                        // Seeking greys the button out; the shared loading
+                        // overlay is what spins.
+                        Icon(
+                            if (state.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                            contentDescription = if (state.paused) "Play" else "Pause",
+                            modifier = Modifier.size(34.dp),
+                        )
                     }
                     PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds") {
                         viewModel.seekRelative(10.0)
@@ -1939,6 +2014,71 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
     }
 }
 
+/**
+ * The app's single loading affordance: a black semi-transparent scrim with a
+ * spinner, a label, and optional detail line and actions. Everything that used
+ * to grow its own spinner — the connect and play buttons, the library page
+ * footer, the player's buffering puck and "Preparing" column, the seek button,
+ * the reconnect card — renders through this, so waiting always looks the same.
+ *
+ * [appearAfterMillis] keeps short waits invisible: a directory that opens in
+ * 80 ms or a rebuffer that clears immediately must not flash a full-screen
+ * dim. Pass 0 where there is nothing else on screen to look at.
+ */
+@Composable
+private fun LoadingOverlay(
+    label: String,
+    modifier: Modifier = Modifier,
+    detail: String? = null,
+    appearAfterMillis: Long = 250,
+    actions: (@Composable RowScope.() -> Unit)? = null,
+) {
+    var visible by remember { mutableStateOf(appearAfterMillis <= 0) }
+    LaunchedEffect(Unit) {
+        if (!visible) {
+            delay(appearAfterMillis)
+            visible = true
+        }
+    }
+    if (!visible) return
+    Box(
+        modifier.fillMaxSize().background(Color(0x88000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        // The card wraps its content up to a cap: "Buffering…" gets a compact
+        // card, while a reconnect paragraph wraps at a readable measure rather
+        // than stretching across the display.
+        Card {
+            Column(
+                Modifier
+                    .widthIn(max = if (isCompactWidth()) 320.dp else 520.dp)
+                    .padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator()
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    label,
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center,
+                )
+                detail?.let { text ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                actions?.let { content ->
+                    Spacer(Modifier.height(24.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReconnectOverlay(
     status: ReconnectStatus,
@@ -1946,40 +2086,19 @@ private fun ReconnectOverlay(
     onFallback: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    Box(Modifier.fillMaxSize().background(Color(0x88000000)), contentAlignment = Alignment.Center) {
-        Card(Modifier.fillMaxWidth(0.55f)) {
-            // fillMaxWidth so the content centers in the card; a wrap-width
-            // Column would hug the card's left edge.
-            Column(
-                Modifier.fillMaxWidth().padding(28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                CircularProgressIndicator()
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    status.reason,
-                    style = MaterialTheme.typography.headlineSmall,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    if (status.maxAttempts > 1) {
-                        "Reconnecting — attempt ${status.attempt} of ${status.maxAttempts}. " +
-                            "Playback resumes where it stopped."
-                    } else {
-                        "Restarting playback at the current position."
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onCancel) { Text("Stop trying") }
-                    if (canFallback) {
-                        OutlinedButton(onClick = onFallback) { Text("Play original") }
-                    }
-                }
-            }
+    LoadingOverlay(
+        label = status.reason,
+        detail = if (status.maxAttempts > 1) {
+            "Reconnecting — attempt ${status.attempt} of ${status.maxAttempts}. " +
+                "Playback resumes where it stopped."
+        } else {
+            "Restarting playback at the current position."
+        },
+        appearAfterMillis = 0,
+    ) {
+        OutlinedButton(onClick = onCancel) { Text("Stop trying") }
+        if (canFallback) {
+            OutlinedButton(onClick = onFallback) { Text("Play original") }
         }
     }
 }
