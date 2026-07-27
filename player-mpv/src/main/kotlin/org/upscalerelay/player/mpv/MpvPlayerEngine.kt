@@ -315,17 +315,21 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 subtitleChosen = subtitleChoiceMade
             }
             try {
-                // mpv opens the URL synchronously inside these commands, so
-                // they must not run on the event-callback thread. Adding
-                // mid-playback needs "select": "auto" only marks the file as a
-                // candidate and leaves the track unselected. Where the caller
-                // already has a choice, add without selecting and apply that
-                // choice instead, so a seek cannot revert the track or
-                // re-show disabled subtitles.
+                // One add, not two. mpv exposes *every* track of an external
+                // file, so `audio-add` already contributes this file's
+                // subtitle track — a second `sub-add` only opened a duplicate
+                // HTTP demuxer that re-parsed and re-seeked the same file
+                // (5+ seconds of it on a busy link), and left the track lists
+                // showing every audio and subtitle entry twice.
+                //
+                // mpv opens the URL synchronously here, so this must not run
+                // on the event-callback thread. Adding mid-playback needs
+                // "select": "auto" only marks the file as a candidate and
+                // leaves the track unselected.
                 MPVLib.command(arrayOf("audio-add", mediaUrl, if (audioId == null) "select" else "auto"))
-                MPVLib.command(arrayOf("sub-add", mediaUrl, if (subtitleChosen) "auto" else "select"))
                 audioId?.let { MPVLib.setPropertyString("aid", it.toString()) }
-                if (subtitleChosen) MPVLib.setPropertyString("sid", subtitleId?.toString() ?: "no")
+                selectAttachedSubtitle(subtitleId, subtitleChosen)
+                awaitAudioReady()
             } finally {
                 // Release the load-time pause hold even if a command failed;
                 // leaving it set would strand playback on the first frame.
@@ -337,6 +341,41 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 }
             }
         }
+    }
+
+    /**
+     * Picks the subtitle track the attached file just contributed. The caller's
+     * explicit choice wins — including "off" — and otherwise the file's first
+     * subtitle track is selected, because mpv only auto-selects subtitles when
+     * a file is loaded, not when tracks appear on an already-loaded one.
+     */
+    private fun selectAttachedSubtitle(subtitleId: Int?, subtitleChosen: Boolean) {
+        if (subtitleChosen) {
+            MPVLib.setPropertyString("sid", subtitleId?.toString() ?: "no")
+            return
+        }
+        val first = trackSnapshot().firstOrNull { it.type == MpvTrack.Type.SUBTITLE } ?: return
+        MPVLib.setPropertyString("sid", first.id.toString())
+    }
+
+    /**
+     * Blocks until mpv has audio decoded at the epoch's position.
+     *
+     * `audio-add` returning only means the file was opened; mpv still has to
+     * seek that demuxer and decode. Releasing the pause hold on the command's
+     * return let the picture run for the couple of seconds that took, which is
+     * exactly the drift the hold exists to prevent — and the audio output,
+     * primed but starved, then underran and dropped frames restarting.
+     * `audio-pts` becoming valid is mpv's own signal that audio has caught up.
+     */
+    private fun awaitAudioReady() {
+        val deadline = System.nanoTime() + AUDIO_READY_TIMEOUT_NANOS
+        while (System.nanoTime() < deadline) {
+            synchronized(lock) { if (closed || !initialized) return }
+            if (MPVLib.getPropertyDouble("audio-pts") != null) return
+            Thread.sleep(AUDIO_READY_POLL_MILLIS)
+        }
+        Log.w(TAG, "audio not ready before the hold timed out; releasing anyway")
     }
 
     /**
@@ -496,6 +535,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     companion object {
         private const val TAG = "RelayMpv"
         private const val VIDEO_OUTPUT = "gpu"
+
+        /** Cap on the pause hold, so a silent file can never strand playback. */
+        private const val AUDIO_READY_TIMEOUT_NANOS = 5_000_000_000L
+        private const val AUDIO_READY_POLL_MILLIS = 20L
         private val URL_PATTERN = Regex("""[a-zA-Z][a-zA-Z0-9+.-]*://\S+""")
 
         /** mpv tscale filters offered for motion interpolation. */

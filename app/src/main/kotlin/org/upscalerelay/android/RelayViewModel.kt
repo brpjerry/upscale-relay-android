@@ -131,6 +131,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var lastReceivedBytes = 0L
     private var lastReceiveChangeAt = 0L
     private var lastPausedForCache = false
+    private var lastDriftResyncAt = 0L
     private var rebufferTimestamps: List<Long> = emptyList()
     private var metricsStartedAt = 0L
     private var playbackPositions: Map<String, PlaybackProgress> = emptyMap()
@@ -2239,6 +2240,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         lastReceivedBytes = 0L
         lastReceiveChangeAt = SystemClock.elapsedRealtime()
         lastPausedForCache = false
+        lastDriftResyncAt = 0L
         rebufferTimestamps = emptyList()
         metricsStartedAt = SystemClock.elapsedRealtime()
         decoderDropsWindow = SystemClock.elapsedRealtime() to 0L
@@ -2344,11 +2346,47 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Server-sustain warning: repeated real rebuffers in a short window.
+        // A/V gap: MediaCodec cannot decode without its output Surface, so
+        // anything that takes it away — Picture-in-Picture, backgrounding, a
+        // Surface teardown — lets video run ahead of the audio clock while the
+        // player is away. Measured at 24.9 s after twenty seconds in PiP. mpv
+        // cannot close that by seeking, because the relay stream is a live
+        // one-shot socket, so it converges by running a track off speed for
+        // about as long as the gap itself: tens of seconds of stutter and
+        // dropped frames. A fresh epoch at the audio position — what the user
+        // actually heard, so nothing is skipped — costs about a second.
+        //
+        // This lives here rather than on a lifecycle callback because PiP
+        // never stops the Activity, so onStart/onStop do not see it at all.
+        //
+        // The measure is mpv's own A/V synchronisation error, not the distance
+        // between the position and audio readouts: a user-set audio delay
+        // separates those two permanently, and comparing them directly would
+        // read a standing delay as a fault and reload the epoch on a loop
+        // forever. mpv applies the delay and reports the residual error, which
+        // stays microscopic whether or not one is set.
+        //
         // Session warm-up (empty cache before the first rendered frame, cold
-        // pipeline right after a restart) must not count as a rebuffer.
+        // pipeline right after a restart) is excluded, here and by the
+        // rebuffer warning below.
         val steadyState = state.sessionState == SessionState.PLAYING &&
             now - metricsStartedAt > 15_000
+        if (
+            steadyState && !state.paused && !state.directLocalFallback &&
+            state.reconnecting == null && reconnectJob?.isActive != true &&
+            restartJob?.isActive != true && seekJob?.isActive != true &&
+            mpv.audioPtsSeconds > 0.0 && mpv.positionSeconds > 0.0 &&
+            now - lastDriftResyncAt > DRIFT_RESYNC_COOLDOWN_MILLIS
+        ) {
+            val error = kotlin.math.abs(mpv.avSyncSeconds)
+            if (error >= DRIFT_RESYNC_MIN_SECONDS) {
+                lastDriftResyncAt = now
+                AppLog.i(TAG, "resyncing playback: %.1fs A/V error".format(error))
+                seekTo(mpv.audioPtsSeconds)
+            }
+        }
+
+        // Server-sustain warning: repeated real rebuffers in a short window.
         if (steadyState && mpv.pausedForCache && !lastPausedForCache) {
             rebufferTimestamps = (rebufferTimestamps + now).filter { now - it < 90_000 }
             if (rebufferTimestamps.size >= 2 && state.performanceWarning == null && !warningDismissed) {
@@ -2488,6 +2526,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val RESUME_END_WINDOW_SECONDS = 90.0
         private const val CHAPTER_RESTART_THRESHOLD_SECONDS = 3.0
         private const val SEEK_TARGET_SNAP_SECONDS = 8.0
+
+        /**
+         * Below this an A/V gap costs less to let mpv absorb than a reload
+         * does. A rotation or a glance at the shade never reaches it.
+         */
+        private const val DRIFT_RESYNC_MIN_SECONDS = 2.0
+
+        /** Keeps a gap that survives one reload from reloading on a loop. */
+        private const val DRIFT_RESYNC_COOLDOWN_MILLIS = 15_000L
         private const val SEEK_TARGET_TIMEOUT_MILLIS = 15_000L
         private const val AUTO_ADVANCE_END_WINDOW_SECONDS = 60.0
         private const val AUTO_ADVANCE_MAX_PAGES = 20

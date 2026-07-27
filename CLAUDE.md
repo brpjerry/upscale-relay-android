@@ -99,6 +99,25 @@ release.yml` builds and publishes the signed APK with those notes.
   file as a candidate and leaves it unselected (verified — it produced no
   audio at all). Explicit user track choices are remembered in the engine and
   re-applied after each attach so a seek cannot revert them.
+- **One `audio-add`, never a matching `sub-add`.** mpv exposes *every* track
+  of an external file, so the audio add already contributes this file's
+  subtitle track; a second add only opens a duplicate HTTP demuxer that
+  re-parses and re-seeks the same file (5+ seconds of it on a busy link) and
+  makes every audio and subtitle entry appear twice in the track list. The
+  subtitle has to be selected explicitly afterwards, because mpv auto-selects
+  subtitles only when a file is *loaded*, not when tracks appear on one.
+- **`audio-add` returning does not mean audio is ready.** mpv still has to
+  seek that demuxer and decode. Releasing the pause hold when the command
+  returns let the picture run for the couple of seconds that took — the exact
+  drift the hold exists to prevent — and the primed-but-starved audio output
+  then underran. Wait for `audio-pts` to become valid (capped, so a silent
+  file cannot strand playback).
+- **Measure A/V drift with `avsync`, never `position - audio-pts`.** The
+  latter includes the user's audio-delay setting, so a standing 4 s delay
+  reads as a permanent 4 s fault; the drift watchdog would then reload the
+  epoch every cooldown, forever. mpv applies the delay and reports the
+  residual error, which stays microscopic either way (verified on device:
+  4.0 s delay ⇒ `avsync` 0.0000 s).
 - Relay loads disable mpv's network read timeout for the loopback stream only;
   an intentional pause can leave it silent indefinitely. The external HTTP
   demuxers keep the ordinary timeout, which a 90-second pause survives.
@@ -109,11 +128,26 @@ release.yml` builds and publishes the signed APK with those notes.
 - The pre-mpv queue is bounded by bytes (256 MiB), mpv's forward cache by
   bytes (128 MiB). Backpressure must stop producers, never grow memory.
 
+- **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
+  `onStart`/`onStop` do not see it. Anything that has to react to the player
+  going away belongs on the metrics loop or the Surface callbacks, not on a
+  lifecycle callback. MediaCodec cannot decode without its output Surface, so
+  while the player is away video runs ahead of the audio clock — 24.9 s after
+  twenty seconds in PiP — and mpv cannot close that by seeking. The drift
+  watchdog in `handleWatchdogs` reloads the epoch at the audio position
+  instead; it is bounded by a cooldown because the gap reopens for as long as
+  the Surface is gone.
+
 ## Known issues
 
 - Seeking while paused reached `SEEKING -> PAUSED`, which `SessionStateMachine`
   rejected, failing the session (fixed 2026-07-26 by allowing it). Any new
   terminal state a controller path can produce needs a matching edge there.
+- The drift watchdog can fire repeatedly during a long PiP session (once per
+  cooldown) because the Surface is still gone. Switching the model to
+  `passthrough` for PiP does not help: the repro was *on* passthrough and the
+  gap opened all the same. Reacting to PiP entry/exit would need a signal from
+  `MainActivity`, which does not exist yet.
 - PGS/VobSub bitmap subtitle rendering is still unverified — the test library
   has only SSA samples.
 - S Pen and Samsung DeX interactive smoke tests remain hands-on.
