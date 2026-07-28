@@ -72,6 +72,7 @@ object BackupCodec {
                 put("gesturesEnabled", preferences.gesturesEnabled)
                 put("diagnosticsVisible", preferences.diagnosticsVisible)
                 put("backgroundPlayback", preferences.backgroundPlayback)
+                put("autoPlayNext", preferences.autoPlayNext)
                 put("fileLoggingEnabled", preferences.fileLoggingEnabled)
                 put("displayResampleSync", preferences.displayResampleSync)
                 put("interpolationEnabled", preferences.interpolationEnabled)
@@ -154,6 +155,7 @@ object BackupCodec {
             gesturesEnabled = player?.bool("gesturesEnabled") ?: current.gesturesEnabled,
             diagnosticsVisible = player?.bool("diagnosticsVisible") ?: current.diagnosticsVisible,
             backgroundPlayback = player?.bool("backgroundPlayback") ?: current.backgroundPlayback,
+            autoPlayNext = player?.bool("autoPlayNext") ?: current.autoPlayNext,
             fileLoggingEnabled = player?.bool("fileLoggingEnabled") ?: current.fileLoggingEnabled,
             displayResampleSync = player?.bool("displayResampleSync") ?: current.displayResampleSync,
             interpolationEnabled = player?.bool("interpolationEnabled")

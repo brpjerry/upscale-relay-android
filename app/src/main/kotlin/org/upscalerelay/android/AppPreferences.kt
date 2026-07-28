@@ -21,6 +21,7 @@ data class AppPreferences(
     val port: Int = 8590,
     val autoConnect: Boolean = false,
     val autoResume: Boolean = true,
+    val autoPlayNext: Boolean = true,
     val model: String = "",
     val qualityTier: String = "lossless-hevc",
     val fitMode: String = "fit",
@@ -70,6 +71,7 @@ class AppPreferencesStore(context: Context) {
     suspend fun setPort(value: Int) = set(Keys.PORT, value)
     suspend fun setAutoConnect(value: Boolean) = set(Keys.AUTO_CONNECT, value)
     suspend fun setAutoResume(value: Boolean) = set(Keys.AUTO_RESUME, value)
+    suspend fun setAutoPlayNext(value: Boolean) = set(Keys.AUTO_PLAY_NEXT, value)
     suspend fun setModel(value: String) = set(Keys.MODEL, value)
     suspend fun setQualityTier(value: String) = set(Keys.QUALITY_TIER, value)
     suspend fun setFitMode(value: String) = set(Keys.FIT_MODE, value)
@@ -104,6 +106,7 @@ class AppPreferencesStore(context: Context) {
             preferences[Keys.PORT] = value.port
             preferences[Keys.AUTO_CONNECT] = value.autoConnect
             preferences[Keys.AUTO_RESUME] = value.autoResume
+            preferences[Keys.AUTO_PLAY_NEXT] = value.autoPlayNext
             preferences[Keys.MODEL] = value.model
             preferences[Keys.QUALITY_TIER] = value.qualityTier
             preferences[Keys.FIT_MODE] = value.fitMode
@@ -194,6 +197,7 @@ class AppPreferencesStore(context: Context) {
         port = preferences[Keys.PORT] ?: 8590,
         autoConnect = preferences[Keys.AUTO_CONNECT] ?: false,
         autoResume = preferences[Keys.AUTO_RESUME] ?: true,
+        autoPlayNext = preferences[Keys.AUTO_PLAY_NEXT] ?: true,
         model = preferences[Keys.MODEL].orEmpty(),
         qualityTier = when (val tier = preferences[Keys.QUALITY_TIER] ?: "lossless-hevc") {
             "visually-lossless" -> "hevc-qp18"
@@ -229,6 +233,7 @@ class AppPreferencesStore(context: Context) {
         val PORT = intPreferencesKey("port")
         val AUTO_CONNECT = booleanPreferencesKey("auto_connect")
         val AUTO_RESUME = booleanPreferencesKey("auto_resume")
+        val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
         val MODEL = stringPreferencesKey("model")
         val QUALITY_TIER = stringPreferencesKey("quality_tier")
         val FIT_MODE = stringPreferencesKey("fit_mode")

@@ -785,6 +785,18 @@ still need hands on the device.
   test matches the percentage on the file card, so what the list shows as
   finished is what autoplay skips. When every later file is finished,
   playback simply stops rather than replaying one.
+- **Auto-advance is a setting (Settings → Player → "Play the next video
+  automatically", on by default).** Off, a natural end-of-file leaves the
+  player and returns to the library instead of walking the directory —
+  the same path the back button takes, so the session is torn down and the
+  browse screen reconnects. The check sits after the end-of-file window test
+  in `maybeAutoAdvance`, so a downlink that dies mid-file still belongs to the
+  reconnect path and does not eject the user.
+- **The model list has its own player sheet.** A server can publish dozens of
+  models, which crowded the capped scroll box inside "Playback settings"; the
+  player's top bar carries a separate "Model" button (hidden when the server
+  offers none) whose sheet scrolls the full list and opens scrolled to the
+  current selection. Quality, framing, and filters stay in the playback sheet.
 
 - **System media integration.** A platform `MediaSession` (owned by the
   playback ViewModel) mirrors title/duration metadata and live position, and
