@@ -281,6 +281,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         port = value.port.toString(),
                         autoConnect = value.autoConnect,
                         autoResume = value.autoResume,
+                        autoPlayNext = value.autoPlayNext,
                         selectedModel = value.model,
                         qualityTier = value.qualityTier,
                         fitMode = value.fitMode,
@@ -428,6 +429,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun setAutoResume(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(autoResume = value)
         persist { preferences.setAutoResume(value) }
+    }
+
+    fun setAutoPlayNext(value: Boolean) {
+        mutableUi.value = mutableUi.value.copy(autoPlayNext = value)
+        persist { preferences.setAutoPlayNext(value) }
     }
 
     /** Connect to a server discovered over mDNS; manual entry stays untouched. */
@@ -1920,12 +1926,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * whether it was played through or marked watched by hand. Server files
      * walk the library pages; local files walk the SAF directory the video was
      * opened from.
+     *
+     * With the auto-play preference off the finished video leaves the player
+     * instead, exactly as the back button would.
      */
     private fun maybeAutoAdvance() {
         val state = mutableUi.value
         val origin = activeOrigin ?: return
         if (state.playingPath == null || state.busy) return
-        if (state.directLocalFallback) return // the relay server is gone; stay on this file
         if (reconnectJob?.isActive == true || restartJob?.isActive == true) return
         if (seekJob?.isActive == true || autoAdvanceJob?.isActive == true) return
         // Only a true end-of-file advances. A downlink that dies mid-file also
@@ -1936,6 +1944,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         ) {
             return
         }
+        if (!state.autoPlayNext) {
+            AppLog.i(TAG, "auto-play is off; returning to the library")
+            closePlayback()
+            return
+        }
+        if (state.directLocalFallback) return // the relay server is gone; stay on this file
         autoAdvanceJob = viewModelScope.launch {
             when (origin) {
                 is PlaybackOrigin.ServerFile -> {
@@ -2473,6 +2487,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("gestures_enabled", state.gesturesEnabled)
                 put("auto_resume_enabled", state.autoResume)
                 put("auto_resume_count", resumeCount)
+                put("auto_play_next_enabled", state.autoPlayNext)
                 put("reconnecting", state.reconnecting != null)
                 put("performance_warning", state.performanceWarning ?: "")
             }
@@ -2608,6 +2623,7 @@ data class RelayUiState(
     val localPlayback: Boolean = false,
     val directLocalFallback: Boolean = false,
     val autoResume: Boolean = true,
+    val autoPlayNext: Boolean = true,
     val reconnecting: ReconnectStatus? = null,
     // Server loading text while open_session runs (TensorRT engine build).
     val openingProgress: String? = null,

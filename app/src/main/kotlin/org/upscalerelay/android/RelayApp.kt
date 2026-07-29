@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -45,6 +44,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.automirrored.outlined.Toc
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.History
@@ -81,6 +82,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
@@ -1063,6 +1065,20 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
             }
             item {
                 SettingsSection("Player") {
+                    SettingToggle(
+                        "Play the next video automatically",
+                        state.autoPlayNext,
+                        viewModel::setAutoPlayNext,
+                    )
+                    Text(
+                        if (state.autoPlayNext) {
+                            "When a video ends, the next unwatched file in the same folder starts."
+                        } else {
+                            "When a video ends, the player closes and returns to the library."
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     SettingToggle("Touch gestures", state.gesturesEnabled, viewModel::setGesturesEnabled)
                     SettingToggle("Diagnostic overlay", state.diagnosticsVisible, viewModel::setDiagnosticsVisible)
                     SettingToggle(
@@ -1203,13 +1219,25 @@ private fun SettingToggle(label: String, checked: Boolean, onCheckedChange: (Boo
 }
 
 @Composable
-private fun RadioSetting(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun RadioSetting(
+    label: String,
+    selected: Boolean,
+    supporting: String? = null,
+    onClick: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         RadioButton(selected = selected, onClick = onClick)
-        Text(label)
+        Text(label, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        supporting?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 
@@ -1242,6 +1270,7 @@ private fun PlayerScreen(
     var trackSheetVisible by remember { mutableStateOf(false) }
     var settingsSheetVisible by remember { mutableStateOf(false) }
     var chapterSheetVisible by remember { mutableStateOf(false) }
+    var modelSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
     val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds).coerceAtLeast(0.0)
     // Show what the user asked for, not what the pipeline momentarily reports:
@@ -1264,8 +1293,9 @@ private fun PlayerScreen(
         }
         return
     }
-    LaunchedEffect(controlsVisible, controlsLocked, state.paused, state.seeking, trackSheetVisible, settingsSheetVisible, chapterSheetVisible) {
-        if (controlsVisible && !controlsLocked && !state.paused && !state.seeking && !trackSheetVisible && !settingsSheetVisible && !chapterSheetVisible) {
+    val sheetOpen = trackSheetVisible || settingsSheetVisible || chapterSheetVisible || modelSheetVisible
+    LaunchedEffect(controlsVisible, controlsLocked, state.paused, state.seeking, sheetOpen) {
+        if (controlsVisible && !controlsLocked && !state.paused && !state.seeking && !sheetOpen) {
             delay(4_000)
             controlsVisible = false
         }
@@ -1313,6 +1343,7 @@ private fun PlayerScreen(
                 onTracks = { trackSheetVisible = true },
                 onSettings = { settingsSheetVisible = true },
                 onChapters = { chapterSheetVisible = true },
+                onModels = { modelSheetVisible = true },
                 onLock = {
                     controlsLocked = true
                     controlsVisible = false
@@ -1412,6 +1443,9 @@ private fun PlayerScreen(
     }
     if (chapterSheetVisible) {
         ChapterSheet(viewModel, state) { chapterSheetVisible = false }
+    }
+    if (modelSheetVisible) {
+        ModelSheet(viewModel, state) { modelSheetVisible = false }
     }
 }
 
@@ -1540,6 +1574,7 @@ private fun PlayerChrome(
     onTracks: () -> Unit,
     onSettings: () -> Unit,
     onChapters: () -> Unit,
+    onModels: () -> Unit,
     onLock: () -> Unit,
 ) {
     val chapters = state.session?.chapters.orEmpty()
@@ -1580,6 +1615,15 @@ private fun PlayerChrome(
                 Icon(Icons.Outlined.Subtitles, contentDescription = null, tint = Color.White)
                 Spacer(Modifier.width(8.dp))
                 Text("Audio & subtitles", color = Color.White)
+            }
+            // The model list has its own sheet: a server can offer dozens, far
+            // more than the playback sheet can show without swallowing the rest.
+            if (state.capabilities?.models.orEmpty().isNotEmpty()) {
+                TextButton(onClick = onModels) {
+                    Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Model", color = Color.White)
+                }
             }
             TextButton(onClick = onSettings) {
                 Icon(Icons.Outlined.Tune, contentDescription = null, tint = Color.White)
@@ -1944,6 +1988,59 @@ private fun ChapterSheet(viewModel: RelayViewModel, state: RelayUiState, onDismi
     }
 }
 
+/**
+ * The upscaling models the server offers, on their own sheet. A server can
+ * publish a long list, so this scrolls the whole sheet rather than a capped
+ * box inside a bigger one, and the selected entry is scrolled to on open.
+ *
+ * The sheet skips the partially-expanded state: half height fits six of twenty
+ * models, and it also measures the list too short for the opening scroll to
+ * reach the selection.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
+    val models = state.capabilities?.models.orEmpty()
+    val listState = rememberLazyListState()
+    // Once, on open: re-running it on every selection would yank the list back
+    // to the top of the row the user just tapped.
+    LaunchedEffect(Unit) {
+        val index = models.indexOfFirst { it.name == state.selectedModel }
+        if (index > 0) listState.scrollToItem(index)
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 28.dp)
+                .navigationBarsPadding(),
+        ) {
+            Text("Model", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                if (state.directLocalFallback) "The model applies to the next relay video."
+                else "Changing the model restarts this video at the current position.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            LazyColumn(state = listState) {
+                items(models, key = { it.name }) { model ->
+                    RadioSetting(
+                        label = model.name,
+                        selected = state.selectedModel == model.name,
+                        supporting = model.scaleFactor?.let { "×$it" },
+                    ) {
+                        viewModel.setModel(model.name)
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DelayControl(label: String, value: Double, adjust: (Double) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1968,16 +2065,10 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
             Text("Playback settings", style = MaterialTheme.typography.headlineSmall)
             Text(
                 if (state.directLocalFallback) "Changes apply to the next relay video."
-                else "Model, quality, framing, and filter changes restart this video at the current position.",
+                else "Quality, framing, and filter changes restart this video at the current position.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
-            Text("Model", style = MaterialTheme.typography.titleMedium)
-            LazyColumn(Modifier.heightIn(max = 220.dp)) {
-                items(state.capabilities?.models.orEmpty(), key = { it.name }) { model ->
-                    RadioSetting(model.name, state.selectedModel == model.name) { viewModel.setModel(model.name) }
-                }
-            }
             Text("Quality", style = MaterialTheme.typography.titleMedium)
             state.capabilities?.qualityOptions.orEmpty()
                 .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
