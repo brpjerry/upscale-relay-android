@@ -23,6 +23,7 @@ import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
 import java.io.Closeable
 import java.net.SocketTimeoutException
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -31,6 +32,7 @@ import kotlin.math.roundToLong
 class RelaySessionController(
     val host: String,
     val port: Int = 8590,
+    private val attachmentCacheRoot: Path? = null,
 ) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateMachine = SessionStateMachine()
@@ -62,6 +64,11 @@ class RelaySessionController(
     private var activeFitMode: String? = null
     private var activeResizeAlgorithm: String? = null
     private var originalMediaUrl: String? = null
+    private var attachmentCache: AttachmentCache? = null
+    private var attachmentView: Path? = null
+    private var attachmentCacheStats = AttachmentCacheStats()
+    private var requestedAuxTracks: String? = null
+    private var requestedAuxAttachments: String? = null
 
     suspend fun connect(display: DisplaySize, librarySort: String? = null): ConnectedLibrary {
         check(!closed.get())
@@ -123,9 +130,19 @@ class RelaySessionController(
             val model = requestedModel?.takeIf { requested ->
                 caps.models.any { it.name == requested }
             } ?: caps.phaseOneModel
+            val requestMuxedAuxTracks = caps.muxedAuxTracks
+            val requestCachedAttachments = requestMuxedAuxTracks && caps.attachmentCacheVersion >= 1
+            requestedAuxTracks = if (requestMuxedAuxTracks) "muxed" else null
+            requestedAuxAttachments = if (requestMuxedAuxTracks) {
+                if (requestCachedAttachments) "cached" else "embedded"
+            } else {
+                null
+            }
             val session = SessionInfo.fromJson(
                 requireNotNull(control).openSession(
                     path, model, display, qualityTier, fitMode, resizeAlgorithm,
+                    requestMuxedAuxTracks = requestMuxedAuxTracks,
+                    requestCachedAttachments = requestCachedAttachments,
                 ),
             )
             require(session.uplinkToken == null) { "server_file unexpectedly requires an uplink" }
@@ -136,6 +153,38 @@ class RelaySessionController(
                 "Android requires HEVC, got ${session.downlinkCodec}"
             }
             require(session.epoch == 0) { "initial session epoch must be zero" }
+
+            val confirmedMuxed = session.auxTracks == "muxed"
+            val fontDirectory = if (confirmedMuxed && session.auxAttachments == "cached") {
+                val cacheRoot = requireNotNull(attachmentCacheRoot) {
+                    "server confirmed cached attachments but no cache directory is configured"
+                }
+                val channel = requireNotNull(control)
+                val cache = AttachmentCache(
+                    cacheRoot,
+                    AttachmentFetcher { digest, token, destination, maxBytes ->
+                        channel.fetchAttachment(digest, token, destination, maxBytes)
+                    },
+                )
+                attachmentCache = cache
+                try {
+                    cache.materialize(
+                        session.sessionId,
+                        session.attachmentManifest,
+                        requireNotNull(session.attachmentToken),
+                    ).also {
+                        attachmentView = it.directory
+                        attachmentCacheStats = it.stats
+                    }.directory
+                } catch (error: Throwable) {
+                    // The confirmed epoch omitted these bodies. Never continue
+                    // with /media or a partial font view; retire the session.
+                    runCatching { channel.teardown() }
+                    throw error
+                }
+            } else {
+                null
+            }
 
             val mediaQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             queue = mediaQueue
@@ -156,7 +205,7 @@ class RelaySessionController(
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
-            originalMediaUrl = requireNotNull(control).mediaUrl(path)
+            originalMediaUrl = if (confirmedMuxed) null else requireNotNull(control).mediaUrl(path)
             currentEpoch.set(session.epoch)
             downlink.start()
             try {
@@ -168,7 +217,13 @@ class RelaySessionController(
             stateMachine.transition(SessionState.BUFFERING)
             PlaybackEndpoint(
                 localUrl = localServer.url,
-                originalMediaUrl = requireNotNull(originalMediaUrl),
+                originalMediaUrl = originalMediaUrl,
+                subtitleFontsDirectory = fontDirectory?.toString(),
+                auxTracks = if (confirmedMuxed) "muxed" else "external",
+                auxAttachments = if (confirmedMuxed) session.auxAttachments else "embedded",
+                requestedAuxTracks = requestedAuxTracks,
+                requestedAuxAttachments = requestedAuxAttachments,
+                attachmentCacheStats = attachmentCacheStats,
                 session = session,
                 model = model,
                 qualityTier = qualityTier,
@@ -257,6 +312,11 @@ class RelaySessionController(
             PlaybackEndpoint(
                 localUrl = localServer.url,
                 originalMediaUrl = originalMediaUrl,
+                subtitleFontsDirectory = null,
+                auxTracks = "external",
+                auxAttachments = "embedded",
+                requestedAuxTracks = null,
+                requestedAuxAttachments = null,
                 session = session,
                 model = model,
                 qualityTier = qualityTier,
@@ -327,7 +387,17 @@ class RelaySessionController(
             )
             PlaybackEndpoint(
                 localUrl = nextLoopback.url,
-                originalMediaUrl = requireNotNull(originalMediaUrl),
+                originalMediaUrl = originalMediaUrl,
+                subtitleFontsDirectory = attachmentView?.toString(),
+                auxTracks = if (originalMediaUrl == null) "muxed" else "external",
+                auxAttachments = if (originalMediaUrl == null) {
+                    requireNotNull(activeSession).auxAttachments
+                } else {
+                    "embedded"
+                },
+                requestedAuxTracks = requestedAuxTracks,
+                requestedAuxAttachments = requestedAuxAttachments,
+                attachmentCacheStats = attachmentCacheStats,
                 session = session,
                 model = requireNotNull(activeModel),
                 qualityTier = requireNotNull(activeQualityTier),
@@ -398,6 +468,9 @@ class RelaySessionController(
         loopback = null
         queue?.close()
         queue = null
+        attachmentCache?.removeView(attachmentView)
+        attachmentView = null
+        attachmentCache = null
         runCatching { control?.teardown() }
         control = null
         capabilities = null
@@ -407,6 +480,9 @@ class RelaySessionController(
         activeFitMode = null
         activeResizeAlgorithm = null
         originalMediaUrl = null
+        attachmentCacheStats = AttachmentCacheStats()
+        requestedAuxTracks = null
+        requestedAuxAttachments = null
         currentEpoch.set(0)
         suppressBufferReports.set(false)
         desiredPaused.set(false)
@@ -459,7 +535,13 @@ data class ConnectedLibrary(
 
 data class PlaybackEndpoint(
     val localUrl: String,
-    val originalMediaUrl: String,
+    val originalMediaUrl: String?,
+    val subtitleFontsDirectory: String?,
+    val auxTracks: String,
+    val auxAttachments: String,
+    val requestedAuxTracks: String?,
+    val requestedAuxAttachments: String?,
+    val attachmentCacheStats: AttachmentCacheStats = AttachmentCacheStats(),
     val session: SessionInfo,
     val model: String,
     val qualityTier: String,

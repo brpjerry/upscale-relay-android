@@ -1,5 +1,47 @@
 # Android device validation notes
 
+## Muxed auxiliary tracks and cached fonts — 2026-08-19
+
+Device: Galaxy Tab S9 Ultra (`SM-X910`, Android 16/API 36, build
+`X910XXS6EZG3`). Android source baseline:
+`562854ba9bbe2cd7b433735c27e5ae835f9a64a8` plus this working-tree
+implementation on `codex/muxed-aux-tracks`; server:
+`ebed0f4abad1139bc980a04c5f15f82f94aeef67` on the matching branch. The
+co-installed debug package used `passthrough`, `hevc-qp18`, fit, and a
+2960×1664 HEVC output. The final normal-package debug APK is 82,707,268
+bytes with SHA-256
+`2302FDA6390DD3741A72A463C898E06097714B27643D68EEF6CEBF84317B7DAC`.
+
+- The font-rich 23:40 sample confirmed `aux_tracks=muxed` and
+  `aux_attachments=cached`. Its manifest contained 23 objects totaling
+  8,003,424 bytes. The cold open reported 0 hits/23 misses; the later reopen
+  reported 23 hits/0 misses. Seeks retained the same view and performed no
+  cache materialization. Teardown removed the session view, retained the
+  hash objects, and left zero server sessions.
+- mpv exposed two audio tracks (`Main`, `Commentary`) and one English
+  subtitle, exactly once. Commentary and subtitles-off remained checked after
+  epoch 1. No `audio-add` appeared in the URL-redacted muxed logs. The cached
+  fonts rendered visibly in the ASS subtitle screenshot.
+- Cold open: controller `OPENING` 23:02:28.550 → `BUFFERING` 23:02:30.048,
+  with cached materialization complete at 23:02:30.053 and player `PLAYING`
+  at 23:02:31.239. Warm reopen plus saved-position epoch seek reached server
+  playback in 1.218 s and Android `PLAYING` in about 1.44 s.
+- Active seek to 900.3 s: server first packet 195.7 ms; Android controller
+  seek commit → `PLAYING` about 1.21 s (the one-second telemetry snapshot
+  observed the settled position at 1.97 s). Initial A/V error was -12 ms and
+  converged near zero, with 0/0 output/decoder drops in that leg.
+- Paused seek created epoch 2 at 1076.6 s, retained `PAUSED`, and resumed with
+  -1.8 ms A/V error and 0/0 drops. The server reported first packet 172.2 ms.
+- A second file confirmed `external/embedded`; `/media` compatibility attached
+  successfully and settled near zero A/V error with 0/0 drops. This is an
+  authoritative fallback result, not a requested-mode assumption.
+
+Automated result: full Gradle `test` plus `assembleDebug` passed. Remaining
+physical gates from `MUXED_AUX_TRACKS_PLAN.md`: 30-minute muxed endurance,
+25-action storm, warm/shared-hash body-byte accounting at the server, explicit
+cache-failure injection, PGS/VobSub, S24 smoke, long pause/background/PiP, and
+20-cycle leak run.
+
 ## Matroska chapters and TensorRT loading results — 2026-07-19
 
 The release-candidate build was installed on the target Galaxy Tab S9 Ultra

@@ -54,6 +54,10 @@ data class Capabilities(
     val defaultResizeAlgorithm: String,
     /** Sort keys GET /library accepts ("name", "mtime"); empty on old servers. */
     val librarySortKeys: List<String> = emptyList(),
+    /** Server-file sessions may opt in to in-band audio/subtitle tracks. */
+    val muxedAuxTracks: Boolean = false,
+    /** Content-addressed subtitle attachment protocol version; zero means absent. */
+    val attachmentCacheVersion: Int = 0,
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -102,7 +106,48 @@ data class Capabilities(
                     ?.jsonPrimitive?.content ?: "lanczos",
                 librarySortKeys = value["library_sort"]?.jsonArray
                     ?.map { it.jsonPrimitive.content } ?: emptyList(),
+                muxedAuxTracks = value["muxed_aux_tracks"]?.jsonPrimitive?.booleanOrNull ?: false,
+                attachmentCacheVersion = value["attachment_cache"]?.jsonPrimitive?.intOrNull
+                    ?.coerceAtLeast(0) ?: 0,
             )
+        }
+    }
+}
+
+data class AttachmentManifestEntry(
+    val name: String,
+    val mimeType: String,
+    val size: Long,
+    val sha256: String,
+) {
+    companion object {
+        const val MAX_NAME_LENGTH = 128
+        const val MAX_ATTACHMENT_BYTES = 64L * 1024 * 1024
+        const val MAX_MANIFEST_BYTES = 256L * 1024 * 1024
+        private val SHA256 = Regex("^[0-9a-f]{64}$")
+        private val UNSAFE_NAME = Regex("[^A-Za-z0-9._-]+")
+
+        fun fromJson(value: JsonObject): AttachmentManifestEntry {
+            val digest = value.requiredString("sha256")
+            require(SHA256.matches(digest)) { "invalid attachment hash" }
+            val size = value["size"]?.jsonPrimitive?.content?.toLongOrNull()
+            require(size != null && size in 0..MAX_ATTACHMENT_BYTES) {
+                "invalid attachment size"
+            }
+            val name = sanitizeName(value["name"]?.jsonPrimitive?.content, digest)
+            val mimeType = value["mimetype"]?.jsonPrimitive?.content
+                ?.takeIf { it.isNotBlank() }
+                ?: "application/octet-stream"
+            return AttachmentManifestEntry(name, mimeType, size, digest)
+        }
+
+        private fun sanitizeName(raw: String?, digest: String): String {
+            val basename = raw.orEmpty().replace('\\', '/').substringAfterLast('/')
+            val printable = basename.filter { it >= ' ' && it != '\u007f' }
+            return UNSAFE_NAME.replace(printable, "_")
+                .trim(' ', '.', '_')
+                .take(MAX_NAME_LENGTH)
+                .ifBlank { "font-${digest.take(12)}" }
         }
     }
 }
@@ -189,9 +234,34 @@ data class SessionInfo(
     val fitMode: String,
     val resizeAlgorithm: String?,
     val chapters: List<ChapterInfo> = emptyList(),
+    val source: String = "uplink",
+    /** Effective server confirmation; unknown values intentionally fall back safely. */
+    val auxTracks: String = "external",
+    /** Effective attachment confirmation; unknown values intentionally mean embedded. */
+    val auxAttachments: String = "embedded",
+    val attachmentManifest: List<AttachmentManifestEntry> = emptyList(),
+    /** Ephemeral bearer token. Never include this value in logs or persisted state. */
+    val attachmentToken: String? = null,
 ) {
     companion object {
-        fun fromJson(value: JsonObject) = SessionInfo(
+        fun fromJson(value: JsonObject): SessionInfo {
+            val auxTracks = value["aux_tracks"]?.jsonPrimitive?.content
+                ?.takeIf { it == "muxed" } ?: "external"
+            val auxAttachments = value["aux_attachments"]?.jsonPrimitive?.content
+                ?.takeIf { it == "cached" } ?: "embedded"
+            val manifest = if (auxTracks == "muxed" && auxAttachments == "cached") {
+                parseAttachmentManifest(value["attachment_manifest"])
+            } else {
+                emptyList()
+            }
+            val attachmentToken = if (auxTracks == "muxed" && auxAttachments == "cached") {
+                value["attachment_token"]?.takeUnless { it is JsonNull }
+                    ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: error("cached attachment session omitted its token")
+            } else {
+                null
+            }
+            return SessionInfo(
             sessionId = value.requiredString("session_id"),
             mediaPort = value.requiredInt("media_port"),
             uplinkToken = value["uplink_token"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.content,
@@ -215,7 +285,39 @@ data class SessionInfo(
                 }
                 ?.sortedBy { it.startSeconds }
                 .orEmpty(),
+            source = value["source"]?.jsonPrimitive?.content
+                ?: if (value["uplink_token"] == null || value["uplink_token"] is JsonNull) {
+                    "server_file"
+                } else {
+                    "uplink"
+                },
+            auxTracks = auxTracks,
+            auxAttachments = auxAttachments,
+            attachmentManifest = manifest,
+            attachmentToken = attachmentToken,
         )
+        }
+
+        private fun parseAttachmentManifest(value: kotlinx.serialization.json.JsonElement?): List<AttachmentManifestEntry> {
+            val array = value?.takeUnless { it is JsonNull }?.jsonArray
+                ?: error("cached attachment session omitted its manifest")
+            var total = 0L
+            val uniqueSizes = mutableMapOf<String, Long>()
+            return array.map { element ->
+                val entry = AttachmentManifestEntry.fromJson(element.jsonObject)
+                val prior = uniqueSizes.putIfAbsent(entry.sha256, entry.size)
+                require(prior == null || prior == entry.size) {
+                    "duplicate attachment hash has inconsistent size"
+                }
+                if (prior == null) {
+                    total += entry.size
+                    require(total <= AttachmentManifestEntry.MAX_MANIFEST_BYTES) {
+                        "attachment manifest exceeds session size limit"
+                    }
+                }
+                entry
+            }
+        }
     }
 }
 

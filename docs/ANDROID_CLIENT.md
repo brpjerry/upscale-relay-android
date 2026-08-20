@@ -291,7 +291,7 @@ hard synchronization and seek semantics before investing in product UI.
 - Implement fit/cover and fullscreen crop behavior.
 - Match desktop telemetry for buffer, bitrate, decoder, A/V drift, and drops.
 
-### Implementation status (2026-07-16)
+### Implementation status (updated 2026-08-19)
 
 The Phase 2 code is implemented, host-tested, and device-tested on the Galaxy
 Tab S9 Ultra. The A/V endurance, seek storm, SSA subtitle, control, tier, and
@@ -299,9 +299,10 @@ fit/cover checks passed. The only unrun acceptance item is bitmap subtitle
 rendering because every subtitle-bearing file in the configured test library
 uses SSA; no PGS or VobSub sample was available.
 
-- The control client now negotiates either Android HEVC tier and fit/cover,
-  builds the original `/media` URL, sends pause and absolute-PTS seek messages,
-  and matches `seek_ready` to the requested epoch.
+- The control client negotiates Android HEVC tiers, fit/cover, muxed
+  audio/subtitles, and cached attachments. It builds `/media` only when the
+  authoritative session confirmation is external, sends pause and
+  absolute-PTS seek messages, and matches `seek_ready` to the requested epoch.
 - Session metadata includes exact source `time_base` and average frame rate so
   UI seconds are converted back to protocol PTS without guessing.
 - A single blocking downlink socket survives seeks. Its epoch route is swapped
@@ -311,10 +312,11 @@ uses SSA; no PGS or VobSub sample was available.
 - Rapid UI seeks cancel and join the preceding request before allocating the
   next epoch. mpv is stopped first, the old input is allowed 150 ms to tear
   down, and the replacement is loaded without `start=`.
-- mpv uses `rebase-start-time=no`, audio-clock synchronization, and the
-  original server file as its external audio/subtitle source. That source is
-  attached with `audio-add` / `sub-add` **after** playback starts, not through
-  per-load `audio-file` / `sub-files-append` options — see the seek-latency
+- mpv uses `rebase-start-time=no` and audio-clock synchronization. Confirmed
+  muxed sessions consume the relay Matroska alone and remap track descriptors
+  after each epoch; local/compatibility sessions attach the original once
+  with `audio-add` **after** playback starts, not through per-load
+  `audio-file` / `sub-files-append` options — see the historical seek-latency
   note below. Cover is center-cropped server-side before resize/encode, so the
   Android decoder does not process off-screen overflow. Android retains mpv's
   normal frame-drop policy so missed presentation deadlines stay observable.
@@ -328,7 +330,9 @@ uses SSA; no PGS or VobSub sample was available.
   to `files/phase4-latest.json` for both server-library and local playback.
 - JVM coverage includes metadata parsing, epoch route replacement/stale packet
   rejection, state transitions, bounded queues/framing, and mpv load-option
-  escaping. SSA rendering, track selection, and delay changes passed with the
+  escaping, negotiation defaults, manifest bounds, atomic cache publication,
+  duplicate hashes/names, eviction, and descriptor-based track remapping. SSA
+  rendering, track selection, and delay changes passed with the
   packaged libmpv build; bitmap subtitle rendering still needs a device sample.
 
 Target-device results are recorded in
@@ -354,9 +358,10 @@ live one-shot socket, so the seek is rejected (`Cached seek not possible` /
 `Cannot seek in this stream`) and mpv instead reached the epoch by decoding
 forward through everything before it.
 
-`MpvPlayerEngine` now loads the relay stream alone and issues `audio-add` /
-`sub-add` on the first `PLAYBACK_RESTART` of each load, when the position is
-known; each external demuxer then performs one HTTP range seek. Measured on
+`MpvPlayerEngine` now loads the relay stream alone and issues one `audio-add`
+on the first `PLAYBACK_RESTART` of each load, when the position is known; that
+external demuxer exposes the source's audio and subtitle tracks and performs
+one HTTP range seek. Measured on
 the Tab S9 Ultra against a 23:40 file:
 
 | Seek target | Video frame shown | Audio ready |
@@ -371,6 +376,28 @@ A/V error of 10–25 µs, zero decoder drops, ~4 output drops per epoch, a full
 subsequent seeks. A 90-second pause and resume kept external audio alive even
 though the external demuxers now use the ordinary `network-timeout` rather
 than the relay stream's per-load `network-timeout=0`.
+
+### Negotiated muxed auxiliary tracks and cached fonts (2026-08-19)
+
+Capable server-library sessions now request muxed audio/subtitles and cached
+attachments without a protocol-version bump. Missing/unknown fields fall back
+to external/embedded. Cached manifests are size/name/hash validated before any
+network or file operation; bodies are bearer-authenticated, streamed to a
+same-directory temp file, exact-size/SHA-256 verified, fsynced, atomically
+published, and linked/copied into a temporary libass font view. The token is
+never logged or persisted.
+
+On the Tab S9 Ultra, a 23-font/8,003,424-byte ASS sample confirmed
+`muxed/cached`; the cold open downloaded each object once, repeated active and
+paused seeks performed no attachment reads, and a reopen reported 23 hits/0
+misses. The player exposed two audio tracks and one subtitle exactly once. A
+selected commentary track and subtitles-off survived epoch reloads. A far
+active seek reached the new player restart in about 1.2 s (server first packet
+195.7 ms); a paused seek remained paused and resumed at -1.8 ms A/V error with
+zero decoder/output drops in that leg. A second file authoritatively fell back
+to `external/embedded`, proving the existing post-restart attach branch still
+works. Full endurance, seek-storm, PGS/VobSub, phone, and fault-injection gates
+remain follow-up acceptance work rather than being inferred from this smoke.
 
 ### Acceptance gate
 
@@ -926,6 +953,7 @@ still need hands on the device.
 | Lossless-HEVC hardware validation | 1 |
 | Bounded buffering, telemetry, lifecycle-safe teardown | 1 |
 | Audio, subtitles, controls, seeks, HEVC quality selection | 2 |
+| Negotiated muxed auxiliary tracks and cached subtitle fonts | 2 follow-up |
 | Tablet UI, settings, gestures, and system light/dark mode | 3 |
 | Local files, demux/uplink, and local fallback | 4 |
 | Discovery, pairing, reconnect/resume | 5 |

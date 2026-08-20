@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MessagesTest {
@@ -92,5 +94,73 @@ class MessagesTest {
         assertEquals(350, options[0].p95Mbps)
         assertEquals(false, options[1].androidSupported)
         assertNull(options[1].p95Mbps)
+    }
+
+    @Test
+    fun `auxiliary capabilities are additive and default off`() {
+        val base = """{"protocol_version":1,"server_name":"relay","models":[],"quality_tiers":[]"""
+        val old = Capabilities.fromJson(Json.parseToJsonElement("$base}").jsonObject)
+        assertEquals(false, old.muxedAuxTracks)
+        assertEquals(0, old.attachmentCacheVersion)
+
+        val current = Capabilities.fromJson(
+            Json.parseToJsonElement("""$base,"muxed_aux_tracks":true,"attachment_cache":1}""").jsonObject,
+        )
+        assertEquals(true, current.muxedAuxTracks)
+        assertEquals(1, current.attachmentCacheVersion)
+    }
+
+    @Test
+    fun `session auxiliary confirmations are authoritative and tolerant`() {
+        val base = """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1,"epoch":0"""
+        val old = SessionInfo.fromJson(Json.parseToJsonElement("$base}").jsonObject)
+        assertEquals("external", old.auxTracks)
+        assertEquals("embedded", old.auxAttachments)
+        assertEquals("server_file", old.source)
+
+        val muxed = SessionInfo.fromJson(
+            Json.parseToJsonElement("""$base,"source":"server_file","aux_tracks":"muxed","aux_attachments":"embedded"}""").jsonObject,
+        )
+        assertEquals("muxed", muxed.auxTracks)
+        assertEquals("embedded", muxed.auxAttachments)
+
+        val future = SessionInfo.fromJson(
+            Json.parseToJsonElement("""$base,"aux_tracks":"future","aux_attachments":"remote"}""").jsonObject,
+        )
+        assertEquals("external", future.auxTracks)
+        assertEquals("embedded", future.auxAttachments)
+    }
+
+    @Test
+    fun `cached attachment manifest is bounded sanitized and authenticated`() {
+        val digest = "a".repeat(64)
+        val value = Json.parseToJsonElement(
+            """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1,"epoch":0,"aux_tracks":"muxed","aux_attachments":"cached","attachment_manifest":[{"name":"../../unsafe font.ttf","mimetype":"font/ttf","size":3,"sha256":"$digest"}],"attachment_token":"secret"}""",
+        ).jsonObject
+        val session = SessionInfo.fromJson(value)
+        assertEquals("cached", session.auxAttachments)
+        assertEquals("unsafe_font.ttf", session.attachmentManifest.single().name)
+        assertEquals(3L, session.attachmentManifest.single().size)
+        assertTrue(session.attachmentToken?.isNotBlank() == true)
+    }
+
+    @Test
+    fun `cached attachment manifest rejects unsafe metadata before IO`() {
+        val prefix = """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1,"epoch":0,"aux_tracks":"muxed","aux_attachments":"cached""" + '"'
+        assertThrows(IllegalArgumentException::class.java) {
+            SessionInfo.fromJson(
+                Json.parseToJsonElement("""$prefix,"attachment_manifest":[{"name":"x","size":0,"sha256":"../bad"}],"attachment_token":"secret"}""").jsonObject,
+            )
+        }
+        assertThrows(IllegalStateException::class.java) {
+            SessionInfo.fromJson(
+                Json.parseToJsonElement("""$prefix,"attachment_manifest":[]}""").jsonObject,
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            SessionInfo.fromJson(
+                Json.parseToJsonElement("""$prefix,"attachment_manifest":[{"name":"x","size":67108865,"sha256":"${"b".repeat(64)}"}],"attachment_token":"secret"}""").jsonObject,
+            )
+        }
     }
 }
