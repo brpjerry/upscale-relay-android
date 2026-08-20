@@ -38,4 +38,39 @@ class MpvPlayerEngineTest {
         )
         assertEquals("no urls here 10/20", MpvPlayerEngine.redactUrls("no urls here 10/20"))
     }
+
+    @Test
+    fun `track choices remap by descriptor and occurrence instead of numeric id`() {
+        val original = listOf(
+            track(2, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+            track(3, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+        )
+        val remembered = rememberTrack(original, 3)
+        val reloaded = listOf(
+            track(9, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+            track(10, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+        )
+        assertEquals(10, remapTrack(reloaded, remembered))
+    }
+
+    @Test
+    fun `numeric id is reused only while its descriptor still matches`() {
+        val remembered = rememberTrack(
+            listOf(track(2, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass")),
+            2,
+        )
+        val reloaded = listOf(
+            track(2, MpvTrack.Type.SUBTITLE, "spa", "Dialogue", "ass"),
+            track(7, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass"),
+        )
+        assertEquals(7, remapTrack(reloaded, remembered))
+    }
+
+    private fun track(
+        id: Int,
+        type: MpvTrack.Type,
+        language: String,
+        title: String,
+        codec: String,
+    ) = MpvTrack(id, type, language, title, codec, selected = false, external = false)
 }

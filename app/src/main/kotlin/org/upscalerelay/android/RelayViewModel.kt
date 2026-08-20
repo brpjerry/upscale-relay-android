@@ -55,6 +55,8 @@ import org.upscalerelay.player.mpv.MpvMetrics
 import org.upscalerelay.player.mpv.MpvPlaybackState
 import org.upscalerelay.player.mpv.MpvPlayerEngine
 import org.upscalerelay.player.mpv.MpvTrack
+import org.upscalerelay.player.mpv.RelayAuxMode
+import org.upscalerelay.player.mpv.RelayLoad
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
@@ -77,8 +79,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionStartedAt: Instant? = null
     private var playerVersions: Map<String, String> = emptyMap()
     private val preferences = AppPreferencesStore(application)
+    private val attachmentCacheRoot = application.cacheDir.resolve("relay-attachments").toPath()
     private var autoConnectAttempted = false
     private var subtitlePreferenceAppliedSession: String? = null
+    private var trackDiagnosticsLoggedSession: String? = null
     private var localDocumentServer: LocalDocumentHttpServer? = null
     private var localDocumentUri: String? = null
     private var localTreeUri: Uri? = null
@@ -804,7 +808,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             selectedLibraryNode = null,
         )
         AppLog.i(TAG, "connect $host:$port display=${mutableUi.value.display.width}x${mutableUi.value.display.height}")
-        val next = RelaySessionController(host, port)
+        val next = RelaySessionController(host, port, attachmentCacheRoot)
         controller = next
         collectController(next)
         val rootSort = when (mutableUi.value.librarySort) {
@@ -813,6 +817,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         runCatching { next.connect(mutableUi.value.display, rootSort) }
             .onSuccess { connected ->
+                AppLog.i(
+                    TAG,
+                    "server auxiliary capabilities muxed=${connected.capabilities.muxedAuxTracks} " +
+                        "attachmentCache=${connected.capabilities.attachmentCacheVersion}",
+                )
                 val selectedModel = mutableUi.value.selectedModel.takeIf { selected ->
                     connected.capabilities.models.any { it.name == selected }
                 } ?: connected.capabilities.phaseOneModel
@@ -1188,7 +1197,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     preferences.addRecentLocalUri(uriValue)
                 }
                 playerEngine.setPanscan(0.0)
-                playerEngine.load(endpoint.localUrl, endpoint.originalMediaUrl)
+                loadRelayEndpoint(endpoint)
                 currentController.startServerPlayback()
                 startMetrics(currentController)
             }.onFailure { error ->
@@ -1260,7 +1269,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         preferences.addRecent(file.path)
                     }
                     playerEngine.setPanscan(0.0)
-                    playerEngine.load(endpoint.localUrl, endpoint.originalMediaUrl)
+                    loadRelayEndpoint(endpoint)
                     currentController.startServerPlayback()
                     startMetrics(currentController)
                 }
@@ -1411,7 +1420,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 // stop -> retire old loopback/queue -> settle -> loadfile.
                 // Never pass start=: absolute Matroska PTS remain authoritative.
                 delay(150)
-                playerEngine.load(endpoint.localUrl, endpoint.originalMediaUrl)
+                loadRelayEndpoint(endpoint)
                 mutableUi.value = mutableUi.value.copy(
                     endpoint = endpoint.localUrl,
                     session = endpoint.session,
@@ -1800,7 +1809,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableUi.value
         val host = state.host.trim()
         val port = state.port.toIntOrNull() ?: 8590
-        val next = RelaySessionController(host, port)
+        val next = RelaySessionController(host, port, attachmentCacheRoot)
         controller = next
         collectController(next)
         val connected = next.connect(state.display)
@@ -1879,7 +1888,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         playerEngine.setPanscan(0.0)
-        playerEngine.load(finalEndpoint.localUrl, finalEndpoint.originalMediaUrl)
+        loadRelayEndpoint(finalEndpoint)
         playerEngine.setPaused(false)
         next.startServerPlayback()
         startMetrics(next)
@@ -2185,6 +2194,32 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         return controller.seek((saved / timeBase.value).roundToLong())
     }
 
+    private fun loadRelayEndpoint(endpoint: PlaybackEndpoint) {
+        val manifestBytes = endpoint.session.attachmentManifest.sumOf { it.size }
+        val cache = endpoint.attachmentCacheStats
+        AppLog.i(
+            TAG,
+            "relay auxiliary requested=${endpoint.requestedAuxTracks ?: "omitted"}/" +
+                "${endpoint.requestedAuxAttachments ?: "omitted"} " +
+                "confirmed=${endpoint.auxTracks}/${endpoint.auxAttachments} " +
+                "manifestObjects=${endpoint.session.attachmentManifest.size} " +
+                "manifestBytes=$manifestBytes cacheHits=${cache.hits} cacheMisses=${cache.misses} " +
+                "verifiedBytes=${cache.verifiedBytes} evictions=${cache.evictions}",
+        )
+        playerEngine.load(
+            RelayLoad(
+                streamUrl = endpoint.localUrl,
+                externalMediaUrl = endpoint.originalMediaUrl,
+                subtitleFontsDirectory = endpoint.subtitleFontsDirectory,
+                auxMode = if (endpoint.auxTracks == "muxed") {
+                    RelayAuxMode.MUXED
+                } else {
+                    RelayAuxMode.EXTERNAL
+                },
+            ),
+        )
+    }
+
     /** Persists the watch position (throttled); near the end it clears it. */
     private fun maybeSaveProgress(mpv: MpvMetrics) {
         val origin = activeOrigin ?: return
@@ -2264,6 +2299,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 val tracks = withContext(Dispatchers.IO) { playerEngine.trackSnapshot() }
                 val sessionId = mutableUi.value.session?.sessionId
                 val subtitles = tracks.filter { it.type == MpvTrack.Type.SUBTITLE }
+                if (sessionId != null && sessionId != trackDiagnosticsLoggedSession && tracks.isNotEmpty()) {
+                    AppLog.i(
+                        TAG,
+                        "mpv tracks audio=${tracks.count { it.type == MpvTrack.Type.AUDIO }} " +
+                            "subtitles=${subtitles.size} external=${tracks.count { it.external }}",
+                    )
+                    trackDiagnosticsLoggedSession = sessionId
+                }
                 if (
                     sessionId != null &&
                     subtitlePreferenceAppliedSession != sessionId &&
@@ -2490,6 +2533,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("auto_play_next_enabled", state.autoPlayNext)
                 put("reconnecting", state.reconnecting != null)
                 put("performance_warning", state.performanceWarning ?: "")
+                put("audio_track_count", state.tracks.count { it.type == MpvTrack.Type.AUDIO })
+                put("subtitle_track_count", state.tracks.count { it.type == MpvTrack.Type.SUBTITLE })
+                put("external_track_count", state.tracks.count { it.external })
             }
             File(getApplication<Application>().filesDir, "phase4-latest.json").writeText(report.toString())
         }

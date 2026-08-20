@@ -76,15 +76,27 @@ release.yml` builds and publishes the signed APK with those notes.
 
 ## Hard rules
 
-- **Attach the original media after playback starts, never on `loadfile`.**
+- **For local or confirmed-external relay loads, attach the original media
+  after playback starts, never on `loadfile`.**
   mpv positions an external demuxer at the current playback time *when the
   track is selected*, and during load that time is zero. The relay stream
   carries only the tail of the file from the seek target, so `audio-file` /
   `sub-files-append` left the audio and subtitle demuxers at the start of the
   original file and mpv reached the epoch by decoding everything before it —
   13–20 s of black screen after a far seek, scaling with the seek target.
-  `MpvPlayerEngine.attachExternalMedia` adds them with `audio-add` / `sub-add`
-  on the first `PLAYBACK_RESTART` instead.
+  `MpvPlayerEngine.attachExternalMedia` adds them with one `audio-add` on the
+  first `PLAYBACK_RESTART` instead.
+- **Never `audio-add` a confirmed muxed epoch.** Only
+  `session_opened.aux_tracks == "muxed"` authorizes omitting `/media`; a
+  request is not confirmation. Muxed reloads re-enumerate fresh Matroska
+  tracks and remap explicit choices by descriptor/occurrence, including
+  subtitles-off. Numeric mpv IDs are not protocol identity.
+- **Cached attachment confirmation is all-or-fail.** Materialize the complete
+  verified font view before `loadfile`; never silently add `/media` after the
+  server omitted attachment bodies. Bearer tokens belong only in the
+  Authorization header and must never enter URLs, DataStore, telemetry,
+  ordinary logs, or exception text. Cancellation must close and join the
+  response writer before deleting its temp/view or tearing down the session.
 - `--start=<target>` does not fix that and was tried on the device: the
   loopback stream is a live one-shot socket, so mpv rejects the seek
   (`Cached seek not possible` / `Cannot seek in this stream`). A back buffer

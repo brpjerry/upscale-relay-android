@@ -11,15 +11,20 @@ and current status.
 ## Architecture
 
 ```text
-server library ──► server_file session ─┐
-                                        ├─► framed TCP downlink ─► bounded
-local file ─► MediaExtractor demux ─►   │     byte queue ─► localhost TCP ─►
-              framed TCP uplink ────────┘     libmpv ─► MediaCodec ─► Surface
+server video ─► upscale/encode ─────────┐
+original server audio/subtitles ─copy───┼─► per-epoch Matroska downlink ─┐
+verified cached subtitle fonts ─────────┘                                │
+                                                                          ├─► libmpv ─► MediaCodec/Surface
+local video ─► MediaExtractor ─► framed uplink ─► video downlink ─────────┤
+local audio/subtitles ─► private Range HTTP bridge ─► external attach ────┘
 ```
 
-Original audio/subtitles attach from a Range-capable HTTP source (the
-server's `/media` URL, or an on-device loopback bridge for local files) with
-absolute-PTS synchronization; seeks open a new *epoch* on the same sockets.
+Capable server-library sessions stream-copy original audio/subtitles into the
+relay epoch and fetch immutable subtitle fonts once through a verified,
+content-addressed cache. `/media` is retained only when an older/unsupported
+server confirms the compatibility `external` mode. Local/SAF sessions always
+retain their on-device Range bridge. All branches use absolute PTS, and seeks
+open a fresh *epoch* on the same media sockets.
 
 Modules:
 
@@ -29,7 +34,7 @@ Modules:
 - `relay-protocol` — pure-Kotlin protocol v1 framing and JSON models.
 - `relay-client` — control WebSocket, session state machine, downlink
   receiver, uplink sender, bounded media queue, localhost media server,
-  reconnect policy and failure taxonomy.
+  verified attachment cache, reconnect policy and failure taxonomy.
 - `player-mpv` — lifecycle-checked libmpv wrapper and `SurfaceView` host.
 - `relay-demux` — SAF browsing, MediaExtractor access-unit source, and the
   local HTTP bridge for repeated document access.

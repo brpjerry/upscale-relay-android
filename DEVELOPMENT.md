@@ -6,7 +6,7 @@ live in [`docs/ANDROID_CLIENT.md`](docs/ANDROID_CLIENT.md) and the
 physical-device validation record in
 [`docs/ANDROID_DEVICE_NOTES.md`](docs/ANDROID_DEVICE_NOTES.md).
 
-## Feature status (2026-07-17)
+## Feature status (2026-08-19)
 
 All phases through 5.5 are implemented and device-verified on the Galaxy Tab
 S9 Ultra, with the compact layouts additionally verified on a Galaxy S24
@@ -15,6 +15,9 @@ Ultra:
 - Server-library and local (SAF/MediaExtractor uplink) relay playback with
   hardware HEVC decode, original audio/subtitles, epoch seeks, and direct
   local fallback at the current position.
+- Negotiated server-library muxed audio/subtitles and verified cached subtitle
+  fonts. Confirmed muxed sessions make no `/media` attach; old/unsupported
+  confirmations retain that compatibility path unchanged.
 - mDNS discovery of servers, automatic reconnect/resume with a failure
   taxonomy, mid-play model/quality/framing changes, and sustain warnings.
 - MediaSession with lock-screen/notification controls, audio focus,
@@ -39,6 +42,9 @@ Ultra:
 4. Exercise pause, relative and seek-bar seeks, audio/subtitle cycling, and
    delay controls. Seek reloads intentionally use a fresh localhost Matroska
    input without an mpv `start=` option.
+5. Confirm `relay auxiliary confirmed=muxed/embedded` or `muxed/cached` in the
+   redacted log. For cached mode, repeated seeks must report no new misses;
+   a later open should report cache hits.
 
 ## Verification workflow (local source)
 
@@ -99,11 +105,23 @@ Ultra:
   queue, and drops stale packets. mpv gets a new IPv4 loopback listener per
   epoch.
 - mpv stops before the old listener is closed, waits 150 ms, then loads the
-  new stream with `rebase-start-time=no`, leaving audio as the
-  synchronization clock. The original-media URL is attached *after* playback
-  starts, with `audio-add` / `sub-add` on the first `PLAYBACK_RESTART`, and
-  the epoch loads `pause=yes` so nothing advances until those tracks are in
-  place. Both halves are load-bearing — see CLAUDE.md.
+  new stream with `rebase-start-time=no`, leaving audio as the synchronization
+  clock. Every relay epoch loads with `pause=yes`. A confirmed muxed epoch
+  re-enumerates/remaps explicit track choices on the first
+  `PLAYBACK_RESTART` and releases the hold immediately; it never issues
+  `audio-add`. A local or compatibility-external epoch issues exactly one
+  post-restart `audio-add`, waits for valid `audio-pts`, then restores the
+  caller's pause intent. See CLAUDE.md.
+- Confirmed cached attachments are downloaded before the first `loadfile` to
+  `cache/relay-attachments/objects/<sha256>`, verified by exact size and
+  SHA-256, and exposed through a temporary session font-name view. Objects
+  are bounded to 512 MiB and reused across sessions; teardown removes only
+  the session view. Inspect a debug build with:
+
+  ```text
+  adb shell run-as org.upscalerelay.android ls -la cache/relay-attachments/objects
+  adb shell run-as org.upscalerelay.android ls -la cache/relay-attachments/sessions
+  ```
 - Relay loads disable mpv's network read timeout for the private loopback
   stream because an intentional user pause can leave it silent indefinitely.
   Control/downlink liveness and the playback watchdog still detect real relay

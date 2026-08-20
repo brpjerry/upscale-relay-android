@@ -3,6 +3,11 @@ package org.upscalerelay.client
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -23,8 +28,10 @@ import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
 import java.io.Closeable
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -110,26 +117,22 @@ internal class ControlChannel(
         qualityTier: String,
         fitMode: String,
         resizeAlgorithm: String?,
+        requestMuxedAuxTracks: Boolean,
+        requestCachedAttachments: Boolean,
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
         keepalive = true,
-        message = buildJsonObject {
-            put("type", "open_session")
-            put("source", buildJsonObject {
-                put("type", "server_file")
-                put("path", path)
-            })
-            put("file", buildJsonObject { put("name", path) })
-            put("model", model)
-            put("quality_tier", qualityTier)
-            put("display", buildJsonObject {
-                put("w", display.width)
-                put("h", display.height)
-            })
-            put("fit_mode", fitMode)
-            if (!resizeAlgorithm.isNullOrBlank()) put("resize_algorithm", resizeAlgorithm)
-        },
+        message = serverFileOpenMessage(
+            path = path,
+            model = model,
+            display = display,
+            qualityTier = qualityTier,
+            fitMode = fitMode,
+            resizeAlgorithm = resizeAlgorithm,
+            requestMuxedAuxTracks = requestMuxedAuxTracks,
+            requestCachedAttachments = requestCachedAttachments,
+        ),
     )
 
     suspend fun openUplinkSession(
@@ -214,6 +217,56 @@ internal class ControlChannel(
         .build()
         .toString()
 
+    /** Authenticated bounded transfer; the bearer token never enters a URL or error text. */
+    suspend fun fetchAttachment(
+        sha256: String,
+        token: String,
+        destination: Path,
+        maxBytes: Long,
+    ): Long = coroutineScope {
+        val url = httpUrl("attachments").newBuilder().addPathSegment(sha256).build()
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+            .build()
+        val call = client.newCall(request)
+        call.timeout().timeout(120, TimeUnit.SECONDS)
+        val transfer = async(Dispatchers.IO) {
+            call.execute().use {
+                if (!it.isSuccessful) {
+                    throw IOException("attachment fetch failed with HTTP ${it.code}")
+                }
+                var received = 0L
+                FileOutputStream(destination.toFile()).use { output ->
+                    val input = it.body.byteStream()
+                    val buffer = ByteArray(1024 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        received += count
+                        if (received > maxBytes) {
+                            throw IOException("attachment body exceeds declared size")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.flush()
+                    output.fd.sync()
+                }
+                received
+            }
+        }
+        try {
+            transfer.await()
+        } finally {
+            if (!transfer.isCompleted) {
+                call.cancel()
+                // Do not return cancellation to teardown until the blocking
+                // response reader has observed Call.cancel() and closed its fd.
+                withContext(NonCancellable) { runCatching { transfer.await() } }
+            }
+        }
+    }
+
     fun bufferReport(bufferedMillis: Long) = send(buildJsonObject {
         put("type", "buffer_report")
         put("buffered_ms", bufferedMillis.coerceAtLeast(0))
@@ -285,6 +338,7 @@ internal class ControlChannel(
         pending.values.forEach { it.deferred.completeExceptionally(error) }
         pending.clear()
         if (::webSocket.isInitialized) webSocket.close(1000, "client teardown")
+        client.dispatcher.cancelAll()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
     }
@@ -368,3 +422,36 @@ private data class PendingReply(
 )
 
 class RelayServerException(val code: String, message: String) : IOException("$code: $message")
+
+internal fun serverFileOpenMessage(
+    path: String,
+    model: String,
+    display: DisplaySize,
+    qualityTier: String,
+    fitMode: String,
+    resizeAlgorithm: String?,
+    requestMuxedAuxTracks: Boolean,
+    requestCachedAttachments: Boolean,
+): JsonObject = buildJsonObject {
+    require(!requestCachedAttachments || requestMuxedAuxTracks) {
+        "cached attachments require muxed auxiliary tracks"
+    }
+    put("type", "open_session")
+    put("source", buildJsonObject {
+        put("type", "server_file")
+        put("path", path)
+    })
+    put("file", buildJsonObject { put("name", path) })
+    put("model", model)
+    put("quality_tier", qualityTier)
+    put("display", buildJsonObject {
+        put("w", display.width)
+        put("h", display.height)
+    })
+    put("fit_mode", fitMode)
+    if (!resizeAlgorithm.isNullOrBlank()) put("resize_algorithm", resizeAlgorithm)
+    if (requestMuxedAuxTracks) {
+        put("aux_tracks", "muxed")
+        put("aux_attachments", if (requestCachedAttachments) "cached" else "embedded")
+    }
+}
