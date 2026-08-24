@@ -20,6 +20,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -1272,6 +1274,8 @@ private fun PlayerScreen(
     var chapterSheetVisible by remember { mutableStateOf(false) }
     var modelSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
+    val chromeInteractionSource = remember { MutableInteractionSource() }
+    val chromePressed by chromeInteractionSource.collectIsPressedAsState()
     val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds).coerceAtLeast(0.0)
     // Show what the user asked for, not what the pipeline momentarily reports:
     // an active scrub wins, then a committed-but-still-restarting seek target,
@@ -1294,8 +1298,18 @@ private fun PlayerScreen(
         return
     }
     val sheetOpen = trackSheetVisible || settingsSheetVisible || chapterSheetVisible || modelSheetVisible
-    LaunchedEffect(controlsVisible, controlsLocked, state.paused, state.seeking, sheetOpen) {
-        if (controlsVisible && !controlsLocked && !state.paused && !state.seeking && !sheetOpen) {
+    LaunchedEffect(
+        controlsVisible,
+        controlsLocked,
+        state.paused,
+        state.seeking,
+        sheetOpen,
+        chromePressed,
+    ) {
+        if (
+            controlsVisible && !controlsLocked && !state.paused && !state.seeking &&
+            !sheetOpen && !chromePressed
+        ) {
             delay(4_000)
             controlsVisible = false
         }
@@ -1344,6 +1358,7 @@ private fun PlayerScreen(
                 onSettings = { settingsSheetVisible = true },
                 onChapters = { chapterSheetVisible = true },
                 onModels = { modelSheetVisible = true },
+                interactionSource = chromeInteractionSource,
                 onLock = {
                     controlsLocked = true
                     controlsVisible = false
@@ -1575,6 +1590,7 @@ private fun PlayerChrome(
     onSettings: () -> Unit,
     onChapters: () -> Unit,
     onModels: () -> Unit,
+    interactionSource: MutableInteractionSource,
     onLock: () -> Unit,
 ) {
     val chapters = state.session?.chapters.orEmpty()
@@ -1587,7 +1603,7 @@ private fun PlayerChrome(
                 .padding(horizontal = 24.dp, vertical = 18.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = viewModel::closePlayback) {
+            IconButton(onClick = viewModel::closePlayback, interactionSource = interactionSource) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back to library",
@@ -1605,13 +1621,13 @@ private fun PlayerChrome(
                 Text(state.sessionDescription, color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
             }
             if (chapters.isNotEmpty()) {
-                TextButton(onClick = onChapters) {
+                TextButton(onClick = onChapters, interactionSource = interactionSource) {
                     Icon(Icons.AutoMirrored.Outlined.Toc, contentDescription = null, tint = Color.White)
                     Spacer(Modifier.width(8.dp))
                     Text("Chapters", color = Color.White)
                 }
             }
-            TextButton(onClick = onTracks) {
+            TextButton(onClick = onTracks, interactionSource = interactionSource) {
                 Icon(Icons.Outlined.Subtitles, contentDescription = null, tint = Color.White)
                 Spacer(Modifier.width(8.dp))
                 Text("Audio & subtitles", color = Color.White)
@@ -1619,18 +1635,18 @@ private fun PlayerChrome(
             // The model list has its own sheet: a server can offer dozens, far
             // more than the playback sheet can show without swallowing the rest.
             if (state.capabilities?.models.orEmpty().isNotEmpty()) {
-                TextButton(onClick = onModels) {
+                TextButton(onClick = onModels, interactionSource = interactionSource) {
                     Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White)
                     Spacer(Modifier.width(8.dp))
                     Text("Model", color = Color.White)
                 }
             }
-            TextButton(onClick = onSettings) {
+            TextButton(onClick = onSettings, interactionSource = interactionSource) {
                 Icon(Icons.Outlined.Tune, contentDescription = null, tint = Color.White)
                 Spacer(Modifier.width(8.dp))
                 Text("Playback", color = Color.White)
             }
-            IconButton(onClick = onLock) {
+            IconButton(onClick = onLock, interactionSource = interactionSource) {
                 Icon(
                     Icons.Outlined.Lock,
                     contentDescription = "Lock player controls",
@@ -1691,16 +1707,17 @@ private fun PlayerChrome(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipPrevious, "Previous chapter") {
+                        PlayerRoundButton(Icons.Filled.SkipPrevious, "Previous chapter", interactionSource) {
                             viewModel.chapterStep(-1)
                         }
                     }
-                    PlayerRoundButton(Icons.Filled.Replay10, "Back 10 seconds") {
+                    PlayerRoundButton(Icons.Filled.Replay10, "Back 10 seconds", interactionSource) {
                         viewModel.seekRelative(-10.0)
                     }
                     FilledIconButton(
                         onClick = viewModel::togglePaused,
                         enabled = !state.seeking,
+                        interactionSource = interactionSource,
                         modifier = Modifier.size(64.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = Color.White,
@@ -1717,11 +1734,11 @@ private fun PlayerChrome(
                             modifier = Modifier.size(34.dp),
                         )
                     }
-                    PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds") {
+                    PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds", interactionSource) {
                         viewModel.seekRelative(10.0)
                     }
                     if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter") {
+                        PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter", interactionSource) {
                             viewModel.chapterStep(1)
                         }
                     }
@@ -1743,9 +1760,15 @@ private fun PlayerChrome(
 }
 
 @Composable
-private fun PlayerRoundButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+private fun PlayerRoundButton(
+    icon: ImageVector,
+    description: String,
+    interactionSource: MutableInteractionSource,
+    onClick: () -> Unit,
+) {
     FilledTonalIconButton(
         onClick = onClick,
+        interactionSource = interactionSource,
         modifier = Modifier.size(48.dp),
         colors = IconButtonDefaults.filledTonalIconButtonColors(
             containerColor = Color.White.copy(alpha = 0.14f),
