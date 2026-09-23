@@ -1,6 +1,7 @@
 package org.upscalerelay.client
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -119,15 +120,60 @@ class AttachmentCacheTest {
         runBlocking {
             val first = cache.materialize("first", listOf(entry("first.ttf", firstData)), "secret")
             val secondEntry = entry("second.ttf", secondData)
+            assertTrue(runCatching {
+                cache.materialize("second", listOf(secondEntry), "secret")
+            }.isFailure)
+            assertTrue(Files.exists(root.resolve("objects").resolve(sha256(firstData))))
+            assertTrue(Files.exists(first.directory.resolve("first.ttf")))
+            cache.removeView(first.directory)
             val second = cache.materialize("second", listOf(secondEntry), "secret")
             assertEquals(1, second.stats.evictions)
             assertTrue(Files.exists(root.resolve("objects").resolve(secondEntry.sha256)))
             cache.removeView(second.directory)
             assertFalse(Files.exists(second.directory))
             assertTrue(Files.exists(root.resolve("objects").resolve(secondEntry.sha256)))
-            // A view can survive its object's later eviction because it is a
-            // hard link/copy; teardown remains scoped to that session folder.
-            cache.removeView(first.directory)
+        }
+    }
+
+    @Test
+    fun `reusing a session label never replaces an active view`() = withTempDirectory { root ->
+        val data = "font".encodeToByteArray()
+        val cache = AttachmentCache(root, AttachmentFetcher { _, _, destination, _ ->
+            Files.write(destination, data)
+            data.size.toLong()
+        })
+        runBlocking {
+            val one = cache.materialize("same", listOf(entry("one.ttf", data)), "secret")
+            val two = cache.materialize("same", listOf(entry("two.ttf", data)), "secret")
+            assertTrue(one.directory != two.directory)
+            cache.removeView(two.directory)
+            assertTrue(Files.exists(one.directory.resolve("one.ttf")))
+        }
+    }
+
+    @Test
+    fun `canceled download closes before removing its temporary file`() = withTempDirectory { root ->
+        runBlocking {
+            val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var writerClosed = false
+            val cache = AttachmentCache(root, AttachmentFetcher { _, _, destination, _ ->
+                try {
+                    Files.write(destination, byteArrayOf(1))
+                    started.complete(Unit)
+                    kotlinx.coroutines.awaitCancellation()
+                } finally {
+                    assertTrue(Files.exists(destination))
+                    writerClosed = true
+                }
+            })
+            val job = launch {
+                cache.materialize("canceled", listOf(entry("font.ttf", byteArrayOf(1))), "secret")
+            }
+            started.await()
+            job.cancel()
+            job.join()
+            assertTrue(writerClosed)
+            Files.list(root.resolve("objects")).use { assertEquals(0L, it.count()) }
         }
     }
 

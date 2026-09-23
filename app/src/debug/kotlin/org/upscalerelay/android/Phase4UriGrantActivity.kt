@@ -12,7 +12,7 @@ class Phase4UriGrantActivity : Activity() {
         val document = requireNotNull(intent.data) { "a document URI is required" }
         startActivity(Intent().apply {
             component = ComponentName(
-                "org.upscalerelay.android.test",
+                "$packageName.test",
                 "org.upscalerelay.android.UriGrantActivity",
             )
             data = document

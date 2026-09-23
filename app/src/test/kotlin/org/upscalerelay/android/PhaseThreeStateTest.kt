@@ -3,9 +3,34 @@ package org.upscalerelay.android
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.delay
 import org.upscalerelay.protocol.LibraryNode
 
 class PhaseThreeStateTest {
+    @Test(expected = CancellationException::class)
+    fun `cancelled playback actions do not enter fallback or failure callbacks`() {
+        runPlaybackCatching<Unit> { throw CancellationException("superseded open") }
+            .onFailure { throw AssertionError("cancelled open must not revive fallback UI") }
+    }
+
+    @Test
+    fun `an action timeout remains a reportable failure`() = runBlocking {
+        val result = runPlaybackCatching { withTimeout(1) { delay(10_000) } }
+        org.junit.Assert.assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun `corrupt saved times cannot become seek targets or crash watched labels`() {
+        val separator = Char(31)
+        val lines = listOf("NaN", "Infinity", "-1.0").mapIndexed { index, value ->
+            "bad-$index$separator$value"
+        } + "valid${separator}42.0${separator}NaN${separator}-1"
+        assertEquals(mapOf("valid" to PlaybackProgress(42.0)), decodePositions(lines.joinToString("\n")))
+    }
+
     @Test
     fun `recent paths are newest first unique and bounded`() {
         val original = (1..MAX_RECENTS).map { "episode-$it.mkv" }

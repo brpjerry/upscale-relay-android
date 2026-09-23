@@ -10,6 +10,45 @@ import org.junit.Test
 
 class MessagesTest {
     @Test
+    fun `source presence preserves explicit false separately from missing or null`() {
+        val base = """{"session_id":"s","media_port":8591,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1"""
+        for (suffix in listOf("}", ""","source_has_audio":null,"source_has_auxiliary":null}""")) {
+            val session = SessionInfo.fromJson(Json.parseToJsonElement(base + suffix).jsonObject)
+            assertNull(session.sourceHasAudio)
+            assertNull(session.sourceHasAuxiliary)
+        }
+        val subtitles = SessionInfo.fromJson(Json.parseToJsonElement(
+            """$base,"source_has_audio":false,"source_has_auxiliary":true}""",
+        ).jsonObject)
+        assertEquals(false, subtitles.sourceHasAudio)
+        assertEquals(true, subtitles.sourceHasAuxiliary)
+        val video = SessionInfo.fromJson(Json.parseToJsonElement(
+            """$base,"source_has_audio":false,"source_has_auxiliary":false}""",
+        ).jsonObject)
+        assertEquals(false, video.sourceHasAuxiliary)
+    }
+
+    @Test
+    fun `seek progress tolerates absent nullable and future stage metadata`() {
+        val basic = SeekProgress.fromJson(Json.parseToJsonElement(
+            """{"epoch":4,"target_pts":900000,"keyframe_pts":null,"frames_discarded":25,"elapsed_s":1.25}""",
+        ).jsonObject)
+        assertEquals(4, basic.epoch)
+        assertNull(basic.stage)
+        assertNull(basic.message)
+        assertNull(basic.subtitleIndexedSeconds)
+        val future = SeekProgress.fromJson(Json.parseToJsonElement(
+            """{"epoch":4,"target_pts":900000,"stage":"future_stage","message":null,"subtitle_indexed_s":null}""",
+        ).jsonObject)
+        assertEquals("future_stage", future.stage)
+        assertNull(future.message)
+        val indexing = SeekProgress.fromJson(Json.parseToJsonElement(
+            """{"epoch":4,"target_pts":900000,"stage":"subtitle_index","subtitle_indexed_s":456.75,"message":"Indexing subtitles for this seek"}""",
+        ).jsonObject)
+        assertEquals(456.75, indexing.subtitleIndexedSeconds!!, 0.001)
+    }
+
+    @Test
     fun `library pages preserve cursor and shallow children`() {
         val value = Json.parseToJsonElement(
             """{"tree":{"type":"directory","name":"Library","path":"","children":[{"type":"directory","name":"Shows","path":"Shows","children":[]}]},"next_cursor":"100"}""",

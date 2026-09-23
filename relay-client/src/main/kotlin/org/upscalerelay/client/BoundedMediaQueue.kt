@@ -6,8 +6,11 @@ import java.util.ArrayDeque
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-/** A byte-bounded blocking queue. Packet count alone cannot bound lossless frames. */
-class BoundedMediaQueue(private val maximumBytes: Long) : Closeable {
+/** Byte and item bounds cover both lossless chunks and empty protocol markers. */
+class BoundedMediaQueue(
+    private val maximumBytes: Long,
+    private val maximumPackets: Int = 4096,
+) : Closeable {
     private val lock = ReentrantLock()
     private val hasItems = lock.newCondition()
     private val hasSpace = lock.newCondition()
@@ -17,6 +20,7 @@ class BoundedMediaQueue(private val maximumBytes: Long) : Closeable {
 
     init {
         require(maximumBytes > 0)
+        require(maximumPackets > 0)
     }
 
     fun put(packet: MediaPacket) {
@@ -24,7 +28,8 @@ class BoundedMediaQueue(private val maximumBytes: Long) : Closeable {
             "single packet exceeds bounded queue capacity"
         }
         lock.withLock {
-            while (!closed && queuedBytes + packet.payload.size > maximumBytes) hasSpace.await()
+            while (!closed && (packet.payload.size > maximumBytes - queuedBytes ||
+                    packets.size >= maximumPackets)) hasSpace.await()
             check(!closed) { "media queue is closed" }
             packets.addLast(packet)
             queuedBytes += packet.payload.size
@@ -63,4 +68,3 @@ data class QueueSnapshot(
     val maximumBytes: Long,
     val closed: Boolean,
 )
-

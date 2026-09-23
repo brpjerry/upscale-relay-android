@@ -10,6 +10,8 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 
 data class DisplaySize(val width: Int, val height: Int) {
     init {
@@ -242,6 +244,10 @@ data class SessionInfo(
     val attachmentManifest: List<AttachmentManifestEntry> = emptyList(),
     /** Ephemeral bearer token. Never include this value in logs or persisted state. */
     val attachmentToken: String? = null,
+    /** Null is unknown, including compatibility with servers predating these fields. */
+    val sourceHasAudio: Boolean? = null,
+    /** Includes audio OR subtitles; false alone authorizes omitting external media. */
+    val sourceHasAuxiliary: Boolean? = null,
 ) {
     companion object {
         fun fromJson(value: JsonObject): SessionInfo {
@@ -295,6 +301,8 @@ data class SessionInfo(
             auxAttachments = auxAttachments,
             attachmentManifest = manifest,
             attachmentToken = attachmentToken,
+            sourceHasAudio = value["source_has_audio"]?.jsonPrimitive?.booleanOrNull,
+            sourceHasAuxiliary = value["source_has_auxiliary"]?.jsonPrimitive?.booleanOrNull,
         )
         }
 
@@ -318,6 +326,33 @@ data class SessionInfo(
                 entry
             }
         }
+    }
+}
+
+/** Informational source coverage during a seek; indexed seconds are not a playback position. */
+data class SeekProgress(
+    val epoch: Int,
+    val targetPts: Long,
+    val keyframePts: Long?,
+    val framesDiscarded: Int,
+    val elapsedSeconds: Double?,
+    val stage: String?,
+    val message: String?,
+    val subtitleIndexedSeconds: Double?,
+) {
+    companion object {
+        fun fromJson(value: JsonObject): SeekProgress = SeekProgress(
+            epoch = value.requiredInt("epoch"),
+            targetPts = requireNotNull(value["target_pts"]?.jsonPrimitive?.longOrNull),
+            keyframePts = value["keyframe_pts"]?.jsonPrimitive?.longOrNull,
+            framesDiscarded = value["frames_discarded"]?.jsonPrimitive?.intOrNull ?: 0,
+            elapsedSeconds = value["elapsed_s"]?.jsonPrimitive?.doubleOrNull
+                ?.takeIf { it.isFinite() && it >= 0 },
+            stage = value["stage"]?.jsonPrimitive?.contentOrNull,
+            message = value["message"]?.jsonPrimitive?.contentOrNull,
+            subtitleIndexedSeconds = value["subtitle_indexed_s"]?.jsonPrimitive?.doubleOrNull
+                ?.takeIf { it.isFinite() && it >= 0 },
+        )
     }
 }
 

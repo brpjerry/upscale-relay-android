@@ -20,6 +20,8 @@ enum class FailureKind(val recoverable: Boolean, val label: String) {
     SERVER_CLOSED(true, "Server closed the connection"),
     MEDIA_STALLED(true, "Media stream stalled"),
     SERVER_REJECTED(false, "Server rejected the request"),
+    SERVER_RESTART_REQUIRED(false, "Server restart required"),
+    TEARDOWN_UNCONFIRMED(false, "Server cleanup was not confirmed"),
     UNSUPPORTED(false, "Unsupported configuration"),
     UNKNOWN(true, "Playback failed"),
 }
@@ -27,9 +29,19 @@ enum class FailureKind(val recoverable: Boolean, val label: String) {
 /** Marker for the client-side stall watchdog (no packets while playing). */
 class MediaStalledException(message: String) : IOException(message)
 
+class TeardownUnconfirmedException(cause: Throwable) : IOException(
+    "Server did not confirm resource release; check the server before opening another session",
+    cause,
+)
+
 fun classifyFailure(error: Throwable): FailureKind = when (error) {
     is MediaStalledException -> FailureKind.MEDIA_STALLED
-    is RelayServerException -> FailureKind.SERVER_REJECTED
+    is TeardownUnconfirmedException -> FailureKind.TEARDOWN_UNCONFIRMED
+    is RelayServerException -> if (error.code == "server_restart_required") {
+        FailureKind.SERVER_RESTART_REQUIRED
+    } else {
+        FailureKind.SERVER_REJECTED
+    }
     is SocketTimeoutException, is TimeoutCancellationException -> FailureKind.CONNECT_TIMEOUT
     is ConnectException, is NoRouteToHostException, is UnknownHostException -> FailureKind.CONNECT_TIMEOUT
     is SocketException -> FailureKind.NETWORK_LOST

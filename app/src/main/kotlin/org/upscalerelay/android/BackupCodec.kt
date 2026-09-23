@@ -198,7 +198,7 @@ object BackupCodec {
                 val key = row.string("key")?.takeIf(String::isNotEmpty) ?: continue
                 // The separator is the store's record delimiter; a key holding
                 // one would corrupt every later line on the next write.
-                if ('\u001F' in key || '\n' in key) continue
+                if (!validHistoryKey(key)) continue
                 val position = row.double("positionSeconds") ?: continue
                 if (!position.isFinite() || position < 0) continue
                 val duration = row.double("durationSeconds")?.takeIf { it.isFinite() && it >= 0 } ?: 0.0
@@ -224,6 +224,7 @@ object BackupCodec {
 
     private fun JsonObject.strings(name: String): List<String>? =
         (this[name] as? JsonArray)?.mapNotNull { element ->
-            (element as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf(String::isNotEmpty)
+            (element as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?.takeIf { it.isNotEmpty() && '\n' !in it && '\r' !in it }
         }
 }

@@ -2,9 +2,26 @@ package org.upscalerelay.demux
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DemuxHelpersTest {
+    @Test fun `malformed NAL length cannot overflow the bounds check`() {
+        val input = byteArrayOf(0x7f, -1, -1, -1, 1, 2, 3)
+        assertArrayEquals(input, normalizeNalUnits(input, "hevc"))
+    }
+
+    @Test fun `malformed and unsatisfiable byte ranges are rejected`() {
+        listOf("bytes=0-garbage", "bytes=100-", "bytes=9-2", "bytes=-0", "bytes=0-1,4-5").forEach {
+            assertTrue(it, runCatching { parseByteRange(it, 100) }.isFailure)
+        }
+    }
+
+    @Test fun `HTTP header lines enforce their allocation limit`() {
+        assertEquals("Range: bytes=0-", "Range: bytes=0-\r\n".reader().buffered().readBoundedLine())
+        assertTrue(runCatching { "x".repeat(8193).reader().buffered().readBoundedLine() }.isFailure)
+    }
+
     @Test fun `length prefixed HEVC access units become Annex B`() {
         val input = byteArrayOf(0, 0, 0, 3, 1, 2, 3, 0, 0, 0, 2, 4, 5)
         assertArrayEquals(

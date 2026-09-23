@@ -22,8 +22,9 @@ local audio/subtitles ─► private Range HTTP bridge ─► external attach �
 Capable server-library sessions stream-copy original audio/subtitles into the
 relay epoch and fetch immutable subtitle fonts once through a verified,
 content-addressed cache. `/media` is retained only when an older/unsupported
-server confirms the compatibility `external` mode. Local/SAF sessions always
-retain their on-device Range bridge. All branches use absolute PTS, and seeks
+server confirms the compatibility `external` mode and auxiliary tracks are not
+confirmed absent. Confirmed subtitle-only sources use one delayed subtitle
+attach. Local/SAF sessions retain their on-device Range bridge. All branches use absolute PTS, and seeks
 open a fresh *epoch* on the same media sockets.
 
 Modules:
@@ -105,6 +106,11 @@ app-private `files/phase4-latest.json`.
 
 ## More documentation
 
+- [`docs/ANDROID_AUDIT_2026-09-22.md`](docs/ANDROID_AUDIT_2026-09-22.md) — audit
+  findings, server-contract alignment, validation and remaining device gates.
+- [`docs/RELAY_AUDIT_HANDOFF.md`](docs/RELAY_AUDIT_HANDOFF.md) — September 2026
+  relay protocol changes, existing Android protections, and follow-ups for the
+  next Android audit.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — feature status, verification
   workflows, buffering/failure internals, and telemetry details.
 - [`docs/ANDROID_CLIENT.md`](docs/ANDROID_CLIENT.md) — phase plan,

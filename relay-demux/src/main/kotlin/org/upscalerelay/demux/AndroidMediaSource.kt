@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.CancellationSignal
 import android.provider.OpenableColumns
 import org.upscalerelay.client.UplinkAccessUnit
 import org.upscalerelay.client.UplinkMediaSource
@@ -13,8 +14,9 @@ import org.upscalerelay.client.UplinkVideoInfo
 import org.upscalerelay.protocol.ChapterInfo
 import java.io.FileInputStream
 import java.nio.ByteBuffer
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** A fresh MediaExtractor and file descriptor are owned by every seek epoch. */
 class AndroidMediaSource private constructor(
@@ -24,13 +26,29 @@ class AndroidMediaSource private constructor(
     private val videoTrack: Int,
 ) : UplinkMediaSource {
     private val closed = AtomicBoolean(false)
+    private val readers = mutableSetOf<ExtractorPacketReader>()
 
     override fun openPacketReader(fromPts: Long?): UplinkPacketReader {
-        check(!closed.get()) { "local media source is closed" }
-        return ExtractorPacketReader(resolver, uri, videoTrack, videoInfo.codec, fromPts)
+        val reader = ExtractorPacketReader(resolver, uri, videoTrack, videoInfo.codec, fromPts) {
+            synchronized(readers) { readers.remove(it) }
+        }
+        synchronized(readers) {
+            check(!closed.get()) { "local media source is closed" }
+            readers += reader
+        }
+        try {
+            reader.initialize()
+            return reader
+        } catch (error: Throwable) {
+            reader.close()
+            throw error
+        }
     }
 
-    override fun close() { closed.set(true) }
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        synchronized(readers) { readers.toList() }.forEach { it.close() }
+    }
 
     companion object {
         fun open(context: Context, uri: Uri): AndroidMediaSource {
@@ -59,6 +77,10 @@ class AndroidMediaSource private constructor(
                         format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
                     val chapters = readChapters(resolver, uri)
+                    val hasAudio = (0 until extractor.trackCount).any { index ->
+                        extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+                            ?.startsWith("audio/") == true
+                    }
                     return AndroidMediaSource(
                         resolver = resolver,
                         uri = uri,
@@ -75,6 +97,11 @@ class AndroidMediaSource private constructor(
                             averageRateDenominator = fps?.let { 1 },
                             durationSeconds = durationUs?.div(1_000_000.0),
                             chapters = chapters,
+                            // Extractor can omit formats understood by mpv. Positive
+                            // presence is useful, but absence cannot certify that
+                            // the original has no audio or subtitle tracks.
+                            sourceHasAudio = if (hasAudio) true else null,
+                            sourceHasAuxiliary = if (hasAudio) true else null,
                         ),
                     )
                 } finally {
@@ -110,56 +137,81 @@ class AndroidMediaSource private constructor(
 }
 
 private class ExtractorPacketReader(
-    resolver: ContentResolver,
-    uri: Uri,
-    videoTrack: Int,
+    private val resolver: ContentResolver,
+    private val uri: Uri,
+    private val videoTrack: Int,
     private val codec: String,
-    fromPts: Long?,
+    private val fromPts: Long?,
+    private val onClosed: (ExtractorPacketReader) -> Unit,
 ) : UplinkPacketReader {
-    private val lock = Any()
-    private val descriptor = requireNotNull(resolver.openFileDescriptor(uri, "r"))
-    private val extractor = MediaExtractor()
-    private var closed = false
+    private val lock = ReentrantLock()
+    private val cancellation = CancellationSignal()
+    @Volatile private var descriptor: android.os.ParcelFileDescriptor? = null
+    private var extractor: MediaExtractor? = null
+    private val closed = AtomicBoolean(false)
     private var buffer = ByteBuffer.allocateDirect(DEFAULT_BUFFER_BYTES)
 
-    init {
+    fun initialize() = lock.withLock {
         try {
-            extractor.setDataSource(descriptor.fileDescriptor)
-            extractor.selectTrack(videoTrack)
+            cancellation.throwIfCanceled()
+            val opened = requireNotNull(resolver.openFileDescriptor(uri, "r", cancellation))
+            descriptor = opened
+            cancellation.throwIfCanceled()
+            val demuxer = MediaExtractor().also { extractor = it }
+            demuxer.setDataSource(opened.fileDescriptor)
+            cancellation.throwIfCanceled()
+            demuxer.selectTrack(videoTrack)
             if (fromPts != null && fromPts > 0) {
-                extractor.seekTo(fromPts, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                demuxer.seekTo(fromPts, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             }
-        } catch (error: Throwable) {
-            extractor.release()
-            descriptor.close()
-            throw error
+            cancellation.throwIfCanceled()
+        } finally {
+            if (closed.get()) releaseExtractor()
         }
     }
 
-    override fun read(): UplinkAccessUnit? = synchronized(lock) {
-        if (closed || extractor.sampleTime < 0) return null
-        val sampleSize = extractor.sampleSize
-        if (sampleSize > buffer.capacity()) {
-            require(sampleSize <= MAX_ACCESS_UNIT_BYTES) { "video access unit is too large: $sampleSize" }
-            buffer = ByteBuffer.allocateDirect(sampleSize.toInt())
+    override fun read(): UplinkAccessUnit? = lock.withLock {
+        if (closed.get()) return null
+        val extractor = requireNotNull(extractor)
+        try {
+            if (extractor.sampleTime < 0) return null
+            val sampleSize = extractor.sampleSize
+            if (sampleSize > buffer.capacity()) {
+                require(sampleSize <= MAX_ACCESS_UNIT_BYTES) { "video access unit is too large: $sampleSize" }
+                buffer = ByteBuffer.allocateDirect(sampleSize.toInt())
+            }
+            buffer.clear()
+            val size = extractor.readSampleData(buffer, 0)
+            if (size < 0) return null
+            val payload = ByteArray(size)
+            buffer.position(0)
+            buffer.get(payload)
+            val pts = extractor.sampleTime
+            val keyframe = extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+            extractor.advance()
+            UplinkAccessUnit(normalizeNalUnits(payload, codec), pts, keyframe)
+        } finally {
+            if (closed.get()) releaseExtractor()
         }
-        buffer.clear()
-        val size = extractor.readSampleData(buffer, 0)
-        if (size < 0) return null
-        val payload = ByteArray(size)
-        buffer.position(0)
-        buffer.get(payload)
-        val pts = extractor.sampleTime
-        val keyframe = extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
-        extractor.advance()
-        UplinkAccessUnit(normalizeNalUnits(payload, codec), pts, keyframe)
     }
 
-    override fun close(): Unit = synchronized(lock) {
-        if (closed) return
-        closed = true
-        extractor.release()
-        descriptor.close()
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        cancellation.cancel()
+        runCatching { descriptor?.close() }
+        // A provider read must not hold close() hostage. Its owner releases
+        // the extractor when the interrupted native operation returns.
+        if (lock.tryLock()) {
+            try { releaseExtractor() } finally { lock.unlock() }
+        }
+        onClosed(this)
+    }
+
+    private fun releaseExtractor() {
+        extractor?.release()
+        extractor = null
+        descriptor?.close()
+        descriptor = null
     }
 
     companion object {
@@ -170,23 +222,35 @@ private class ExtractorPacketReader(
 
 /** Convert common four-byte length-prefixed AVC/HEVC samples to Annex B. */
 internal fun normalizeNalUnits(payload: ByteArray, codec: String): ByteArray {
-    if (codec !in setOf("h264", "hevc") || payload.size < 4) return payload
+    if ((codec != "h264" && codec != "hevc") || payload.size < 4) return payload
     if (payload.startsWithStartCode()) return payload
-    val output = ByteArrayOutputStream(payload.size + 16)
     var offset = 0
     while (offset + 4 <= payload.size) {
-        val length = ((payload[offset].toInt() and 0xff) shl 24) or
-            ((payload[offset + 1].toInt() and 0xff) shl 16) or
-            ((payload[offset + 2].toInt() and 0xff) shl 8) or
-            (payload[offset + 3].toInt() and 0xff)
-        if (length <= 0 || offset + 4 + length > payload.size) return payload
-        output.write(byteArrayOf(0, 0, 0, 1))
-        output.write(payload, offset + 4, length)
+        val length = payload.nalLengthAt(offset)
+        if (length <= 0 || length > payload.size - offset - 4) return payload
         offset += 4 + length
     }
     if (offset != payload.size) return payload
-    return output.toByteArray()
+    // Four-byte lengths and Annex B start codes have identical widths. One
+    // fixed-size copy avoids a growing stream plus a second full-size copy.
+    val output = payload.copyOf()
+    offset = 0
+    while (offset < payload.size) {
+        val length = payload.nalLengthAt(offset)
+        output[offset] = 0
+        output[offset + 1] = 0
+        output[offset + 2] = 0
+        output[offset + 3] = 1
+        offset += 4 + length
+    }
+    return output
 }
+
+private fun ByteArray.nalLengthAt(offset: Int): Int =
+    ((this[offset].toInt() and 0xff) shl 24) or
+        ((this[offset + 1].toInt() and 0xff) shl 16) or
+        ((this[offset + 2].toInt() and 0xff) shl 8) or
+        (this[offset + 3].toInt() and 0xff)
 
 private fun ByteArray.startsWithStartCode(): Boolean =
     (size >= 3 && this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||

@@ -3,6 +3,11 @@ package org.upscalerelay.client
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
 import org.upscalerelay.protocol.AttachmentManifestEntry
 import java.io.IOException
 import java.nio.channels.FileChannel
@@ -42,19 +47,60 @@ class AttachmentCache(
     private val fetcher: AttachmentFetcher,
     private val maxCacheBytes: Long = MAX_CACHE_BYTES,
 ) {
+    private val state = states.computeIfAbsent(root.toAbsolutePath().normalize()) { CacheState() }
+
+    init { require(maxCacheBytes > 0) }
+
     suspend fun materialize(
         sessionId: String,
         manifest: List<AttachmentManifestEntry>,
         token: String,
-    ): AttachmentCacheResult {
+    ): AttachmentCacheResult = state.mutex.withLock {
         require(token.isNotBlank()) { "cached attachment session omitted its token" }
         val objects = root.resolve("objects")
-        withContext(Dispatchers.IO) { Files.createDirectories(objects) }
+        require(manifest.all { entry ->
+            SHA256.matches(entry.sha256) && entry.size in 0..AttachmentManifestEntry.MAX_ATTACHMENT_BYTES &&
+                entry.name.isNotBlank() && entry.name.length <= AttachmentManifestEntry.MAX_NAME_LENGTH &&
+                entry.name != "." && entry.name != ".." && '/' !in entry.name && '\\' !in entry.name
+        }) { "invalid attachment manifest" }
+        require(manifest.size <= 4096) { "too many attachments" }
+        val unique = manifest.distinctBy { it.sha256 }
+        require(manifest.sumOf { it.size } <= AttachmentManifestEntry.MAX_MANIFEST_BYTES) {
+            "attachment manifest is too large"
+        }
+        require(manifest.groupBy { it.sha256 }.values.all { group -> group.map { it.size }.distinct().size == 1 }) {
+            "conflicting attachment sizes"
+        }
+        val protected = state.views.values.flatten().toMutableSet().apply { addAll(unique.map { it.sha256 }) }
+        var evictions = withContext(Dispatchers.IO) {
+            Files.createDirectories(objects)
+            if (!state.initialized) {
+                // Views only live for this process. Reclaim crash leftovers once,
+                // before any materialization can publish a new active view.
+                deleteTree(root.resolve("sessions"))
+                Files.list(objects).use { paths ->
+                    paths.filter { it.fileName.toString().endsWith(".tmp") }.forEach(Files::deleteIfExists)
+                }
+                state.initialized = true
+            }
+            val required = unique.associate { it.sha256 to it.size }.toMutableMap()
+            protected.forEach { digest ->
+                if (digest !in required) required[digest] = Files.size(objects.resolve(digest))
+            }
+            val requiredBytes = required.values.sum()
+            require(requiredBytes <= maxCacheBytes) { "active attachment views exceed cache capacity" }
+            // Reserve room before downloads, including objects which are absent.
+            val additionalBytes = unique.sumOf { entry ->
+                val target = objects.resolve(entry.sha256)
+                val existing = if (Files.isRegularFile(target)) Files.size(target) else 0L
+                (entry.size - existing).coerceAtLeast(0)
+            }
+            evict(protected, maxCacheBytes - additionalBytes)
+        }
 
         var hits = 0
         var misses = 0
         var verifiedBytes = 0L
-        val unique = manifest.distinctBy { it.sha256 }
         for (entry in unique) {
             val target = objects.resolve(entry.sha256)
             if (withContext(Dispatchers.IO) { verifyObject(target, entry) }) {
@@ -64,46 +110,62 @@ class AttachmentCache(
             }
             misses += 1
             withContext(Dispatchers.IO) { Files.deleteIfExists(target) }
-            val temporary = withContext(Dispatchers.IO) {
-                Files.createTempFile(objects, ".${entry.sha256}.", ".tmp")
-            }
+            var temporary: Path? = null
             try {
+                withContext(Dispatchers.IO) {
+                    temporary = Files.createTempFile(objects, ".${entry.sha256}.", ".tmp")
+                }
+                val download = requireNotNull(temporary)
                 val received = fetcher.fetch(
                     entry.sha256,
                     token,
-                    temporary,
+                    download,
                     minOf(entry.size, AttachmentManifestEntry.MAX_ATTACHMENT_BYTES),
                 )
                 require(received == entry.size) { "attachment size/hash mismatch" }
-                require(withContext(Dispatchers.IO) { verifyObject(temporary, entry, touch = false) }) {
+                require(withContext(Dispatchers.IO) { verifyObject(download, entry, touch = false) }) {
                     "attachment size/hash mismatch"
                 }
                 withContext(Dispatchers.IO) {
-                    FileChannel.open(temporary, StandardOpenOption.WRITE).use { it.force(true) }
-                    publishAtomically(temporary, target)
+                    FileChannel.open(download, StandardOpenOption.WRITE).use { it.force(true) }
+                    publishAtomically(download, target)
                 }
                 verifiedBytes += entry.size
             } finally {
-                withContext(NonCancellable + Dispatchers.IO) { Files.deleteIfExists(temporary) }
+                withContext(NonCancellable + Dispatchers.IO) { temporary?.let(Files::deleteIfExists) }
             }
         }
 
-        val view = withContext(Dispatchers.IO) { materializeView(sessionId, manifest) }
-        val protected = unique.mapTo(mutableSetOf()) { it.sha256 }
-        val evictions = withContext(Dispatchers.IO) { evict(protected) }
-        return AttachmentCacheResult(
-            directory = view,
-            stats = AttachmentCacheStats(hits, misses, verifiedBytes, evictions),
-        )
+        var view: Path? = null
+        try {
+            withContext(Dispatchers.IO) {
+                view = materializeView(sessionId, manifest)
+                evictions += evict(protected)
+            }
+            currentCoroutineContext().ensureActive()
+            val published = requireNotNull(view)
+            state.views[published.toAbsolutePath().normalize()] = unique.mapTo(mutableSetOf()) { it.sha256 }
+            AttachmentCacheResult(
+                directory = published,
+                stats = AttachmentCacheStats(hits, misses, verifiedBytes, evictions),
+            )
+        } catch (error: Throwable) {
+            withContext(NonCancellable + Dispatchers.IO) { view?.let(::deleteTree) }
+            throw error
+        }
     }
 
     suspend fun removeView(path: Path?) {
         if (path == null) return
-        withContext(Dispatchers.IO) {
-            val sessions = root.resolve("sessions").toAbsolutePath().normalize()
-            val target = path.toAbsolutePath().normalize()
-            require(target.parent == sessions) { "attachment view is outside the cache" }
-            deleteTree(target)
+        state.mutex.withLock {
+            withContext(Dispatchers.IO) {
+                val sessions = root.resolve("sessions").toAbsolutePath().normalize()
+                val target = path.toAbsolutePath().normalize()
+                require(target.parent == sessions) { "attachment view is outside the cache" }
+                deleteTree(target)
+                state.views.remove(target)
+                evict(state.views.values.flatten().toSet())
+            }
         }
     }
 
@@ -151,38 +213,41 @@ class AttachmentCache(
             .take(64).ifBlank { "session" }
         val sessions = root.resolve("sessions")
         Files.createDirectories(sessions)
-        val view = sessions.resolve(safeSession)
-        deleteTree(view)
-        Files.createDirectories(view)
-        val used = mutableSetOf<String>()
-        manifest.forEach { entry ->
-            var name = entry.name
-            if (!used.add(name)) {
-                val dot = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
-                val stem = name.substring(0, dot)
-                val suffix = name.substring(dot)
-                val base = "$stem-${entry.sha256.take(8)}"
-                name = "$base$suffix"
-                var occurrence = 2
-                while (!used.add(name)) {
-                    name = "$base-$occurrence$suffix"
-                    occurrence += 1
+        val view = Files.createTempDirectory(sessions, "$safeSession-")
+        try {
+            val used = mutableSetOf<String>()
+            manifest.forEach { entry ->
+                var name = entry.name
+                if (!used.add(name)) {
+                    val dot = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
+                    val stem = name.substring(0, dot)
+                    val suffix = name.substring(dot)
+                    val base = "$stem-${entry.sha256.take(8)}"
+                    name = "$base$suffix"
+                    var occurrence = 2
+                    while (!used.add(name)) {
+                        name = "$base-$occurrence$suffix"
+                        occurrence += 1
+                    }
+                }
+                val source = root.resolve("objects").resolve(entry.sha256)
+                val target = view.resolve(name)
+                try {
+                    Files.createLink(target, source)
+                } catch (_: IOException) {
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+                } catch (_: UnsupportedOperationException) {
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
                 }
             }
-            val source = root.resolve("objects").resolve(entry.sha256)
-            val target = view.resolve(name)
-            try {
-                Files.createLink(target, source)
-            } catch (_: IOException) {
-                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: UnsupportedOperationException) {
-                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
-            }
+            return view
+        } catch (error: Throwable) {
+            deleteTree(view)
+            throw error
         }
-        return view
     }
 
-    private fun evict(protected: Set<String>): Int {
+    private fun evict(protected: Set<String>, budget: Long = maxCacheBytes): Int {
         val objects = root.resolve("objects")
         if (!Files.isDirectory(objects)) return 0
         val entries = Files.list(objects).use { paths ->
@@ -191,12 +256,12 @@ class AttachmentCache(
             }.map { path ->
                 val attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java)
                 CacheObject(path, attributes.size(), attributes.lastModifiedTime().toMillis())
-            }.toList()
+            }.iterator().asSequence().toList()
         }
         var total = entries.sumOf { it.size }
         var count = 0
         entries.sortedBy { it.lastUsed }.forEach { entry ->
-            if (total <= maxCacheBytes) return@forEach
+            if (total <= budget) return@forEach
             if (entry.path.name in protected) return@forEach
             if (Files.deleteIfExists(entry.path)) {
                 total -= entry.size
@@ -215,7 +280,14 @@ class AttachmentCache(
 
     private data class CacheObject(val path: Path, val size: Long, val lastUsed: Long)
 
+    private class CacheState {
+        val mutex = Mutex()
+        var initialized = false
+        val views = mutableMapOf<Path, Set<String>>()
+    }
+
     companion object {
+        private val states = ConcurrentHashMap<Path, CacheState>()
         const val MAX_CACHE_BYTES = 512L * 1024 * 1024
         private val SHA256 = Regex("^[0-9a-f]{64}$")
     }

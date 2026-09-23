@@ -23,6 +23,8 @@ internal class DownlinkReceiver(
 ) : Closeable {
     val ready = CompletableDeferred<Unit>()
     private val stopped = AtomicBoolean(false)
+    private val lifecycleLock = Any()
+    private var started = false
     private val bytesReceived = AtomicLong()
     private val packetsReceived = AtomicLong()
     private val completedEpoch = AtomicLong(-1)
@@ -31,11 +33,13 @@ internal class DownlinkReceiver(
     @Volatile private var socket: Socket? = null
     @Volatile private var worker: Thread? = null
 
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
+        check(!stopped.get() && !started) { "downlink cannot be started" }
+        val mediaSocket = Socket()
+        started = true
+        socket = mediaSocket
         worker = thread(name = "relay-android-downlink", isDaemon = true) {
             try {
-                val mediaSocket = Socket()
-                socket = mediaSocket
                 mediaSocket.receiveBufferSize = 4 * 1024 * 1024
                 mediaSocket.tcpNoDelay = true
                 mediaSocket.connect(InetSocketAddress(host, port), 30_000)
@@ -44,22 +48,18 @@ internal class DownlinkReceiver(
                 output.write(MediaFraming.handshake(MediaFraming.DIRECTION_DOWNLINK, token))
                 output.flush()
                 if (mediaSocket.getInputStream().read() != 0) error("downlink handshake rejected")
+                // The controller bounds first-media/seek liveness and extends
+                // it only for actual indexing progress. A fixed socket timeout
+                // would kill a progressing seek before its first media packet.
+                mediaSocket.soTimeout = 0
                 ready.complete(Unit)
 
-                var firstPacket = true
                 while (!stopped.get()) {
                     val packet = try {
                         MediaFraming.read(mediaSocket.getInputStream())
                     } catch (error: EOFException) {
                         if (completedEpoch.get() >= route.get().epoch) break
                         throw error
-                    }
-                    if (firstPacket) {
-                        firstPacket = false
-                        // A user pause may legitimately last indefinitely.
-                        // Control-channel heartbeat/failure remains the liveness
-                        // signal, and close() interrupts this blocking read.
-                        mediaSocket.soTimeout = 0
                     }
                     val destination = route.get()
                     if (packet.epoch < destination.epoch) continue
@@ -123,7 +123,7 @@ internal class DownlinkReceiver(
 
     override fun close() {
         if (!stopped.compareAndSet(false, true)) return
-        socket?.closeQuietly()
+        synchronized(lifecycleLock) { socket?.closeQuietly() }
         // Also wake a receiver blocked in queue.put() before joining it.
         route.get().queue.close()
         if (!ready.isCompleted) ready.cancel()
@@ -138,6 +138,8 @@ internal class LoopbackMediaServer(
     private val onFailure: (Throwable) -> Unit,
 ) : Closeable {
     private val stopped = AtomicBoolean(false)
+    private val lifecycleLock = Any()
+    private var started = false
     private val expectedClientDisconnect = AtomicBoolean(false)
     private val bytesSent = AtomicLong()
     private val server = ServerSocket().apply {
@@ -153,11 +155,19 @@ internal class LoopbackMediaServer(
 
     val url: String = "tcp://127.0.0.1:${server.localPort}"
 
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
+        check(!stopped.get() && !started) { "loopback cannot be started" }
+        started = true
         worker = thread(name = "relay-android-loopback", isDaemon = true) {
             try {
                 val accepted = server.accept()
-                client = accepted
+                synchronized(lifecycleLock) {
+                    if (stopped.get()) {
+                        accepted.closeQuietly()
+                        return@thread
+                    }
+                    client = accepted
+                }
                 accepted.tcpNoDelay = true
                 accepted.sendBufferSize = 256 * 1024
                 val output = accepted.getOutputStream().buffered(512 * 1024)
@@ -191,7 +201,7 @@ internal class LoopbackMediaServer(
     override fun close() {
         if (!stopped.compareAndSet(false, true)) return
         queue.close()
-        client?.closeQuietly()
+        synchronized(lifecycleLock) { client?.closeQuietly() }
         server.closeQuietly()
         worker?.takeUnless { it === Thread.currentThread() }?.join(2_000)
     }

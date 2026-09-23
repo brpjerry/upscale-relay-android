@@ -109,9 +109,17 @@ Ultra:
   clock. Every relay epoch loads with `pause=yes`. A confirmed muxed epoch
   re-enumerates/remaps explicit track choices on the first
   `PLAYBACK_RESTART` and releases the hold immediately; it never issues
-  `audio-add`. A local or compatibility-external epoch issues exactly one
-  post-restart `audio-add`, waits for valid `audio-pts`, then restores the
+  `audio-add`. A confirmed external source without auxiliary tracks also needs
+  no attachment. Confirmed subtitle-only sources use one delayed `sub-add`
+  without an audio wait. Other local or compatibility-external epochs issue
+  one post-restart `audio-add`, wait for valid `audio-pts`, then restore the
   caller's pause intent. See CLAUDE.md.
+- Stop awaits the player's ordered native command queue before retiring media
+  owners. Server teardown waits for `closed`; missing acknowledgement blocks
+  automatic replacement and surfaces an explicit cleanup failure.
+- Initial playback and seeks use a 60-second inactivity deadline. Strictly
+  advancing subtitle-index coverage for the current epoch extends it; stale
+  or repeated progress ticks do not. `seek_ready` is only a flush acknowledgement.
 - Confirmed cached attachments are downloaded before the first `loadfile` to
   `cache/relay-attachments/objects/<sha256>`, verified by exact size and
   SHA-256, and exposed through a temporary session font-name view. Objects
