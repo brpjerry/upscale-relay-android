@@ -162,11 +162,13 @@ class AppPreferencesStore(context: Context) {
 
     /** Stores the resume point for a file; most recent first, bounded. */
     suspend fun setPlaybackPosition(key: String, seconds: Double, durationSeconds: Double) {
+        if (!validHistoryKey(key) || !seconds.isFinite() || seconds < 0) return
         dataStore.edit { preferences ->
             val limit = historyLimit(preferences)
             val current = decodePositions(preferences[Keys.PLAYBACK_POSITIONS].orEmpty(), limit)
             val next = linkedMapOf(
-                key to PlaybackProgress(seconds, durationSeconds, System.currentTimeMillis()),
+                key to PlaybackProgress(seconds, durationSeconds.takeIf { it.isFinite() && it >= 0 } ?: 0.0,
+                    System.currentTimeMillis()),
             )
             current.forEach { (k, v) -> if (k != key && next.size < limit) next[k] = v }
             preferences[Keys.PLAYBACK_POSITIONS] = encodePositions(next)
@@ -263,7 +265,8 @@ internal fun decodeRecents(value: String): List<String> =
     value.lineSequence().map(String::trim).filter(String::isNotEmpty).distinct().take(MAX_RECENTS).toList()
 
 internal fun updateRecentPaths(current: List<String>, path: String): List<String> =
-    (listOf(path) + current.filterNot { it == path }).take(MAX_RECENTS)
+    (listOf(path) + current.filterNot { it == path })
+        .filter { it.isNotEmpty() && '\n' !in it && '\r' !in it }.take(MAX_RECENTS)
 
 /**
  * One "key<US>seconds<US>duration<US>lastPlayedMillis" entry per line,
@@ -277,17 +280,22 @@ internal fun decodePositions(
     value.lineSequence().forEach { line ->
         val parts = line.split('\u001F')
         if (parts.size < 2 || parts[0].isEmpty()) return@forEach
-        val seconds = parts[1].toDoubleOrNull() ?: return@forEach
-        val duration = parts.getOrNull(2)?.toDoubleOrNull() ?: 0.0
-        val playedAt = parts.getOrNull(3)?.toLongOrNull() ?: 0L
+        val seconds = parts[1].toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
+            ?: return@forEach
+        val duration = parts.getOrNull(2)?.toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it >= 0 } ?: 0.0
+        val playedAt = parts.getOrNull(3)?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
         if (size < limit) put(parts[0], PlaybackProgress(seconds, duration, playedAt))
     }
 }
 
 internal fun encodePositions(value: Map<String, PlaybackProgress>) =
-    value.entries.joinToString("\n") { (k, v) ->
+    value.entries.filter { validHistoryKey(it.key) }.joinToString("\n") { (k, v) ->
         "$k\u001F${v.positionSeconds}\u001F${v.durationSeconds}\u001F${v.lastPlayedAtMillis}"
     }
+
+internal fun validHistoryKey(key: String): Boolean =
+    key.isNotEmpty() && key.none { it == '\r' || it == '\n' || it == '\u001F' }
 
 internal const val MAX_RECENTS = 20
 

@@ -57,6 +57,12 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            // Device audits can coexist with the signed app and its saved data.
+            if (providers.gradleProperty("coinstallDebug").orNull == "true") {
+                applicationIdSuffix = ".debug"
+            }
+        }
         getByName("release") {
             // Null when unconfigured, which leaves an unsigned APK rather than
             // silently falling back to the debug key.

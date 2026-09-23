@@ -8,6 +8,19 @@ import org.junit.Test
 import java.time.Instant
 
 class BackupCodecTest {
+    @Test
+    fun `record delimiters in imported paths cannot create phantom history or recents`() {
+        val imported = roundTrip(AppPreferences(
+            recentPaths = listOf("good.mkv", "bad\rphantom.mkv", "bad\nphantom.mkv"),
+            playbackPositions = mapOf("server:bad\rphantom.mkv" to PlaybackProgress(12.0)),
+        ))
+        assertEquals(listOf("good.mkv"), imported.recentPaths)
+        assertTrue(imported.playbackPositions.isEmpty())
+        assertEquals(emptyMap<String, PlaybackProgress>(), decodePositions(encodePositions(
+            mapOf("bad\rkey" to PlaybackProgress(30.0)),
+        )))
+    }
+
     private val populated = AppPreferences(
         host = "10.0.0.5",
         port = 9001,

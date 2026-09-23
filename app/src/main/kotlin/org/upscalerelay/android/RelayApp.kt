@@ -26,8 +26,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.FlowRowScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -106,6 +107,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -121,9 +125,18 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalAccessibilityManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -282,7 +295,11 @@ private fun rememberPersistedListState(viewModel: RelayViewModel, key: String): 
 
 /** True for phone-sized windows; the shell swaps rail for a bottom bar. */
 @Composable
-private fun isCompactWidth(): Boolean = LocalConfiguration.current.screenWidthDp < 600
+private fun windowWidthDp(): Float =
+    LocalWindowInfo.current.containerSize.width / LocalDensity.current.density
+
+@Composable
+private fun isCompactWidth(): Boolean = windowWidthDp() < 600
 
 @Composable
 private fun contentPadding() = if (isCompactWidth()) 16.dp else 28.dp
@@ -1274,6 +1291,7 @@ private fun PlayerScreen(
     var chapterSheetVisible by remember { mutableStateOf(false) }
     var modelSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
+    val accessibilityManager = LocalAccessibilityManager.current
     val chromeInteractionSource = remember { MutableInteractionSource() }
     val chromePressed by chromeInteractionSource.collectIsPressedAsState()
     val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds).coerceAtLeast(0.0)
@@ -1287,15 +1305,13 @@ private fun PlayerScreen(
     // which previously fell through and exited the application.
     BackHandler { viewModel.closePlayback() }
 
-    if (inPictureInPicture) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(
-                factory = { context -> MpvSurfaceView(context).apply { engine = viewModel.playerEngine } },
-                update = { it.engine = viewModel.playerEngine },
-                modifier = Modifier.fillMaxSize(),
-            )
+    LaunchedEffect(inPictureInPicture) {
+        if (inPictureInPicture) {
+            trackSheetVisible = false
+            settingsSheetVisible = false
+            chapterSheetVisible = false
+            modelSheetVisible = false
         }
-        return
     }
     val sheetOpen = trackSheetVisible || settingsSheetVisible || chapterSheetVisible || modelSheetVisible
     LaunchedEffect(
@@ -1310,13 +1326,21 @@ private fun PlayerScreen(
             controlsVisible && !controlsLocked && !state.paused && !state.seeking &&
             !sheetOpen && !chromePressed
         ) {
-            delay(4_000)
+            delay(
+                accessibilityManager?.calculateRecommendedTimeoutMillis(
+                    4_000, containsIcons = true, containsText = true, containsControls = true,
+                ) ?: 4_000,
+            )
             controlsVisible = false
         }
     }
     LaunchedEffect(lockedButtonVisible, controlsLocked) {
         if (controlsLocked && lockedButtonVisible) {
-            delay(4_000)
+            delay(
+                accessibilityManager?.calculateRecommendedTimeoutMillis(
+                    4_000, containsIcons = true, containsControls = true,
+                ) ?: 4_000,
+            )
             lockedButtonVisible = false
         }
     }
@@ -1333,133 +1357,138 @@ private fun PlayerScreen(
             update = { it.engine = viewModel.playerEngine },
             modifier = Modifier.fillMaxSize(),
         )
-        PlayerTouchLayer(
-            viewModel = viewModel,
-            state = state,
-            duration = duration,
-            enabled = state.gesturesEnabled && !controlsLocked,
-            onToggleControls = {
-                if (controlsLocked) {
-                    lockedButtonVisible = !lockedButtonVisible
-                } else {
-                    controlsVisible = !controlsVisible
-                }
-            },
-            onShowControls = { controlsVisible = true },
-            onMessage = { gestureMessage = it },
-        )
-        if (controlsVisible && !controlsLocked) {
-            PlayerChrome(
+        // Keep this AndroidView at the same composition position in PiP.
+        // Replacing it discards the MediaCodec output Surface on every entry
+        // and exit, causing black frames and unnecessary decoder recovery.
+        if (!inPictureInPicture) {
+            PlayerTouchLayer(
                 viewModel = viewModel,
                 state = state,
-                position = position,
                 duration = duration,
-                onTracks = { trackSheetVisible = true },
-                onSettings = { settingsSheetVisible = true },
-                onChapters = { chapterSheetVisible = true },
-                onModels = { modelSheetVisible = true },
-                interactionSource = chromeInteractionSource,
-                onLock = {
-                    controlsLocked = true
-                    controlsVisible = false
-                    lockedButtonVisible = true
-                    gestureMessage = null
+                enabled = state.gesturesEnabled && !controlsLocked,
+                onToggleControls = {
+                    if (controlsLocked) {
+                        lockedButtonVisible = !lockedButtonVisible
+                    } else {
+                        controlsVisible = !controlsVisible
+                    }
                 },
+                onShowControls = { controlsVisible = true },
+                onMessage = { gestureMessage = it },
             )
-        }
-        if (controlsLocked && lockedButtonVisible) {
-            LockedControlsButton(
-                onUnlock = {
-                    controlsLocked = false
-                    lockedButtonVisible = false
-                    controlsVisible = true
-                },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(16.dp),
-            )
-        }
-        gestureMessage?.let { message ->
-            Surface(
-                modifier = Modifier.align(Alignment.Center),
-                color = Color(0xcc111111),
-                shape = MaterialTheme.shapes.large,
-            ) {
-                Text(message, Modifier.padding(horizontal = 28.dp, vertical = 18.dp), color = Color.White)
+            if (controlsVisible && !controlsLocked) {
+                PlayerChrome(
+                    viewModel = viewModel,
+                    state = state,
+                    position = position,
+                    duration = duration,
+                    onTracks = { trackSheetVisible = true },
+                    onSettings = { settingsSheetVisible = true },
+                    onChapters = { chapterSheetVisible = true },
+                    onModels = { modelSheetVisible = true },
+                    interactionSource = chromeInteractionSource,
+                    onLock = {
+                        controlsLocked = true
+                        controlsVisible = false
+                        lockedButtonVisible = true
+                        gestureMessage = null
+                    },
+                )
             }
-        }
-        state.performanceWarning?.let { warning ->
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = if (controlsVisible && !controlsLocked) 92.dp else 24.dp),
-                color = Color(0xdd3a2f12),
-                shape = MaterialTheme.shapes.large,
-            ) {
-                Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+            if (controlsLocked && lockedButtonVisible) {
+                LockedControlsButton(
+                    onUnlock = {
+                        controlsLocked = false
+                        lockedButtonVisible = false
+                        controlsVisible = true
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(16.dp),
+                )
+            }
+            gestureMessage?.let { message ->
+                Surface(
+                    modifier = Modifier.align(Alignment.Center),
+                    color = Color(0xcc111111),
+                    shape = MaterialTheme.shapes.large,
                 ) {
-                    Text(
-                        warning,
-                        color = Color(0xffffdf9e),
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    TextButton(onClick = viewModel::dismissPerformanceWarning) {
-                        Text("Dismiss", color = Color.White)
+                    Text(message, Modifier.padding(horizontal = 28.dp, vertical = 18.dp), color = Color.White)
+                }
+            }
+            state.performanceWarning?.let { warning ->
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = if (controlsVisible && !controlsLocked) 92.dp else 24.dp),
+                    color = Color(0xdd3a2f12),
+                    shape = MaterialTheme.shapes.large,
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            warning,
+                            color = Color(0xffffdf9e),
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        TextButton(onClick = viewModel::dismissPerformanceWarning) {
+                            Text("Dismiss", color = Color.White)
+                        }
                     }
                 }
             }
-        }
-        // One waiting affordance for the whole player, in priority order:
-        // recovery, then failure, then the pre-endpoint prepare, then seeks,
-        // then mid-play rebuffers. It sits outside the controls layer so a
-        // stall stays visible with the chrome hidden.
-        val buffering = !state.paused && (
-            state.mpvMetrics.pausedForCache ||
-                state.playerState == MpvPlaybackState.LOADING ||
-                state.playerState == MpvPlaybackState.LOADED
-            )
-        when {
-            state.reconnecting != null -> ReconnectOverlay(
-                status = state.reconnecting,
-                canFallback = state.localPlayback && !state.directLocalFallback,
-                onFallback = viewModel::playLocalFallback,
-                onCancel = viewModel::cancelAutoResume,
-            )
-            state.error != null -> PlayerError(
-                message = state.error,
-                onBack = viewModel::closePlayback,
-                onRetry = viewModel::retry,
-                canFallback = state.localPlayback && !state.directLocalFallback,
-                onFallback = viewModel::playLocalFallback,
-            )
-            state.endpoint == null -> LoadingOverlay(
-                label = "Preparing ${state.qualityTier}…",
-                // session_progress keepalive text, e.g. a first-use TensorRT
-                // engine build that runs for minutes.
-                detail = state.openingProgress,
-                appearAfterMillis = 0,
-            )
-            state.seeking -> LoadingOverlay("Seeking…")
-            buffering -> LoadingOverlay("Buffering…")
+            // One waiting affordance for the whole player, in priority order:
+            // recovery, then failure, then the pre-endpoint prepare, then seeks,
+            // then mid-play rebuffers. It sits outside the controls layer so a
+            // stall stays visible with the chrome hidden.
+            val buffering = !state.paused && (
+                state.mpvMetrics.pausedForCache ||
+                    state.playerState == MpvPlaybackState.LOADING ||
+                    state.playerState == MpvPlaybackState.LOADED
+                )
+            when {
+                state.reconnecting != null -> ReconnectOverlay(
+                    status = state.reconnecting,
+                    canFallback = state.localPlayback && !state.directLocalFallback,
+                    onFallback = viewModel::playLocalFallback,
+                    onCancel = viewModel::cancelAutoResume,
+                )
+                state.error != null -> PlayerError(
+                    message = state.error,
+                    onBack = viewModel::closePlayback,
+                    onRetry = viewModel::retry,
+                    canFallback = state.localPlayback && !state.directLocalFallback,
+                    onFallback = viewModel::playLocalFallback,
+                )
+                state.endpoint == null && !state.directLocalFallback -> LoadingOverlay(
+                    label = "Preparing ${state.qualityTier}…",
+                    // session_progress keepalive text, e.g. a first-use TensorRT
+                    // engine build that runs for minutes.
+                    detail = seekProgressDetail(state) ?: state.openingProgress,
+                    appearAfterMillis = 0,
+                )
+                state.seeking -> LoadingOverlay("Seeking…", detail = seekProgressDetail(state))
+                buffering -> LoadingOverlay("Buffering…")
+            }
         }
     }
 
-    if (trackSheetVisible) {
+    if (trackSheetVisible && !inPictureInPicture) {
         TrackSheet(viewModel, state) { trackSheetVisible = false }
     }
-    if (settingsSheetVisible) {
+    if (settingsSheetVisible && !inPictureInPicture) {
         PlaybackSettingsSheet(viewModel, state) { settingsSheetVisible = false }
     }
-    if (chapterSheetVisible) {
+    if (chapterSheetVisible && !inPictureInPicture) {
         ChapterSheet(viewModel, state) { chapterSheetVisible = false }
     }
-    if (modelSheetVisible) {
+    if (modelSheetVisible && !inPictureInPicture) {
         ModelSheet(viewModel, state) { modelSheetVisible = false }
     }
 }
@@ -1490,9 +1519,9 @@ private fun PlayerTouchLayer(
     var size by remember { mutableStateOf(IntSize.Zero) }
     var totalDrag by remember { mutableStateOf(Offset.Zero) }
     var dragStart by remember { mutableStateOf(Offset.Zero) }
-    var startPosition by remember { mutableStateOf(0.0) }
-    var startBrightness by remember { mutableStateOf(0.5f) }
-    var startVolume by remember { mutableStateOf(0) }
+    var startPosition by remember { mutableDoubleStateOf(0.0) }
+    var startBrightness by remember { mutableFloatStateOf(0.5f) }
+    var startVolume by remember { mutableIntStateOf(0) }
     // The control this drag has claimed, and the travel already spent
     // claiming it. A drag owns one control until the finger lifts: a swipe
     // that started vertical must not seek because it drifted sideways on the
@@ -1595,12 +1624,13 @@ private fun PlayerChrome(
 ) {
     val chapters = state.session?.chapters.orEmpty()
     val currentChapter = chapters.lastOrNull { it.startSeconds <= position }
-    Column(Modifier.fillMaxSize()) {
+    val compactActions = windowWidthDp() < 900
+    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xdd000000), Color.Transparent)))
-                .padding(horizontal = 24.dp, vertical = 18.dp),
+                .padding(horizontal = if (compactActions) 8.dp else 24.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = viewModel::closePlayback, interactionSource = interactionSource) {
@@ -1610,7 +1640,7 @@ private fun PlayerChrome(
                     tint = Color.White,
                 )
             }
-            Column(Modifier.weight(1f).padding(horizontal = 18.dp)) {
+            Column(Modifier.weight(1f).padding(horizontal = if (compactActions) 8.dp else 18.dp)) {
                 Text(
                     state.playingPath?.substringAfterLast('/').orEmpty(),
                     color = Color.White,
@@ -1618,34 +1648,24 @@ private fun PlayerChrome(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(state.sessionDescription, color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    state.sessionDescription,
+                    color = Color.LightGray,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (chapters.isNotEmpty()) {
-                TextButton(onClick = onChapters, interactionSource = interactionSource) {
-                    Icon(Icons.AutoMirrored.Outlined.Toc, contentDescription = null, tint = Color.White)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Chapters", color = Color.White)
-                }
+                PlayerAction(Icons.AutoMirrored.Outlined.Toc, "Chapters", compactActions, interactionSource, onChapters)
             }
-            TextButton(onClick = onTracks, interactionSource = interactionSource) {
-                Icon(Icons.Outlined.Subtitles, contentDescription = null, tint = Color.White)
-                Spacer(Modifier.width(8.dp))
-                Text("Audio & subtitles", color = Color.White)
-            }
+            PlayerAction(Icons.Outlined.Subtitles, "Audio & subtitles", compactActions, interactionSource, onTracks)
             // The model list has its own sheet: a server can offer dozens, far
             // more than the playback sheet can show without swallowing the rest.
-            if (state.capabilities?.models.orEmpty().isNotEmpty()) {
-                TextButton(onClick = onModels, interactionSource = interactionSource) {
-                    Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Model", color = Color.White)
-                }
+            if (!state.directLocalFallback && state.capabilities?.models.orEmpty().isNotEmpty()) {
+                PlayerAction(Icons.Outlined.AutoAwesome, "Model", compactActions, interactionSource, onModels)
             }
-            TextButton(onClick = onSettings, interactionSource = interactionSource) {
-                Icon(Icons.Outlined.Tune, contentDescription = null, tint = Color.White)
-                Spacer(Modifier.width(8.dp))
-                Text("Playback", color = Color.White)
-            }
+            PlayerAction(Icons.Outlined.Tune, "Playback settings", compactActions, interactionSource, onSettings)
             IconButton(onClick = onLock, interactionSource = interactionSource) {
                 Icon(
                     Icons.Outlined.Lock,
@@ -1659,8 +1679,7 @@ private fun PlayerChrome(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xee000000))))
-                .navigationBarsPadding()
-                .padding(horizontal = 36.dp, vertical = 18.dp),
+                .padding(horizontal = if (compactActions) 16.dp else 36.dp, vertical = 12.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(formatTime(position), color = Color.White, style = MaterialTheme.typography.labelLarge)
@@ -1716,7 +1735,7 @@ private fun PlayerChrome(
                     }
                     FilledIconButton(
                         onClick = viewModel::togglePaused,
-                        enabled = !state.seeking,
+                        enabled = state.error == null,
                         interactionSource = interactionSource,
                         modifier = Modifier.size(64.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
@@ -1726,8 +1745,8 @@ private fun PlayerChrome(
                             disabledContentColor = Color.Black,
                         ),
                     ) {
-                        // Seeking greys the button out; the shared loading
-                        // overlay is what spins.
+                        // Pause remains an intent change during a seek; the
+                        // new epoch applies it when its load hold is released.
                         Icon(
                             if (state.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
                             contentDescription = if (state.paused) "Play" else "Pause",
@@ -1755,6 +1774,27 @@ private fun PlayerChrome(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun PlayerAction(
+    icon: ImageVector,
+    label: String,
+    compact: Boolean,
+    interactionSource: MutableInteractionSource,
+    onClick: () -> Unit,
+) {
+    if (compact) {
+        IconButton(onClick = onClick, interactionSource = interactionSource) {
+            Icon(icon, contentDescription = label, tint = Color.White)
+        }
+    } else {
+        TextButton(onClick = onClick, interactionSource = interactionSource) {
+            Icon(icon, contentDescription = null, tint = Color.White)
+            Spacer(Modifier.width(8.dp))
+            Text(label, color = Color.White)
         }
     }
 }
@@ -1797,9 +1837,10 @@ private fun PlayerSeekBar(
     modifier: Modifier = Modifier,
 ) {
     var dragging by remember { mutableStateOf(false) }
-    var scrubStart by remember { mutableStateOf(0.0) }
-    var barWidthPx by remember { mutableStateOf(0) }
-    var bubbleWidthPx by remember { mutableStateOf(0) }
+    var scrubStart by remember { mutableDoubleStateOf(0.0) }
+    var barWidthPx by remember { mutableIntStateOf(0) }
+    var bubbleWidthPx by remember { mutableIntStateOf(0) }
+    val latestPosition by rememberUpdatedState(position)
     val accent = MaterialTheme.colorScheme.primary
     val accentBright = lerp(accent, Color.White, 0.4f)
     val trackHeight by animateDpAsState(if (dragging) 6.dp else 4.dp, label = "seekTrackHeight")
@@ -1813,7 +1854,22 @@ private fun PlayerSeekBar(
 
     Box(
         modifier
-            .height(44.dp)
+            .height(48.dp)
+            .semantics {
+                contentDescription = "Playback position"
+                stateDescription = "${formatTime(position)} of ${formatTime(duration)}"
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    position.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(0f)),
+                    0f..duration.toFloat().coerceAtLeast(0f),
+                )
+                if (enabled) {
+                    setProgress { target ->
+                        onScrub(target.toDouble().coerceIn(0.0, duration))
+                        onScrubFinished()
+                        true
+                    }
+                } else disabled()
+            }
             .onSizeChanged { barWidthPx = it.width }
             .pointerInput(enabled, duration) {
                 if (!enabled) return@pointerInput
@@ -1826,7 +1882,7 @@ private fun PlayerSeekBar(
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
                     onDragStart = { offset ->
-                        scrubStart = position
+                        scrubStart = latestPosition
                         dragging = true
                         onScrub(secondsAt(offset.x))
                     },
@@ -2087,36 +2143,38 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
         ) {
             Text("Playback settings", style = MaterialTheme.typography.headlineSmall)
             Text(
-                if (state.directLocalFallback) "Changes apply to the next relay video."
+                if (state.directLocalFallback) "Player preferences apply to the original video."
                 else "Quality, framing, and filter changes restart this video at the current position.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
-            Text("Quality", style = MaterialTheme.typography.titleMedium)
-            state.capabilities?.qualityOptions.orEmpty()
-                .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
-                .forEach { option ->
-                    RadioSetting(option.label, state.qualityTier == option.id) {
-                        viewModel.setQualityTier(option.id)
+            if (!state.directLocalFallback) {
+                Text("Quality", style = MaterialTheme.typography.titleMedium)
+                state.capabilities?.qualityOptions.orEmpty()
+                    .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
+                    .forEach { option ->
+                        RadioSetting(option.label, state.qualityTier == option.id) {
+                            viewModel.setQualityTier(option.id)
+                        }
+                    }
+                Text("Framing", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    RelaySessionController.FIT_MODES.forEach { mode ->
+                        FilterChip(
+                            selected = state.fitMode == mode,
+                            onClick = { viewModel.setFitMode(mode) },
+                            label = { Text(mode.replaceFirstChar(Char::uppercase)) },
+                        )
                     }
                 }
-            Text("Framing", style = MaterialTheme.typography.titleMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RelaySessionController.FIT_MODES.forEach { mode ->
-                    FilterChip(
-                        selected = state.fitMode == mode,
-                        onClick = { viewModel.setFitMode(mode) },
-                        label = { Text(mode.replaceFirstChar(Char::uppercase)) },
-                    )
+                Text("Downscale filter", style = MaterialTheme.typography.titleMedium)
+                RadioSetting("Server default", state.resizeAlgorithm.isEmpty()) {
+                    viewModel.setResizeAlgorithm("")
                 }
-            }
-            Text("Downscale filter", style = MaterialTheme.typography.titleMedium)
-            RadioSetting("Server default", state.resizeAlgorithm.isEmpty()) {
-                viewModel.setResizeAlgorithm("")
-            }
-            state.capabilities?.resizeAlgorithms.orEmpty().forEach { algorithm ->
-                RadioSetting(algorithm, state.resizeAlgorithm == algorithm) {
-                    viewModel.setResizeAlgorithm(algorithm)
+                state.capabilities?.resizeAlgorithms.orEmpty().forEach { algorithm ->
+                    RadioSetting(algorithm, state.resizeAlgorithm == algorithm) {
+                        viewModel.setResizeAlgorithm(algorithm)
+                    }
                 }
             }
             SettingToggle("GPU deband", state.debandEnabled, viewModel::setDebandEnabled)
@@ -2145,7 +2203,7 @@ private fun LoadingOverlay(
     modifier: Modifier = Modifier,
     detail: String? = null,
     appearAfterMillis: Long = 250,
-    actions: (@Composable RowScope.() -> Unit)? = null,
+    actions: (@Composable FlowRowScope.() -> Unit)? = null,
 ) {
     var visible by remember { mutableStateOf(appearAfterMillis <= 0) }
     LaunchedEffect(Unit) {
@@ -2156,7 +2214,8 @@ private fun LoadingOverlay(
     }
     if (!visible) return
     Box(
-        modifier.fillMaxSize().background(Color(0x88000000)),
+        modifier.fillMaxSize().background(Color(0x88000000))
+            .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
         contentAlignment = Alignment.Center,
     ) {
         // The card wraps its content up to a cap: "Buffering…" gets a compact
@@ -2166,7 +2225,7 @@ private fun LoadingOverlay(
             Column(
                 Modifier
                     .widthIn(max = if (isCompactWidth()) 320.dp else 520.dp)
-                    .padding(28.dp),
+                    .verticalScroll(rememberScrollState()).padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 CircularProgressIndicator()
@@ -2186,7 +2245,7 @@ private fun LoadingOverlay(
                 }
                 actions?.let { content ->
                     Spacer(Modifier.height(24.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
                 }
             }
         }
@@ -2225,17 +2284,21 @@ private fun PlayerError(
     canFallback: Boolean,
     onFallback: () -> Unit,
 ) {
-    Box(Modifier.fillMaxSize().background(Color(0xaa000000)), contentAlignment = Alignment.Center) {
-        Card(Modifier.fillMaxWidth(0.55f)) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0xaa000000))
+            .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Card(Modifier.widthIn(max = 600.dp).fillMaxWidth()) {
             Column(
-                Modifier.fillMaxWidth().padding(28.dp),
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("Playback failed", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(12.dp))
                 Text(message, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton(onClick = onBack) { Text("Back to library") }
                     if (canFallback) {
                         OutlinedButton(onClick = onFallback) { Text("Play original") }
@@ -2244,6 +2307,17 @@ private fun PlayerError(
                 }
             }
         }
+    }
+}
+
+private fun seekProgressDetail(state: RelayUiState): String? {
+    val progress = state.seekProgress ?: return null
+    return when (progress.stage) {
+        "subtitle_index" -> "Preparing subtitles for this part of the video. " +
+            (progress.subtitleIndexedSeconds?.let { "Source scanned through ${formatTime(it)}. " } ?: "") +
+            "The first seek here can take longer."
+        "video_decode" -> "Finding the requested video frame…"
+        else -> "The server is preparing the requested position…"
     }
 }
 

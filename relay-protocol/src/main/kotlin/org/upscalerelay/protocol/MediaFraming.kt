@@ -2,6 +2,7 @@ package org.upscalerelay.protocol
 
 import java.io.EOFException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -43,6 +44,21 @@ object MediaFraming {
             .putLong(packet.dts)
             .put(packet.payload)
             .array()
+    }
+
+    /** Writes bounded framing without copying the payload into a second full-size array. */
+    fun write(output: OutputStream, packet: MediaPacket) {
+        require(packet.payload.size <= MAX_PAYLOAD_BYTES) { "media payload is too large" }
+        val header = ByteBuffer.allocate(HEADER_LENGTH)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(packet.payload.size)
+            .put(packet.flags.toByte())
+            .putInt(packet.epoch)
+            .putLong(packet.pts)
+            .putLong(packet.dts)
+            .array()
+        output.write(header)
+        output.write(packet.payload)
     }
 
     fun decodeHeader(header: ByteArray): MediaHeader {
@@ -102,4 +118,3 @@ data class MediaPacket(
     val discontinuity: Boolean get() = flags and MediaFraming.FLAG_DISCONTINUITY != 0
     val endOfStream: Boolean get() = flags and MediaFraming.FLAG_END_OF_STREAM != 0
 }
-

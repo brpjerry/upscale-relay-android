@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -15,12 +16,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
 import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
+import org.upscalerelay.protocol.SeekProgress
 import java.io.Closeable
 import java.net.SocketTimeoutException
 import java.nio.file.Path
@@ -45,11 +49,21 @@ class RelaySessionController(
 
     /** Server loading text while open_session runs (TensorRT engine build). */
     val openingProgress: StateFlow<String?> = mutableOpeningProgress.asStateFlow()
+    private val mutableSeekProgress = MutableStateFlow<SeekProgress?>(null)
+    val seekProgress: StateFlow<SeekProgress?> = mutableSeekProgress.asStateFlow()
+    private val seekProgressTracker = SeekProgressTracker()
+    private val teardownMutex = Mutex()
+    private val teardownResult = AtomicReference<Result<Unit>?>(null)
+    private val seekMutex = Mutex()
+
+    /** Null after first render; only advancing subtitle coverage refreshes the load deadline. */
+    fun seekProgressIdleMillis(): Long? = seekProgressTracker.idleMillis()
     private val playerBuffer = AtomicReference(PlayerBufferSnapshot())
     private val closed = AtomicBoolean(false)
     private val currentEpoch = AtomicInteger(0)
     private val suppressBufferReports = AtomicBoolean(false)
     private val desiredPaused = AtomicBoolean(false)
+    private val playbackStateLock = Any()
 
     private var control: ControlChannel? = null
     private var queue: BoundedMediaQueue? = null
@@ -57,6 +71,7 @@ class RelaySessionController(
     private var uplink: UplinkSender? = null
     private var loopback: LoopbackMediaServer? = null
     private var reporter: Job? = null
+    private var seekWatchdog: Job? = null
     private var capabilities: Capabilities? = null
     private var activeSession: SessionInfo? = null
     private var activeModel: String? = null
@@ -72,10 +87,16 @@ class RelaySessionController(
 
     suspend fun connect(display: DisplaySize, librarySort: String? = null): ConnectedLibrary {
         check(!closed.get())
+        teardownResult.set(null)
         stateMachine.transition(SessionState.CONNECTING)
         return try {
             val channel = ControlChannel(host, port, ::fail)
             channel.onOpeningProgress = { text -> mutableOpeningProgress.value = text }
+            channel.onSeekProgress = { progress ->
+                synchronized(seekProgressTracker) {
+                    if (seekProgressTracker.accept(progress)) mutableSeekProgress.value = progress
+                }
+            }
             control = channel
             val caps = channel.connect(display)
             require(caps.protocolVersion == MediaFraming.PROTOCOL_VERSION) {
@@ -95,6 +116,8 @@ class RelaySessionController(
             capabilities = caps
             stateMachine.transition(SessionState.BROWSING)
             ConnectedLibrary(caps, page.directory, page.nextCursor)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             fail(error)
             throw error
@@ -179,7 +202,12 @@ class RelaySessionController(
                 } catch (error: Throwable) {
                     // The confirmed epoch omitted these bodies. Never continue
                     // with /media or a partial font view; retire the session.
-                    runCatching { channel.teardown() }
+                    try {
+                        withContext(NonCancellable) { channel.teardown() }
+                    } catch (cleanupError: Throwable) {
+                        if (cleanupError !== error) cleanupError.addSuppressed(error)
+                        throw cleanupError
+                    }
                     throw error
                 }
             } else {
@@ -205,7 +233,7 @@ class RelaySessionController(
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
-            originalMediaUrl = if (confirmedMuxed) null else requireNotNull(control).mediaUrl(path)
+            originalMediaUrl = if (session.needsExternalMedia) requireNotNull(control).mediaUrl(path) else null
             currentEpoch.set(session.epoch)
             downlink.start()
             try {
@@ -230,6 +258,8 @@ class RelaySessionController(
                 fitMode = fitMode,
                 resizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm,
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             fail(error)
             throw error
@@ -264,6 +294,9 @@ class RelaySessionController(
                 requireNotNull(control).openUplinkSession(
                     source.videoInfo, model, display, qualityTier, fitMode, resizeAlgorithm,
                 ),
+            ).copy(
+                sourceHasAudio = source.videoInfo.sourceHasAudio,
+                sourceHasAuxiliary = source.videoInfo.sourceHasAuxiliary,
             )
             val token = requireNotNull(session.uplinkToken) { "uplink session did not return a token" }
             require(session.downlinkContainer == "matroska") {
@@ -296,8 +329,8 @@ class RelaySessionController(
             }
             val sender = withContext(Dispatchers.IO) {
                 UplinkSender.connect(host, session.mediaPort, token, source, ::fail)
+                    .also { uplink = it }
             }
-            uplink = sender
             sender.startEpoch(epoch = 0)
 
             activeSession = session
@@ -305,13 +338,13 @@ class RelaySessionController(
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
-            this.originalMediaUrl = originalMediaUrl
+            this.originalMediaUrl = originalMediaUrl.takeIf { session.needsExternalMedia }
             currentEpoch.set(session.epoch)
             startReporter()
             stateMachine.transition(SessionState.BUFFERING)
             PlaybackEndpoint(
                 localUrl = localServer.url,
-                originalMediaUrl = originalMediaUrl,
+                originalMediaUrl = this.originalMediaUrl,
                 subtitleFontsDirectory = null,
                 auxTracks = "external",
                 auxAttachments = "embedded",
@@ -323,6 +356,9 @@ class RelaySessionController(
                 fitMode = fitMode,
                 resizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm,
             )
+        } catch (cancelled: CancellationException) {
+            if (uplink == null) source.closeQuietly()
+            throw cancelled
         } catch (error: Throwable) {
             if (uplink == null) source.closeQuietly()
             fail(error)
@@ -334,11 +370,18 @@ class RelaySessionController(
 
     fun startServerPlayback() {
         check(state.value == SessionState.BUFFERING)
+        seekProgressTracker.begin(currentEpoch.get())
+        startSeekWatchdog(currentEpoch.get())
         requireNotNull(control).play()
     }
 
-    fun setPaused(paused: Boolean) {
+    fun setPaused(paused: Boolean) = synchronized(playbackStateLock) {
         val current = state.value
+        if (current == SessionState.SEEKING) {
+            if (paused) requireNotNull(control).pause() else requireNotNull(control).play()
+            desiredPaused.set(paused)
+            return@synchronized
+        }
         if (paused) {
             check(current == SessionState.PLAYING || current == SessionState.BUFFERING)
             requireNotNull(control).pause()
@@ -356,22 +399,35 @@ class RelaySessionController(
      * Switches the persistent downlink to a fresh queue/localhost stream and
      * asks the server to begin the new epoch at an absolute source PTS.
      */
-    suspend fun seek(targetPts: Long): PlaybackEndpoint {
-        check(
-            state.value in setOf(
-                SessionState.PLAYING, SessionState.PAUSED, SessionState.BUFFERING, SessionState.SEEKING,
-            ),
-        )
-        stateMachine.transition(SessionState.SEEKING)
+    suspend fun seek(targetPts: Long): PlaybackEndpoint = seekMutex.withLock {
+        synchronized(playbackStateLock) {
+            check(
+                state.value in setOf(
+                    SessionState.PLAYING, SessionState.PAUSED, SessionState.BUFFERING, SessionState.SEEKING,
+                ),
+            )
+            stateMachine.transition(SessionState.SEEKING)
+        }
         suppressBufferReports.set(true)
         playerBuffer.set(PlayerBufferSnapshot())
-        return try {
+        try {
             val epoch = currentEpoch.incrementAndGet()
+            synchronized(seekProgressTracker) {
+                seekProgressTracker.begin(epoch)
+                mutableSeekProgress.value = null
+            }
+            startSeekWatchdog(epoch)
             val nextQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             val nextLoopback = LoopbackMediaServer(nextQueue, ::fail).also { it.start() }
             val previousLoopback = loopback
 
-            requireNotNull(receiver).switchEpoch(epoch, nextQueue)
+            try {
+                requireNotNull(receiver).switchEpoch(epoch, nextQueue)
+            } catch (error: Throwable) {
+                nextLoopback.close()
+                nextQueue.close()
+                throw error
+            }
             queue = nextQueue
             loopback = nextLoopback
             previousLoopback?.close()
@@ -382,19 +438,17 @@ class RelaySessionController(
             uplink?.startEpoch(epoch, targetPts.coerceAtLeast(0), discontinuity = true)
             val session = requireNotNull(activeSession).copy(epoch = epoch)
             activeSession = session
-            stateMachine.transition(
-                if (desiredPaused.get()) SessionState.PAUSED else SessionState.BUFFERING,
-            )
+            synchronized(playbackStateLock) {
+                stateMachine.transition(
+                    if (desiredPaused.get()) SessionState.PAUSED else SessionState.BUFFERING,
+                )
+            }
             PlaybackEndpoint(
                 localUrl = nextLoopback.url,
                 originalMediaUrl = originalMediaUrl,
                 subtitleFontsDirectory = attachmentView?.toString(),
-                auxTracks = if (originalMediaUrl == null) "muxed" else "external",
-                auxAttachments = if (originalMediaUrl == null) {
-                    requireNotNull(activeSession).auxAttachments
-                } else {
-                    "embedded"
-                },
+                auxTracks = session.auxTracks,
+                auxAttachments = if (session.auxTracks == "muxed") session.auxAttachments else "embedded",
                 requestedAuxTracks = requestedAuxTracks,
                 requestedAuxAttachments = requestedAuxAttachments,
                 attachmentCacheStats = attachmentCacheStats,
@@ -413,7 +467,12 @@ class RelaySessionController(
     }
 
     fun markRendering() {
-        if (state.value == SessionState.BUFFERING) stateMachine.transition(SessionState.PLAYING)
+        seekWatchdog?.cancel()
+        seekWatchdog = null
+        clearSeekProgress()
+        synchronized(playbackStateLock) {
+            if (state.value == SessionState.BUFFERING) stateMachine.transition(SessionState.PLAYING)
+        }
         suppressBufferReports.set(false)
     }
 
@@ -425,53 +484,108 @@ class RelaySessionController(
         loopback?.expectClientDisconnect()
     }
 
-    private fun startReporter() {
-        reporter?.cancel()
-        reporter = scope.launch {
-            while (isActive) {
-                val player = playerBuffer.get()
-                val queueSnapshot = queue?.snapshot() ?: QueueSnapshot(0, 0, 1, true)
-                val receiverSnapshot = receiver?.snapshot() ?: ReceiverSnapshot(0, 0, 0.0)
-                val bitrate = player.bitrateBitsPerSecond.takeIf { it > 0 }
-                    ?: (receiverSnapshot.averageMegabitsPerSecond * 1_000_000).roundToLong()
-                val queuedMillis = if (bitrate > 0) queueSnapshot.bytes * 8_000 / bitrate else 0
-                val bufferedMillis = (player.cacheDurationMillis + queuedMillis).coerceAtLeast(0)
-                if (!suppressBufferReports.get()) control?.bufferReport(bufferedMillis)
-                mutableStats.value = TransportStats(
-                    receivedBytes = receiverSnapshot.totalBytes,
-                    receivedPackets = receiverSnapshot.totalPackets,
-                    averageMegabitsPerSecond = receiverSnapshot.averageMegabitsPerSecond,
-                    queuedBytes = queueSnapshot.bytes,
-                    queuedPackets = queueSnapshot.packets,
-                    loopbackBytes = loopback?.totalBytesSent() ?: 0,
-                    playerCacheMillis = player.cacheDurationMillis,
-                    reportedBufferMillis = bufferedMillis,
-                )
+    private fun startSeekWatchdog(epoch: Int) {
+        seekWatchdog?.cancel()
+        seekWatchdog = scope.launch {
+            while (isActive && epoch == currentEpoch.get()) {
                 delay(500)
+                if (epoch != currentEpoch.get()) break
+                val idleMillis = seekProgressTracker.idleMillis() ?: break
+                if (idleMillis >= SEEK_PROGRESS_TIMEOUT_MILLIS) {
+                    fail(MediaStalledException(
+                        "Stream produced no playable media or advancing subtitle index for 60 seconds",
+                    ))
+                    break
+                }
             }
         }
     }
 
-    suspend fun teardown() {
-        if (closed.get()) return
+    private fun clearSeekProgress() = synchronized(seekProgressTracker) {
+        seekProgressTracker.clear()
+        mutableSeekProgress.value = null
+    }
+
+    private fun startReporter() {
+        reporter?.cancel()
+        reporter = scope.launch {
+            try {
+                while (isActive) {
+                    val player = playerBuffer.get()
+                    val queueSnapshot = queue?.snapshot() ?: QueueSnapshot(0, 0, 1, true)
+                    val receiverSnapshot = receiver?.snapshot() ?: ReceiverSnapshot(0, 0, 0.0)
+                    val bitrate = player.bitrateBitsPerSecond.takeIf { it > 0 }
+                        ?: (receiverSnapshot.averageMegabitsPerSecond * 1_000_000).roundToLong()
+                    val queuedMillis = if (bitrate > 0) queueSnapshot.bytes * 8_000 / bitrate else 0
+                    val bufferedMillis = (player.cacheDurationMillis + queuedMillis).coerceAtLeast(0)
+                    if (!suppressBufferReports.get()) control?.bufferReport(bufferedMillis)
+                    mutableStats.value = TransportStats(
+                        receivedBytes = receiverSnapshot.totalBytes,
+                        receivedPackets = receiverSnapshot.totalPackets,
+                        averageMegabitsPerSecond = receiverSnapshot.averageMegabitsPerSecond,
+                        queuedBytes = queueSnapshot.bytes,
+                        queuedPackets = queueSnapshot.packets,
+                        loopbackBytes = loopback?.totalBytesSent() ?: 0,
+                        playerCacheMillis = player.cacheDurationMillis,
+                        reportedBufferMillis = bufferedMillis,
+                    )
+                    delay(500)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                fail(error)
+            }
+        }
+    }
+
+    suspend fun teardown() = teardownMutex.withLock {
+        teardownResult.get()?.let {
+            it.getOrThrow()
+            return@withLock
+        }
         val current = state.value
         if (current != SessionState.CLOSING && current != SessionState.DISCONNECTED) {
             stateMachine.transition(SessionState.CLOSING)
         }
+        var teardownError: Throwable? = null
+        fun remember(error: Throwable) {
+            val existing = teardownError
+            if (existing == null) teardownError = error
+            else if (existing !== error) existing.addSuppressed(error)
+        }
         reporter?.cancel()
         reporter = null
-        uplink?.close()
+        seekWatchdog?.cancel()
+        seekWatchdog = null
+        // Every owner must be retired even if an earlier owner's close fails.
+        listOf(uplink, receiver, loopback, queue).forEach { owner ->
+            try {
+                owner?.close()
+            } catch (error: Throwable) {
+                remember(error)
+            }
+        }
         uplink = null
-        receiver?.close()
         receiver = null
-        loopback?.close()
         loopback = null
-        queue?.close()
         queue = null
-        attachmentCache?.removeView(attachmentView)
-        attachmentView = null
-        attachmentCache = null
-        runCatching { control?.teardown() }
+        try {
+            control?.teardown()
+        } catch (error: Throwable) {
+            // The remote barrier determines whether opening a replacement is safe.
+            teardownError?.let { if (it !== error) error.addSuppressed(it) }
+            teardownError = error
+        } finally {
+            control?.close()
+            try {
+                withContext(NonCancellable) { attachmentCache?.removeView(attachmentView) }
+            } catch (error: Throwable) {
+                remember(error)
+            }
+            attachmentView = null
+            attachmentCache = null
+        }
         control = null
         capabilities = null
         activeSession = null
@@ -486,12 +600,18 @@ class RelaySessionController(
         currentEpoch.set(0)
         suppressBufferReports.set(false)
         desiredPaused.set(false)
+        clearSeekProgress()
         playerBuffer.set(PlayerBufferSnapshot())
         if (state.value == SessionState.CLOSING) stateMachine.transition(SessionState.DISCONNECTED)
+        teardownError?.let {
+            teardownResult.set(Result.failure(it))
+            throw it
+        }
+        teardownResult.set(Result.success(Unit))
     }
 
     private fun fail(error: Throwable) {
-        if (closed.get() || state.value == SessionState.CLOSING || state.value == SessionState.DISCONNECTED) return
+        if (closed.get() || state.value in setOf(SessionState.CLOSING, SessionState.DISCONNECTED, SessionState.FAILED)) return
         mutableFailure.value = FailureDetail(
             summary = error.message ?: error::class.simpleName.orEmpty(),
             exceptionType = error::class.qualifiedName.orEmpty(),
@@ -499,24 +619,28 @@ class RelaySessionController(
         )
         stateMachine.fail()
         reporter?.cancel()
-        uplink?.close()
-        receiver?.close()
-        loopback?.close()
-        queue?.close()
+        seekWatchdog?.cancel()
+        clearSeekProgress()
+        listOf(uplink, receiver, loopback, queue).forEach { owner ->
+            runCatching { owner?.close() }.exceptionOrNull()?.let {
+                if (it !== error) error.addSuppressed(it)
+            }
+        }
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         reporter?.cancel()
-        uplink?.close()
-        receiver?.close()
-        loopback?.close()
-        queue?.close()
-        control?.close()
+        seekWatchdog?.cancel()
+        listOf(uplink, receiver, loopback, queue, control).forEach { owner ->
+            runCatching { owner?.close() }
+        }
         scope.cancel()
     }
 
     companion object {
+        const val TEARDOWN_TIMEOUT_MILLIS = 30_000L
+        const val SEEK_PROGRESS_TIMEOUT_MILLIS = 60_000L
         const val MEDIA_QUEUE_BYTES = 256L * 1024 * 1024
         val ANDROID_HEVC_TIERS = setOf(
             "lossless-hevc", "hevc-qp2", "hevc-qp4", "hevc-qp6",
@@ -526,6 +650,9 @@ class RelaySessionController(
         const val LIBRARY_PAGE_SIZE = 100
     }
 }
+
+internal val SessionInfo.needsExternalMedia: Boolean
+    get() = auxTracks != "muxed" && sourceHasAuxiliary != false
 
 data class ConnectedLibrary(
     val capabilities: Capabilities,

@@ -7,7 +7,11 @@ import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserver, AutoCloseable {
     private val applicationContext = context.applicationContext
@@ -16,9 +20,15 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     @Volatile
     var logSink: ((level: Int, line: String) -> Unit)? = null
     private val lock = Any()
+    // load/stop/add/destroy must never overtake a blocking external demuxer
+    // command. Keep HTTP work off both the main and mpv event threads.
+    private val commands = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "relay-mpv-commands").apply { isDaemon = true }
+    }
     private val mutableState = MutableStateFlow(MpvPlaybackState.CREATED)
     val state: StateFlow<MpvPlaybackState> = mutableState.asStateFlow()
     private var initialized = false
+    private var initializationStarted = false
     private var closed = false
     private var attachedSurface: Surface? = null
     private var pendingLoad: MpvLoadRequest? = null
@@ -32,6 +42,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var attachInFlight = false
     /** Bumped by every load/stop so a late attach cannot target a retired one. */
     private var loadGeneration = 0L
+    private var nativeGeneration = -1L
+    private var awaitingStart = true
     /** The caller's pause intent, applied once the attach releases the hold. */
     private var callerPaused = false
     // Track choices the caller made for the current file. Re-applied whenever
@@ -43,18 +55,45 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var subtitleChoiceMade = false
     private var defaultSubtitleFontsDirectory = ""
 
-    fun initialize(): Unit = synchronized(lock) {
-        check(!closed) { "player is closed" }
-        if (initialized) return
-        MPVLib.create(applicationContext)
-        setInitialOptions()
-        MPVLib.init()
-        defaultSubtitleFontsDirectory = MPVLib.getPropertyString("sub-fonts-dir").orEmpty()
-        observeMetrics()
-        MPVLib.addObserver(this)
-        MPVLib.addLogObserver(this)
-        initialized = true
-        mutableState.value = MpvPlaybackState.IDLE
+    /** Blocking: callers initialize on IO while the preceding owner retires. */
+    fun initialize() {
+        synchronized(lock) {
+            check(!closed) { "player is closed" }
+            if (initialized) return
+            check(!initializationStarted) { "player initialization already started" }
+            initializationStarted = true
+        }
+        // The pinned JNI owns a process-global g_mpv and aborts the process on
+        // duplicate create. Never hold this engine's UI lock while waiting for
+        // the previous Activity's asynchronous native cleanup.
+        nativeInstance.acquire()
+        var created = false
+        try {
+            synchronized(lock) {
+                check(!closed) { "player is closed" }
+                MPVLib.create(applicationContext)
+                created = true
+                setInitialOptions()
+                MPVLib.init()
+                defaultSubtitleFontsDirectory = MPVLib.getPropertyString("sub-fonts-dir").orEmpty()
+                observeMetrics()
+                MPVLib.addObserver(this)
+                MPVLib.addLogObserver(this)
+                initialized = true
+                mutableState.value = MpvPlaybackState.IDLE
+            }
+        } catch (error: Throwable) {
+            try {
+                if (created) {
+                    MPVLib.removeLogObserver(this)
+                    MPVLib.removeObserver(this)
+                    MPVLib.destroy()
+                }
+            } finally {
+                nativeInstance.release()
+            }
+            throw error
+        }
     }
 
     fun load(request: RelayLoad) = synchronized(lock) {
@@ -63,17 +102,20 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "mpv input must be the private loopback stream"
         }
         when (request.auxMode) {
-            RelayAuxMode.EXTERNAL -> require(
+            RelayAuxMode.EXTERNAL, RelayAuxMode.EXTERNAL_SUBTITLES -> require(
                 request.externalMediaUrl?.startsWith("http://") == true ||
                     request.externalMediaUrl?.startsWith("https://") == true,
             ) { "external relay media must be served over HTTP" }
-            RelayAuxMode.MUXED -> require(request.externalMediaUrl == null) {
-                "a muxed relay load must not attach external media"
+            RelayAuxMode.MUXED, RelayAuxMode.NONE -> require(request.externalMediaUrl == null) {
+                "this relay load must not attach external media"
             }
         }
         val load = MpvLoadRequest(request.streamUrl, request, null)
         mutableState.value = MpvPlaybackState.LOADING
-        if (attachedSurface == null) pendingLoad = load else loadNow(load)
+        if (attachedSurface == null) {
+            loadGeneration += 1
+            pendingLoad = load
+        } else loadNow(load)
     }
 
     fun loadDirect(url: String, startSeconds: Double = 0.0) = synchronized(lock) {
@@ -81,7 +123,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         require(url.startsWith("http://127.0.0.1:")) { "direct local input must use the private HTTP bridge" }
         val request = MpvLoadRequest(url, null, startSeconds.coerceAtLeast(0.0))
         mutableState.value = MpvPlaybackState.LOADING
-        if (attachedSurface == null) pendingLoad = request else loadNow(request)
+        if (attachedSurface == null) {
+            loadGeneration += 1
+            pendingLoad = request
+        } else loadNow(request)
     }
 
     /** Stop the old live Matroska demuxer before its localhost socket closes. */
@@ -95,9 +140,19 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             attachInFlight = false
             loadGeneration += 1
             resetStreamMetricsLocked()
-            MPVLib.command(arrayOf("stop"))
+            commands.execute { MPVLib.command(arrayOf("stop")) }
             mutableState.value = MpvPlaybackState.LOADING
         }
+    }
+
+    /** Wait before retiring the old loopback socket or its external HTTP source. */
+    suspend fun awaitIdle() = withContext(Dispatchers.IO) {
+        val barrier = synchronized(lock) {
+            check(!closed) { "player is closed" }
+            commands.submit { }
+        }
+        barrier.get(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        Unit
     }
 
     fun setPaused(paused: Boolean) = synchronized(lock) {
@@ -150,13 +205,15 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     fun selectAudioTrack(id: Int) = synchronized(lock) {
-        chosenAudio = rememberTrack(trackSnapshotLocked(), id)
+        chosenAudio = rememberTrack(trackSnapshotLocked(), MpvTrack.Type.AUDIO, id) ?: return
         audioChoiceMade = true
         if (initialized && !closed) MPVLib.setPropertyString("aid", id.toString())
     }
 
     fun selectSubtitleTrack(id: Int?) = synchronized(lock) {
-        chosenSubtitle = id?.let { rememberTrack(trackSnapshotLocked(), it) }
+        chosenSubtitle = if (id == null) null else {
+            rememberTrack(trackSnapshotLocked(), MpvTrack.Type.SUBTITLE, id) ?: return
+        }
         subtitleChoiceMade = true
         if (initialized && !closed) MPVLib.setPropertyString("sid", id?.toString() ?: "no")
     }
@@ -201,8 +258,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         subtitleChoiceMade = false
         MPVLib.setPropertyString("sub-fonts-dir", defaultSubtitleFontsDirectory)
         MPVLib.setPropertyBoolean("pause", false)
-        MPVLib.command(arrayOf("stop"))
-        metrics = metrics.copy(paused = false)
+        commands.execute { MPVLib.command(arrayOf("stop")) }
+        metrics = MpvMetrics()
         mutableState.value = MpvPlaybackState.IDLE
     }
 
@@ -285,20 +342,12 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     private fun loadNow(request: MpvLoadRequest) {
-        val options = if (request.relayLoad != null) {
-            relayLoadOptions()
-        } else {
-            "start=${request.startSeconds ?: 0.0}"
-        }
         resetStreamMetricsLocked()
         loadGeneration += 1
-        pendingRelayMode = request.relayLoad?.auxMode
-        pendingExternalMedia = request.relayLoad?.externalMediaUrl
+        val generation = loadGeneration
+        pendingRelayMode = null
+        pendingExternalMedia = null
         attachInFlight = false
-        MPVLib.setPropertyString(
-            "sub-fonts-dir",
-            request.relayLoad?.subtitleFontsDirectory ?: defaultSubtitleFontsDirectory,
-        )
         // A reload is the same file at a new epoch, so its track choices carry
         // over. Anything else is a different file whose ids mean nothing here.
         if (!reloading) {
@@ -307,8 +356,27 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             chosenSubtitle = null
             subtitleChoiceMade = false
         }
-        MPVLib.command(arrayOf("loadfile", request.localUrl, "replace", "-1", options))
         reloading = false
+        commands.execute {
+            val options = synchronized(lock) {
+                if (closed || generation != loadGeneration) return@execute
+                nativeGeneration = generation
+                awaitingStart = true
+                pendingRelayMode = request.relayLoad?.auxMode
+                pendingExternalMedia = request.relayLoad?.externalMediaUrl
+                MPVLib.setPropertyString(
+                    "sub-fonts-dir",
+                    request.relayLoad?.subtitleFontsDirectory ?: defaultSubtitleFontsDirectory,
+                )
+                // Numeric IDs and per-file options from the retired input
+                // must not select an unrelated track on the new input.
+                MPVLib.setPropertyString("aid", "auto")
+                MPVLib.setPropertyString("sid", "auto")
+                if (request.relayLoad != null) relayLoadOptions()
+                else "start=${request.startSeconds ?: 0.0},pause=${if (callerPaused) "yes" else "no"}"
+            }
+            MPVLib.command(arrayOf("loadfile", request.localUrl, "replace", "-1", options))
+        }
     }
 
     /**
@@ -329,49 +397,47 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * Attaching after playback starts makes the same selection happen at a
      * known-good position, so each demuxer issues one HTTP range seek instead.
      */
-    private fun attachExternalMedia(generation: Long, mediaUrl: String) {
-        thread(name = "relay-mpv-external-media", isDaemon = true) {
-            val audio: RememberedTrack?
-            val audioChosen: Boolean
-            val subtitle: RememberedTrack?
-            val subtitleChosen: Boolean
-            synchronized(lock) {
-                if (closed || !initialized || loadGeneration != generation) {
-                    // Nothing to release: whoever retired this load owns pause.
-                    attachInFlight = false
-                    return@thread
-                }
-                audio = chosenAudio
-                audioChosen = audioChoiceMade
-                subtitle = chosenSubtitle
-                subtitleChosen = subtitleChoiceMade
-            }
-            try {
-                // One add, not two. mpv exposes *every* track of an external
-                // file, so `audio-add` already contributes this file's
-                // subtitle track — a second `sub-add` only opened a duplicate
-                // HTTP demuxer that re-parsed and re-seeked the same file
-                // (5+ seconds of it on a busy link), and left the track lists
-                // showing every audio and subtitle entry twice.
-                //
-                // mpv opens the URL synchronously here, so this must not run
-                // on the event-callback thread. Adding mid-playback needs
-                // "select": "auto" only marks the file as a candidate and
-                // leaves the track unselected.
-                MPVLib.command(arrayOf("audio-add", mediaUrl, if (!audioChosen) "select" else "auto"))
-                val tracks = trackSnapshot()
-                if (audioChosen) {
-                    remapTrack(tracks, audio)?.let { MPVLib.setPropertyString("aid", it.toString()) }
-                }
-                selectAttachedSubtitle(tracks, subtitle, subtitleChosen)
-                awaitAudioReady()
-            } finally {
-                // Release the load-time pause hold even if a command failed;
-                // leaving it set would strand playback on the first frame.
+    private fun attachExternalMedia(generation: Long, mediaUrl: String, mode: RelayAuxMode) {
+        synchronized(lock) {
+            if (closed || loadGeneration != generation) return
+            commands.execute {
                 synchronized(lock) {
-                    attachInFlight = false
-                    if (initialized && !closed && loadGeneration == generation) {
-                        MPVLib.setPropertyBoolean("pause", callerPaused)
+                    if (closed || !initialized || loadGeneration != generation) {
+                        return@execute
+                    }
+                }
+                try {
+                    // One add, not two. mpv exposes *every* track of an external
+                    // file, so `audio-add` already contributes this file's
+                    // subtitle track — a second `sub-add` only opened a duplicate
+                    // HTTP demuxer that re-parsed and re-seeked the same file
+                    // (5+ seconds of it on a busy link), and left the track lists
+                    // showing every audio and subtitle entry twice.
+                    //
+                    // mpv opens the URL synchronously here, so this must not run
+                    // on the event-callback thread. Adding mid-playback needs
+                    // "select": "auto" only marks the file as a candidate and
+                    // leaves the track unselected.
+                    MPVLib.command(arrayOf(externalAttachCommand(mode), mediaUrl, "select"))
+                    synchronized(lock) {
+                        if (closed || loadGeneration != generation) return@execute
+                        val tracks = trackSnapshotLocked()
+                        // Read current choices after the blocking command: a user
+                        // can change tracks while the HTTP demuxer is opening.
+                        if (audioChoiceMade) {
+                            remapTrack(tracks, chosenAudio)?.let { MPVLib.setPropertyString("aid", it.toString()) }
+                        }
+                        selectAttachedSubtitle(tracks, chosenSubtitle, subtitleChoiceMade)
+                    }
+                    if (mode == RelayAuxMode.EXTERNAL) awaitAudioReady(generation)
+                } finally {
+                    // Release the load-time pause hold even if a command failed;
+                    // leaving it set would strand playback on the first frame.
+                    synchronized(lock) {
+                        if (initialized && !closed && loadGeneration == generation) {
+                            attachInFlight = false
+                            MPVLib.setPropertyBoolean("pause", callerPaused)
+                        }
                     }
                 }
             }
@@ -423,11 +489,13 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * primed but starved, then underran and dropped frames restarting.
      * `audio-pts` becoming valid is mpv's own signal that audio has caught up.
      */
-    private fun awaitAudioReady() {
+    private fun awaitAudioReady(generation: Long) {
         val deadline = System.nanoTime() + AUDIO_READY_TIMEOUT_NANOS
         while (System.nanoTime() < deadline) {
-            synchronized(lock) { if (closed || !initialized) return }
-            if (MPVLib.getPropertyDouble("audio-pts") != null) return
+            synchronized(lock) {
+                if (closed || !initialized || loadGeneration != generation) return
+                if (MPVLib.getPropertyDouble("audio-pts") != null) return
+            }
             Thread.sleep(AUDIO_READY_POLL_MILLIS)
         }
         Log.w(TAG, "audio not ready before the hold timed out; releasing anyway")
@@ -495,6 +563,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     override fun eventProperty(property: String) = Unit
 
     override fun eventProperty(property: String, value: Long) = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "video-params/w" -> metrics.copy(codedWidth = value.toInt())
             "video-params/h" -> metrics.copy(codedHeight = value.toInt())
@@ -506,6 +575,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     override fun eventProperty(property: String, value: Boolean) = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "paused-for-cache" -> metrics.copy(pausedForCache = value)
             "pause" -> metrics.copy(paused = value)
@@ -516,6 +586,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     override fun eventProperty(property: String, value: String) = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "hwdec-current" -> metrics.copy(hardwareDecoder = value)
             "video-codec" -> metrics.copy(codec = value)
@@ -525,6 +596,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     override fun eventProperty(property: String, value: Double) = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "estimated-vf-fps" -> metrics.copy(framesPerSecond = value)
             "demuxer-cache-duration" -> metrics.copy(cacheDurationMillis = (value * 1000).toLong())
@@ -540,21 +612,27 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     override fun event(eventId: Int) {
-        var attach: Pair<Long, String>? = null
+        var attach: Triple<Long, String, RelayAuxMode>? = null
         var releaseMuxedGeneration: Long? = null
         synchronized(lock) {
+            if (closed || nativeGeneration != loadGeneration) return
+            if (eventId == MPVLib.MpvEvent.START_FILE) {
+                awaitingStart = false
+                return
+            }
+            if (awaitingStart) return
             if (eventId == MPVLib.MpvEvent.END_FILE && reloading) return@synchronized
             if (eventId == MPVLib.MpvEvent.PLAYBACK_RESTART) {
                 // Only the first restart owns auxiliary setup; later restarts
                 // (underruns and track switches) cannot duplicate or release it.
                 when (pendingRelayMode) {
-                    RelayAuxMode.EXTERNAL -> {
+                    RelayAuxMode.EXTERNAL, RelayAuxMode.EXTERNAL_SUBTITLES -> {
                         pendingExternalMedia?.let {
-                            attach = loadGeneration to it
+                            attach = Triple(loadGeneration, it, pendingRelayMode!!)
                             attachInFlight = true
                         }
                     }
-                    RelayAuxMode.MUXED -> releaseMuxedGeneration = loadGeneration
+                    RelayAuxMode.MUXED, RelayAuxMode.NONE -> releaseMuxedGeneration = loadGeneration
                     null -> Unit
                 }
                 pendingRelayMode = null
@@ -568,7 +646,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 else -> return@synchronized
             }
         }
-        attach?.let { (generation, url) -> attachExternalMedia(generation, url) }
+        attach?.let { (generation, url, mode) -> attachExternalMedia(generation, url, mode) }
         releaseMuxedGeneration?.let(::completeMuxedRestart)
     }
 
@@ -583,17 +661,33 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         logSink?.invoke(level, line)
     }
 
-    override fun close(): Unit = synchronized(lock) {
-        if (closed) return
-        closed = true
-        if (initialized) {
-            detachSurfaceLocked(attachedSurface)
-            MPVLib.removeLogObserver(this)
-            MPVLib.removeObserver(this)
-            MPVLib.destroy()
-            initialized = false
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            loadGeneration += 1
+            pendingLoad = null
+            if (initialized) {
+                detachSurfaceLocked(attachedSurface)
+                MPVLib.removeLogObserver(this)
+                MPVLib.removeObserver(this)
+                // destroy joins the native event thread. Never hold lock
+                // while joining a callback which may already be waiting on it.
+                commands.execute {
+                    try {
+                        MPVLib.destroy()
+                    } finally {
+                        nativeInstance.release()
+                    }
+                }
+                initialized = false
+            }
+            commands.shutdown()
+            mutableState.value = MpvPlaybackState.CLOSED
         }
-        mutableState.value = MpvPlaybackState.CLOSED
+        check(commands.awaitTermination(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            "player native cleanup is still pending"
+        }
     }
 
     companion object {
@@ -603,6 +697,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         /** Cap on the pause hold, so a silent file can never strand playback. */
         private const val AUDIO_READY_TIMEOUT_NANOS = 5_000_000_000L
         private const val AUDIO_READY_POLL_MILLIS = 20L
+        private const val COMMAND_TIMEOUT_SECONDS = 20L
+        private val nativeInstance = Semaphore(1, true)
         private val URL_PATTERN = Regex("""[a-zA-Z][a-zA-Z0-9+.-]*://\S+""")
 
         /** mpv tscale filters offered for motion interpolation. */
@@ -618,7 +714,13 @@ private data class MpvLoadRequest(
     val startSeconds: Double?,
 )
 
-enum class RelayAuxMode { EXTERNAL, MUXED }
+enum class RelayAuxMode { EXTERNAL, EXTERNAL_SUBTITLES, NONE, MUXED }
+
+internal fun externalAttachCommand(mode: RelayAuxMode): String = when (mode) {
+    RelayAuxMode.EXTERNAL -> "audio-add"
+    RelayAuxMode.EXTERNAL_SUBTITLES -> "sub-add"
+    RelayAuxMode.MUXED, RelayAuxMode.NONE -> error("this relay mode has no external media")
+}
 
 data class RelayLoad(
     val streamUrl: String,
@@ -674,9 +776,10 @@ internal data class TrackDescriptor(
 
 internal data class RememberedTrack(val priorId: Int, val descriptor: TrackDescriptor)
 
-internal fun rememberTrack(tracks: List<MpvTrack>, id: Int): RememberedTrack? {
+internal fun rememberTrack(tracks: List<MpvTrack>, type: MpvTrack.Type, id: Int): RememberedTrack? {
     val occurrences = mutableMapOf<List<Any>, Int>()
     tracks.forEach { track ->
+        if (track.type != type) return@forEach
         val key = listOf(track.type, track.language, track.title, track.codec)
         val occurrence = occurrences.getOrDefault(key, 0)
         occurrences[key] = occurrence + 1
@@ -698,14 +801,11 @@ internal fun rememberTrack(tracks: List<MpvTrack>, id: Int): RememberedTrack? {
 
 internal fun remapTrack(tracks: List<MpvTrack>, remembered: RememberedTrack?): Int? {
     remembered ?: return null
-    val descriptors = tracks.mapNotNull { track ->
-        rememberTrack(tracks, track.id)?.let { track.id to it.descriptor }
-    }
-    return descriptors.firstOrNull { (id, descriptor) ->
-        id == remembered.priorId && descriptor == remembered.descriptor
-    }?.first ?: descriptors.firstOrNull { (_, descriptor) ->
-        descriptor == remembered.descriptor
-    }?.first
+    val descriptor = remembered.descriptor
+    return tracks.asSequence().filter { track ->
+        track.type == descriptor.type && track.language == descriptor.language &&
+            track.title == descriptor.title && track.codec == descriptor.codec
+    }.drop(descriptor.occurrence).firstOrNull()?.id
 }
 
 enum class MpvPlaybackState { CREATED, IDLE, LOADING, LOADED, PLAYING, ENDED, CLOSED }

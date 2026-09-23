@@ -1,19 +1,21 @@
 package org.upscalerelay.client
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -27,6 +29,7 @@ import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
+import org.upscalerelay.protocol.SeekProgress
 import java.io.Closeable
 import java.io.FileOutputStream
 import java.io.IOException
@@ -36,12 +39,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.Base64
 
 internal class ControlChannel(
     private val host: String,
     private val port: Int,
     private val onFailure: (Throwable) -> Unit,
+    private val webSocketFactory: WebSocket.Factory? = null,
+    private val teardownTimeoutMillis: Long = TEARDOWN_TIMEOUT_MILLIS,
 ) : Closeable {
     private val json = Json { ignoreUnknownKeys = true }
     private val client = OkHttpClient.Builder()
@@ -53,6 +59,10 @@ internal class ControlChannel(
     private val opened = CompletableDeferred<Unit>()
     private val closed = AtomicBoolean(false)
     private val lastActivityNanos = AtomicLong(System.nanoTime())
+    private val terminalError = AtomicReference<Throwable?>(null)
+    private val serverSessionRequested = AtomicBoolean(false)
+    private val teardownAcknowledged = AtomicBoolean(false)
+    private val teardownMutex = Mutex()
     private lateinit var webSocket: WebSocket
 
     /**
@@ -65,9 +75,12 @@ internal class ControlChannel(
     @Volatile
     var onOpeningProgress: ((String?) -> Unit)? = null
 
+    @Volatile
+    var onSeekProgress: ((SeekProgress) -> Unit)? = null
+
     suspend fun connect(display: DisplaySize): Capabilities {
         val request = Request.Builder().url(controlUrl()).build()
-        webSocket = client.newWebSocket(request, Listener())
+        webSocket = (webSocketFactory ?: client).newWebSocket(request, Listener())
         deadline(15_000, "control connect") { opened.await() }
         val reply = request(
             expectedType = "capabilities",
@@ -99,12 +112,22 @@ internal class ControlChannel(
             .build()
         val request = Request.Builder().url(url).build()
         return deadline(30_000, "GET /library") {
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                client.newCall(request).execute().use {
-                    if (!it.isSuccessful) throw IOException("GET /library failed with HTTP ${it.code}")
-                    val body = it.body.string()
-                    val root = json.parseToJsonElement(body).jsonObject
-                    LibraryPage.fromJson(root)
+            coroutineScope {
+                val call = client.newCall(request)
+                call.timeout().timeout(30, TimeUnit.SECONDS)
+                val transfer = async(Dispatchers.IO) {
+                    call.execute().use {
+                        if (!it.isSuccessful) throw IOException("GET /library failed with HTTP ${it.code}")
+                        LibraryPage.fromJson(json.parseToJsonElement(it.body.string()).jsonObject)
+                    }
+                }
+                try {
+                    transfer.await()
+                } finally {
+                    if (!transfer.isCompleted) {
+                        call.cancel()
+                        withContext(NonCancellable) { runCatching { transfer.await() } }
+                    }
                 }
             }
         }
@@ -205,7 +228,7 @@ internal class ControlChannel(
             put("target_pts", targetPts)
             put("epoch", epoch)
         },
-        accept = { message -> message["epoch"]?.jsonPrimitive?.int == epoch },
+        accept = { message -> message["epoch"]?.jsonPrimitive?.intOrNull == epoch },
     )
 
     fun mediaUrl(path: String): String = HttpUrl.Builder()
@@ -224,6 +247,11 @@ internal class ControlChannel(
         destination: Path,
         maxBytes: Long,
     ): Long = coroutineScope {
+        // OkHttp's invalid-header exception quotes its value. Reject locally so
+        // a malformed server token cannot leak into ordinary failure reporting.
+        require(token.isNotEmpty() && token.all { it in '!'..'~' }) {
+            "invalid attachment authorization token"
+        }
         val url = httpUrl("attachments").newBuilder().addPathSegment(sha256).build()
         val request = Request.Builder()
             .url(url)
@@ -272,11 +300,25 @@ internal class ControlChannel(
         put("buffered_ms", bufferedMillis.coerceAtLeast(0))
     })
 
-    suspend fun teardown() {
-        if (closed.get()) return
-        send(buildJsonObject { put("type", "teardown") })
-        delay(100)
-        close()
+    suspend fun teardown() = teardownMutex.withLock {
+        try {
+            if (serverSessionRequested.get() && !teardownAcknowledged.get()) {
+                terminalError.get()?.let { throw it }
+                if (closed.get()) throw IOException("control channel closed before teardown")
+                request(
+                    expectedType = "closed",
+                    timeoutMillis = teardownTimeoutMillis,
+                    message = buildJsonObject { put("type", "teardown") },
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (error is RelayServerException && error.code == "server_restart_required") throw error
+            throw TeardownUnconfirmedException(error)
+        } finally {
+            close()
+        }
     }
 
     private suspend fun request(
@@ -292,6 +334,10 @@ internal class ControlChannel(
             "request for '$expectedType' is already pending"
         }
         try {
+            if (message["type"]?.jsonPrimitive?.content == "open_session") {
+                serverSessionRequested.set(true)
+            }
+            lastActivityNanos.set(System.nanoTime())
             send(message)
             if (!keepalive) {
                 return deadline(timeoutMillis, "'$expectedType' reply") { waiter.await() }
@@ -299,7 +345,6 @@ internal class ControlChannel(
             // Inactivity deadline: session_progress keepalives push it out,
             // so a server that is visibly working (TensorRT engine build)
             // never times out while a silent one still fails.
-            lastActivityNanos.set(System.nanoTime())
             while (true) {
                 kotlinx.coroutines.withTimeoutOrNull(KEEPALIVE_POLL_MILLIS) { waiter.await() }
                     ?.let { return it }
@@ -320,14 +365,15 @@ internal class ControlChannel(
      * extends CancellationException, and letting it escape makes callers treat
      * an ordinary network timeout as their own coroutine being cancelled.
      */
-    private suspend fun <T> deadline(millis: Long, what: String, block: suspend () -> T): T =
-        try {
-            withTimeout(millis) { block() }
-        } catch (timeout: TimeoutCancellationException) {
-            throw SocketTimeoutException("$what timed out after $millis ms")
-        }
+    private suspend fun <T> deadline(millis: Long, what: String, block: suspend () -> T): T {
+        // Convert only our own deadline; cancellation of an enclosing operation stays cancellation.
+        val result = withTimeoutOrNull(millis) { DeadlineResult(block()) }
+            ?: throw SocketTimeoutException("$what timed out after $millis ms")
+        return result.value
+    }
 
     private fun send(message: JsonObject) {
+        terminalError.get()?.let { throw it }
         check(!closed.get()) { "control channel is closed" }
         check(webSocket.send(message.toString())) { "control WebSocket rejected message" }
     }
@@ -335,9 +381,10 @@ internal class ControlChannel(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         val error = IOException("control channel closed")
+        opened.completeExceptionally(error)
         pending.values.forEach { it.deferred.completeExceptionally(error) }
         pending.clear()
-        if (::webSocket.isInitialized) webSocket.close(1000, "client teardown")
+        if (::webSocket.isInitialized) webSocket.cancel()
         client.dispatcher.cancelAll()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
@@ -363,10 +410,19 @@ internal class ControlChannel(
                     fail(IOException("invalid control JSON", it))
                     return
                 }
-            val type = message["type"]?.toString()?.trim('"') ?: return
+            try {
+                handleMessage(message)
+            } catch (error: Throwable) {
+                fail(IOException("invalid control message", error))
+            }
+        }
+
+        private fun handleMessage(message: JsonObject) {
+            val type = message["type"]?.jsonPrimitive?.contentOrNull ?: return
             if (type == "session_progress") {
+                if (!pending.containsKey("session_opened")) return
                 lastActivityNanos.set(System.nanoTime())
-                val text = message["message"]?.jsonPrimitive?.content
+                val text = message["message"]?.jsonPrimitive?.contentOrNull
                 val elapsed = message["elapsed_s"]?.jsonPrimitive?.doubleOrNull
                 onOpeningProgress?.invoke(
                     when {
@@ -377,10 +433,17 @@ internal class ControlChannel(
                 )
                 return
             }
+            if (type == "seek_progress") {
+                // Optional diagnostics are best effort; unknown/new fields must not abort playback.
+                runCatching { SeekProgress.fromJson(message) }.getOrNull()?.let {
+                    onSeekProgress?.invoke(it)
+                }
+                return
+            }
             if (type == "error") {
                 val error = RelayServerException(
-                    code = message["code"]?.toString()?.trim('"') ?: "server_error",
-                    message = message["message"]?.toString()?.trim('"') ?: "unknown server error",
+                    code = message["code"]?.jsonPrimitive?.contentOrNull ?: "server_error",
+                    message = message["message"]?.jsonPrimitive?.contentOrNull ?: "unknown server error",
                 )
                 pending.values.forEach { it.deferred.completeExceptionally(error) }
                 pending.clear()
@@ -389,16 +452,24 @@ internal class ControlChannel(
             }
             val reply = pending[type] ?: return
             if (reply.accept(message) && pending.remove(type, reply)) {
+                if (type == "closed") teardownAcknowledged.set(true)
                 reply.deferred.complete(message)
             }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             webSocket.close(code, reason)
+            if (!teardownAcknowledged.get()) {
+                fail(if (code == 1011 && reason.contains("restart required", ignoreCase = true)) {
+                    RelayServerException("server_restart_required", "Server native cleanup failed; restart the server")
+                } else {
+                    IOException("control channel closed: $code $reason")
+                })
+            }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (!closed.get()) fail(IOException("control channel closed: $code $reason"))
+            if (!closed.get() && !teardownAcknowledged.get()) fail(IOException("control channel closed: $code $reason"))
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -406,6 +477,7 @@ internal class ControlChannel(
         }
 
         private fun fail(error: Throwable) {
+            if (closed.get() || teardownAcknowledged.get() || !terminalError.compareAndSet(null, error)) return
             if (!opened.isCompleted) opened.completeExceptionally(error)
             pending.values.forEach { it.deferred.completeExceptionally(error) }
             pending.clear()
@@ -415,6 +487,8 @@ internal class ControlChannel(
 }
 
 private const val KEEPALIVE_POLL_MILLIS = 2_000L
+internal const val TEARDOWN_TIMEOUT_MILLIS = 30_000L
+private data class DeadlineResult<T>(val value: T)
 
 private data class PendingReply(
     val deferred: CompletableDeferred<JsonObject>,

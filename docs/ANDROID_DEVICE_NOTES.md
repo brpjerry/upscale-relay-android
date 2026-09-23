@@ -1,5 +1,30 @@
 # Android device validation notes
 
+## Android audit checks — 2026-09-22
+
+Audit baseline `694efb2` plus `fix/android-audit-2026-09-22` working-tree fixes;
+Galaxy Tab S9 Ultra `SM-X910`, Android 16/API 36, build `X910XXS6EZH3`.
+Co-installed debug package: `org.upscalerelay.android.debug`. Server:
+`192.168.0.115:8590`, updated server audit build supplied by the owner.
+Validated debug APK: 84,429,756 bytes, SHA-256
+`637afb0479c02b4031bcc190fc03c3d8da295abc3faab1665cceda197a36f83c`.
+
+The host suite passed 103 tests, lint without errors, and debug/test APK builds.
+Five device regressions passed, covering framing, JNI ownership handoff,
+Activity close/reopen, live server playback, and local uplink/direct fallback.
+Server playback used `passthrough` and `hevc-qp18`, with MediaCodec HEVC decode,
+muxed FLAC audio/subtitles, subtitles-off, paused and overlapping seeks, paused
+settings restart, resume, and acknowledged teardown. The final sampled steady
+playback had zero output/decoder drops and near-zero mpv `avsync`; after teardown
+the relay had zero sessions and `restart_required:false`.
+
+Local playback used a generated 20-second H.264/AAC MP4 through a file URI:
+relay play/seek, Play original, immediate pause/seek and close passed. This
+checks real extractor/HTTP behavior without claiming cloud-provider SAF coverage.
+Player/library captures were visually inspected. Full PiP/background/endurance,
+PGS/VobSub, S24, S Pen/DeX, hostile-provider and leak-cycle gates remain open.
+See [audit report](ANDROID_AUDIT_2026-09-22.md) for findings and exact commands.
+
 ## Muxed auxiliary tracks and cached fonts — 2026-08-19
 
 Device: Galaxy Tab S9 Ultra (`SM-X910`, Android 16/API 36, build

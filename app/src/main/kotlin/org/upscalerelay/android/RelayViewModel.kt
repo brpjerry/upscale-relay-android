@@ -21,6 +21,10 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Job
@@ -33,9 +37,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.upscalerelay.client.FailureDetail
@@ -47,6 +52,7 @@ import org.upscalerelay.client.ReconnectPolicy
 import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.client.TransportStats
+import org.upscalerelay.client.classifyFailure
 import org.upscalerelay.demux.AndroidMediaSource
 import org.upscalerelay.demux.LocalDocumentHttpServer
 import org.upscalerelay.demux.LocalDocumentBrowser
@@ -61,6 +67,7 @@ import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
 import org.upscalerelay.protocol.SessionInfo
+import org.upscalerelay.protocol.SeekProgress
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -70,12 +77,23 @@ import kotlin.math.roundToLong
 
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
     val playerEngine = MpvPlayerEngine(application)
+    private val playerReady = CompletableDeferred<Unit>()
     private val mutableUi = MutableStateFlow(RelayUiState())
     val ui: StateFlow<RelayUiState> = mutableUi.asStateFlow()
     private var controller: RelaySessionController? = null
     private var controllerCollectors: Job? = null
     private var metricsJob: Job? = null
     private var seekJob: Job? = null
+    private var openingJob: Job? = null
+    private var closingJob: Job? = null
+    // A failed release barrier must not be bypassed by an automatic retry.
+    private var cleanupFailure: Throwable? = null
+    private val disposalMutex = Mutex()
+    private val loggingMutex = Mutex()
+    private val actionErrors = CoroutineExceptionHandler { _, error ->
+        AppLog.e(TAG, "playback action failed: ${error.message}")
+        mutableUi.update { it.copy(busy = false, seeking = false, reconnecting = null, error = error.message) }
+    }
     private var sessionStartedAt: Instant? = null
     private var playerVersions: Map<String, String> = emptyMap()
     private val preferences = AppPreferencesStore(application)
@@ -182,21 +200,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             if (!state.backgroundPlayback && state.playingPath != null && !state.paused &&
                 state.reconnecting == null
             ) {
-                runCatching { togglePaused() }
+                runPlaybackCatching { togglePaused() }
             }
         }
     }
     private val bridgeControls = object : PlaybackBridge.Controls {
         override fun togglePlayPause() {
-            viewModelScope.launch { runCatching { togglePaused() } }
+            viewModelScope.launch(actionErrors) { runPlaybackCatching { togglePaused() } }
         }
 
         override fun playbackSeekBy(seconds: Double) {
-            viewModelScope.launch { runCatching { seekRelative(seconds) } }
+            viewModelScope.launch(actionErrors) { runPlaybackCatching { seekRelative(seconds) } }
         }
 
         override fun stopPlayback() {
-            viewModelScope.launch { runCatching { closePlayback() } }
+            viewModelScope.launch(actionErrors) { runPlaybackCatching { closePlayback() } }
         }
     }
 
@@ -207,15 +225,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             // mpv lines already reach logcat inside the engine.
             AppLog.fileOnly(if (level <= 20) 'E' else if (level <= 30) 'W' else 'I', "mpv", line)
         }
-        runCatching {
-            playerEngine.initialize()
-            playerVersions = playerEngine.versionInfo()
-        }.onFailure { error ->
-            mutableUi.value = mutableUi.value.copy(
-                error = "libmpv initialization failed: ${error.message ?: error::class.simpleName}",
-            )
+        viewModelScope.launch(actionErrors) {
+            try {
+                withContext(Dispatchers.IO) { playerEngine.initialize() }
+                playerVersions = playerEngine.versionInfo()
+                playerReady.complete(Unit)
+            } catch (error: Throwable) {
+                playerReady.completeExceptionally(error)
+                throw error
+            }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             playerEngine.state.collectLatest { state ->
                 if (state == MpvPlaybackState.PLAYING) controller?.markRendering()
                 if (state == MpvPlaybackState.ENDED) {
@@ -260,24 +280,27 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 // A restored network is a fresh chance for the browse screen:
                 // Wi-Fi often re-associates seconds after the wake-triggered
                 // attempts have already spent their budget.
-                viewModelScope.launch {
+                viewModelScope.launch(actionErrors) {
                     browseReconnectArmed = true
                     maybeBrowseReconnect("network available")
                 }
             }
         }
-        runCatching { connectivity.registerDefaultNetworkCallback(networkCallback) }
+        runPlaybackCatching { connectivity.registerDefaultNetworkCallback(networkCallback) }
             .onSuccess { connectivityCallback = networkCallback }
         discovery.start()
         PlaybackBridge.controls = bridgeControls
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             discovery.servers.collectLatest { servers ->
                 mutableUi.update { it.copy(discoveredServers = servers) }
             }
         }
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             preferences.values.collectLatest { value ->
+                // Still render settings and the initialization error if native
+                // startup failed; a failed player must not strand the splash.
+                runPlaybackCatching { playerReady.await() }
                 val firstLoad = !mutableUi.value.preferencesLoaded
                 mutableUi.update { state ->
                     state.copy(
@@ -382,6 +405,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Starts/stops the Documents log to match the preference (idempotent). */
     private fun syncFileLogging(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO + actionErrors) {
+            loggingMutex.withLock {
+                if (enabled == mutableUi.value.fileLoggingEnabled) configureFileLogging(enabled)
+            }
+        }
+    }
+
+    private fun configureFileLogging(enabled: Boolean) {
         if (enabled == AppLog.active) {
             mutableUi.update { it.copy(fileLoggingEnabled = enabled, logFileName = AppLog.currentFileName) }
             return
@@ -406,7 +437,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val app = getApplication<Application>()
-        val version = runCatching {
+        val version = runPlaybackCatching {
             app.packageManager.getPackageInfo(app.packageName, 0).versionName
         }.getOrNull() ?: "unknown"
         AppLog.i(TAG, "=== Upscale Relay $version · file logging enabled ===")
@@ -459,7 +490,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         browseReconnectArmed = false
         val message = pendingFailure?.let(::failureMessage)
         pendingFailure = null // the user opted out; do not retry on wake
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             job.cancelAndJoin()
             mutableUi.update {
                 it.copy(
@@ -573,9 +604,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Writes every saved setting and the watch history to the chosen file. */
     fun exportData(target: Uri) {
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             mutableUi.update { it.copy(backupStatus = null) }
-            runCatching {
+            runPlaybackCatching {
                 val snapshot = preferences.snapshot()
                 val text = BackupCodec.encode(snapshot, appVersionName(), Instant.now())
                 withContext(Dispatchers.IO) {
@@ -611,9 +642,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Restores a backup file over the saved settings and watch history. */
     fun importData(source: Uri) {
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             mutableUi.update { it.copy(backupStatus = null) }
-            runCatching {
+            runPlaybackCatching {
                 val text = withContext(Dispatchers.IO) {
                     val stream = getApplication<Application>().contentResolver.openInputStream(source)
                         ?: throw IOException("The chosen file could not be opened.")
@@ -669,7 +700,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun appVersionName(): String {
         val app = getApplication<Application>()
-        return runCatching {
+        return runPlaybackCatching {
             app.packageManager.getPackageInfo(app.packageName, 0).versionName
         }.getOrNull() ?: "unknown"
     }
@@ -724,8 +755,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.capabilities?.hasLibrary != true || serverSortParam() == null) return
         if (state.libraryLoading) return
         mutableUi.update { it.copy(libraryLoading = true, error = null) }
-        viewModelScope.launch {
-            runCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
+        viewModelScope.launch(actionErrors) {
+            runPlaybackCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
                 .onSuccess { page ->
                     if (active !== controller) return@onSuccess
                     mutableUi.update {
@@ -756,10 +787,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
-        if (mutableUi.value.busy) return
+        if (mutableUi.value.busy || openingJob?.isActive == true || closingJob?.isActive == true) return
+        cleanupFailure = null
         browseReconnectJob?.cancel()
         pendingFailure = null
-        viewModelScope.launch {
+        openingJob = viewModelScope.launch(actionErrors) {
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull()
             if (host.isBlank() || port == null || port !in 1..65535) {
@@ -776,6 +808,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * the banner stays empty until the loop itself gives up.
      */
     private suspend fun connectInternal(host: String, port: Int, quiet: Boolean = false) {
+        playerReady.await()
+        cleanupFailure?.let { throw it }
+        mutableUi.update { it.copy(busy = true) }
         // Remember the directory that was open (exiting a video and manual
         // reconnects both come through here) so it can be re-opened on the
         // fresh connection instead of dumping the user at the library root.
@@ -815,7 +850,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             LibrarySort.NAME -> "name"
             LibrarySort.DATE -> "mtime"
         }
-        runCatching { next.connect(mutableUi.value.display, rootSort) }
+        runPlaybackCatching { next.connect(mutableUi.value.display, rootSort) }
             .onSuccess { connected ->
                 AppLog.i(
                     TAG,
@@ -869,7 +904,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * the root listing shown — the pre-restore default.
      */
     private suspend fun restoreServerDirectory(active: RelaySessionController, path: String) {
-        val restored = runCatching {
+        val restored = runPlaybackCatching {
             var parent = mutableUi.value.currentDirectory ?: return
             var parentCursor = mutableUi.value.libraryNextCursor
             val stack = mutableListOf<LibraryNode>()
@@ -924,8 +959,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.libraryLoading) return
         val active = controller ?: return
         mutableUi.value = state.copy(libraryLoading = true, error = null)
-        viewModelScope.launch {
-            runCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
+        viewModelScope.launch(actionErrors) {
+            runPlaybackCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
                 .onSuccess { page ->
                     if (active !== controller) return@onSuccess
                     mutableUi.value = mutableUi.value.copy(
@@ -954,8 +989,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.libraryLoading) return
         val active = controller ?: return
         mutableUi.value = state.copy(libraryLoading = true, error = null)
-        viewModelScope.launch {
-            runCatching { active.fetchLibraryPage(directory.path, cursor, sort = serverSortParam()) }
+        viewModelScope.launch(actionErrors) {
+            runPlaybackCatching { active.fetchLibraryPage(directory.path, cursor, sort = serverSortParam()) }
                 .onSuccess { page ->
                     if (active !== controller || mutableUi.value.currentDirectory?.path != directory.path) {
                         return@onSuccess
@@ -1029,9 +1064,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openLocalTree(uriValue: String) {
         if (mutableUi.value.busy) return
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             mutableUi.value = mutableUi.value.copy(busy = true, error = null)
-            runCatching {
+            runPlaybackCatching {
                 withContext(Dispatchers.IO) {
                     val tree = uriValue.toUri()
                     val root = LocalDocumentBrowser.rootDocumentUri(tree)
@@ -1065,9 +1100,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val tree = localTreeUri ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             mutableUi.value = mutableUi.value.copy(busy = true, error = null)
-            runCatching {
+            runPlaybackCatching {
                 withContext(Dispatchers.IO) {
                     LocalDocumentBrowser.children(getApplication(), tree, entry.uri.toUri())
                 }
@@ -1094,9 +1129,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (localDirectoryStack.size <= 1 || mutableUi.value.busy) return
         val nextStack = localDirectoryStack.dropLast(1)
         val (directory, name) = nextStack.last()
-        viewModelScope.launch {
+        viewModelScope.launch(actionErrors) {
             mutableUi.value = mutableUi.value.copy(busy = true, error = null)
-            runCatching {
+            runPlaybackCatching {
                 withContext(Dispatchers.IO) {
                     LocalDocumentBrowser.children(getApplication(), tree, directory)
                 }
@@ -1120,7 +1155,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openLocalDocument(uriValue: String) {
         if (mutableUi.value.busy) return
-        viewModelScope.launch {
+        openingJob = viewModelScope.launch(actionErrors) {
             if (controller?.state?.value != SessionState.BROWSING) {
                 val host = mutableUi.value.host.trim()
                 val port = mutableUi.value.port.toIntOrNull()
@@ -1150,70 +1185,86 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 seekTargetSeconds = null,
             )
             var bridge: LocalDocumentHttpServer? = null
-            runCatching {
-                val landscape = withTimeoutOrNull(5_000) {
-                    ui.first { it.display.width > it.display.height }
+            var pendingSource: AndroidMediaSource? = null
+            try {
+                runPlaybackCatching {
+                    val landscape = withTimeoutOrNull(5_000) {
+                        ui.first { it.display.width > it.display.height }
+                    }
+                    checkNotNull(landscape) { "Timed out waiting for the landscape player surface." }
+                    val (source, localBridge) = withContext(Dispatchers.IO) {
+                        val uri = uriValue.toUri()
+                        val source = AndroidMediaSource.open(getApplication(), uri).also { pendingSource = it }
+                        try {
+                            val localBridge = LocalDocumentHttpServer(getApplication(), uri)
+                            bridge = localBridge // publish ownership before IO dispatcher returns
+                            source to localBridge
+                        } catch (error: Throwable) {
+                            source.close()
+                            throw error
+                        }
+                    }
+                    val endpoint = currentController.prepareLocalPlayback(
+                        source = source,
+                        originalMediaUrl = localBridge.url,
+                        display = landscape.display,
+                        requestedModel = landscape.selectedModel,
+                        qualityTier = landscape.qualityTier,
+                        fitMode = landscape.fitMode,
+                        resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
+                    )
+                    pendingSource = null // controller now owns the source
+                    applyResumePoint(currentController, endpoint, "local:$uriValue") to
+                        source.videoInfo.name
+                }.onSuccess { (endpoint, displayName) ->
+                    AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
+                    withContext(Dispatchers.IO) { localDocumentServer?.close() }
+                    localDocumentServer = bridge
+                    bridge = null
+                    localDocumentUri = uriValue
+                    activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
+                    warningDismissed = false
+                    reconnectExhausted = false
+                    sessionStartedAt = Instant.now()
+                    mutableUi.value = mutableUi.value.copy(
+                        busy = false,
+                        endpoint = endpoint.localUrl,
+                        session = endpoint.session,
+                        playingPath = displayName,
+                        selectedModel = endpoint.model,
+                        sessionDescription =
+                            "${endpoint.model} · ${endpoint.qualityTier} · " +
+                                "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
+                    )
+                    subtitlePreferenceAppliedSession = null
+                    persist {
+                        preferences.setModel(endpoint.model)
+                        preferences.addRecentLocalUri(uriValue)
+                    }
+                    playerEngine.setPanscan(0.0)
+                    loadRelayEndpoint(endpoint)
+                    currentController.startServerPlayback()
+                    startMetrics(currentController)
+                }.onFailure { error ->
+                    val fallbackBridge = bridge
+                    withContext(Dispatchers.IO) { localDocumentServer?.close() }
+                    localDocumentServer = fallbackBridge
+                    bridge = null
+                    localDocumentUri = uriValue.takeIf { fallbackBridge != null }
+                    mutableUi.value = mutableUi.value.copy(
+                        busy = false,
+                        error = error.message ?: "Unable to start local playback.",
+                        playingPath = if (fallbackBridge != null) uriValue else null,
+                        localPlayback = fallbackBridge != null,
+                        directLocalFallback = false,
+                    )
+                    if (fallbackBridge != null) {
+                        persist { preferences.addRecentLocalUri(uriValue) }
+                    }
                 }
-                checkNotNull(landscape) { "Timed out waiting for the landscape player surface." }
-                val (source, localBridge) = withContext(Dispatchers.IO) {
-                    val uri = uriValue.toUri()
-                    AndroidMediaSource.open(getApplication(), uri) to
-                        LocalDocumentHttpServer(getApplication(), uri)
-                }
-                bridge = localBridge
-                val endpoint = currentController.prepareLocalPlayback(
-                    source = source,
-                    originalMediaUrl = localBridge.url,
-                    display = landscape.display,
-                    requestedModel = landscape.selectedModel,
-                    qualityTier = landscape.qualityTier,
-                    fitMode = landscape.fitMode,
-                    resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                )
-                applyResumePoint(currentController, endpoint, "local:$uriValue") to
-                    source.videoInfo.name
-            }.onSuccess { (endpoint, displayName) ->
-                AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
-                localDocumentServer?.close()
-                localDocumentServer = bridge
-                localDocumentUri = uriValue
-                activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
-                warningDismissed = false
-                reconnectExhausted = false
-                sessionStartedAt = Instant.now()
-                mutableUi.value = mutableUi.value.copy(
-                    busy = false,
-                    endpoint = endpoint.localUrl,
-                    session = endpoint.session,
-                    playingPath = displayName,
-                    selectedModel = endpoint.model,
-                    sessionDescription =
-                        "${endpoint.model} · ${endpoint.qualityTier} · " +
-                            "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
-                )
-                subtitlePreferenceAppliedSession = null
-                persist {
-                    preferences.setModel(endpoint.model)
-                    preferences.addRecentLocalUri(uriValue)
-                }
-                playerEngine.setPanscan(0.0)
-                loadRelayEndpoint(endpoint)
-                currentController.startServerPlayback()
-                startMetrics(currentController)
-            }.onFailure { error ->
-                val fallbackBridge = bridge
-                localDocumentServer?.close()
-                localDocumentServer = fallbackBridge
-                localDocumentUri = uriValue.takeIf { fallbackBridge != null }
-                mutableUi.value = mutableUi.value.copy(
-                    busy = false,
-                    error = error.message ?: "Unable to start local playback.",
-                    playingPath = if (fallbackBridge != null) uriValue else null,
-                    localPlayback = fallbackBridge != null,
-                    directLocalFallback = false,
-                )
-                if (fallbackBridge != null) {
-                    persist { preferences.addRecentLocalUri(uriValue) }
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    try { bridge?.close() } finally { pendingSource?.close() }
                 }
             }
         }
@@ -1221,7 +1272,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openFile(file: LibraryNode) {
         if (file.type != LibraryNode.Type.FILE || mutableUi.value.busy) return
-        viewModelScope.launch {
+        openingJob = viewModelScope.launch(actionErrors) {
             mutableUi.value = mutableUi.value.copy(
                 busy = true,
                 error = null,
@@ -1230,7 +1281,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 seekTargetSeconds = null,
             )
             val currentController = requireNotNull(controller)
-            runCatching {
+            runPlaybackCatching {
                 // Setting playingPath asks the Activity to enter sensor
                 // landscape. Wait for the recreated Compose surface to report
                 // its real pixels before negotiating the server output size.
@@ -1285,7 +1336,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePaused() {
         val next = !mutableUi.value.paused
-        runCatching {
+        runPlaybackCatching {
             if (!mutableUi.value.directLocalFallback) requireNotNull(controller).setPaused(next)
             playerEngine.setPaused(next)
         }.onSuccess {
@@ -1319,7 +1370,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSubtitleTrack(id: Int?) {
         playerEngine.selectSubtitleTrack(id)
         val enabled = id != null
-        val preference = mutableUi.value.tracks.firstOrNull { it.id == id }?.preferenceKey
+        val preference = mutableUi.value.tracks.firstOrNull {
+            it.type == MpvTrack.Type.SUBTITLE && it.id == id
+        }?.preferenceKey
             ?: mutableUi.value.preferredSubtitle
         mutableUi.value = mutableUi.value.copy(
             subtitlesEnabled = enabled,
@@ -1384,8 +1437,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun seekTo(seconds: Double) {
+        if (!seconds.isFinite() || mutableUi.value.busy || closingJob?.isActive == true) return
         val prior = seekJob
-        seekJob = viewModelScope.launch {
+        seekJob = viewModelScope.launch(actionErrors) {
             prior?.cancelAndJoin()
             if (mutableUi.value.directLocalFallback) {
                 val duration = mutableUi.value.mpvMetrics.durationSeconds
@@ -1416,6 +1470,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 currentController.expectPlayerReload()
                 playerEngine.prepareReload()
+                playerEngine.awaitIdle()
                 val endpoint = currentController.seek(targetPts)
                 // stop -> retire old loopback/queue -> settle -> loadfile.
                 // Never pass start=: absolute Matroska PTS remain authoritative.
@@ -1438,7 +1493,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closePlayback() {
         AppLog.i(TAG, "close playback at %.1fs".format(mutableUi.value.mpvMetrics.positionSeconds))
-        viewModelScope.launch {
+        if (closingJob?.isActive == true) return
+        closingJob = viewModelScope.launch(actionErrors) {
+            openingJob?.cancelAndJoin()
+            openingJob = null
             val host = mutableUi.value.host
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
             mutableUi.value = mutableUi.value.copy(busy = true, endpoint = null, playingPath = null)
@@ -1456,13 +1514,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             seekJob = null
             metricsJob?.cancelAndJoin()
             metricsJob = null
-            playerEngine.stop()
+            stopPlayerForDisposal()
             stopSystemMediaIntegration()
             subtitlePreferenceAppliedSession = null
-            disposeController()
-            withContext(Dispatchers.IO) { localDocumentServer?.close() }
-            localDocumentServer = null
-            localDocumentUri = null
+            try {
+                disposeController()
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) { localDocumentServer?.close() }
+                localDocumentServer = null
+                localDocumentUri = null
+            }
             mutableUi.value = mutableUi.value.copy(
                 localPlayback = false,
                 directLocalFallback = false,
@@ -1477,7 +1538,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val bridge = localDocumentServer ?: return
         val position = mutableUi.value.mpvMetrics.positionSeconds
         AppLog.i(TAG, "direct local fallback at %.1fs".format(position))
-        viewModelScope.launch {
+        if (closingJob?.isActive == true) return
+        closingJob = viewModelScope.launch(actionErrors) {
+            openingJob?.cancelAndJoin()
+            openingJob = null
             autoAdvanceJob?.cancelAndJoin()
             autoAdvanceJob = null
             reconnectJob?.cancelAndJoin()
@@ -1488,8 +1552,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             metricsJob = null
             seekJob?.cancelAndJoin()
             seekJob = null
-            playerEngine.stop()
-            withContext(Dispatchers.IO) { disposeController() }
+            stopPlayerForDisposal()
+            val cleanupError = runPlaybackCatching { disposeController() }.exceptionOrNull()
             delay(100)
             playerEngine.loadDirect(bridge.url, position)
             mutableUi.value = mutableUi.value.copy(
@@ -1502,14 +1566,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 seekPreviewSeconds = null,
                 seekTargetSeconds = null,
                 reconnecting = null,
-                performanceWarning = null,
+                performanceWarning = cleanupError?.message,
             )
             startMetrics(null)
         }
     }
 
     fun retry() {
-        viewModelScope.launch {
+        cleanupFailure = null
+        if (closingJob?.isActive == true) return
+        closingJob = viewModelScope.launch(actionErrors) {
+            openingJob?.cancelAndJoin()
+            openingJob = null
             activeOrigin = null
             reconnectExhausted = false
             pendingFailure = null
@@ -1524,7 +1592,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             metricsJob = null
             seekJob?.cancelAndJoin()
             seekJob = null
-            playerEngine.stop()
+            stopPlayerForDisposal()
             stopSystemMediaIntegration()
             withContext(Dispatchers.IO) { localDocumentServer?.close() }
             localDocumentServer = null
@@ -1544,7 +1612,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun collectController(value: RelaySessionController) {
         controllerCollectors?.cancel()
-        controllerCollectors = viewModelScope.launch {
+        controllerCollectors = viewModelScope.launch(actionErrors) {
             launch {
                 value.state.collectLatest { state ->
                     AppLog.d(TAG, "controller state=$state")
@@ -1560,6 +1628,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             launch {
                 value.openingProgress.collectLatest { progress ->
                     mutableUi.update { it.copy(openingProgress = progress) }
+                }
+            }
+            launch {
+                value.seekProgress.collectLatest { progress ->
+                    mutableUi.update { it.copy(seekProgress = progress) }
                 }
             }
             launch {
@@ -1616,11 +1689,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun beginAutoResume(origin: PlaybackOrigin, failure: FailureDetail) {
         val position = mutableUi.value.mpvMetrics.positionSeconds
         AppLog.w(TAG, "auto-resume starting: ${failure.kind} at %.1fs".format(position))
-        reconnectJob = viewModelScope.launch {
+        reconnectJob = viewModelScope.launch(actionErrors) {
             // Freeze playback so the resume position cannot drift: the local
             // audio bridge outlives the relay session and would otherwise keep
             // the audio clock running under the recovery UI.
-            runCatching { playerEngine.setPaused(true) }
+            runPlaybackCatching { playerEngine.setPaused(true) }
             metricsJob?.cancelAndJoin()
             metricsJob = null
             seekJob?.cancelAndJoin()
@@ -1655,6 +1728,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     throw cancelled
                 } catch (error: Throwable) {
                     lastError = error.message ?: lastError
+                    if (!classifyFailure(error).recoverable) {
+                        reconnectExhausted = true
+                        pendingFailure = null
+                        mutableUi.update { it.copy(reconnecting = null, error = lastError) }
+                        return@launch
+                    }
                 }
                 attempt += 1
                 val elapsed = SystemClock.elapsedRealtime() - startedAt
@@ -1702,6 +1781,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     ): Boolean {
         val state = mutableUi.value
         if (!state.preferencesLoaded || !state.autoResume) return false
+        if (cleanupFailure != null || failure?.kind == FailureKind.SERVER_RESTART_REQUIRED ||
+            failure?.kind == FailureKind.TEARDOWN_UNCONFIRMED
+        ) return false
         if (state.playingPath != null || state.busy) return false
         // On wake the UI state is the only signal; a failure event is proof
         // by itself (FAILED may not have propagated to the UI state yet).
@@ -1727,7 +1809,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         browseReconnectArmed = false
         AppLog.i(TAG, "browse reconnect ($trigger)")
-        browseReconnectJob = viewModelScope.launch {
+        browseReconnectJob = viewModelScope.launch(actionErrors) {
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
             repeat(BROWSE_RECONNECT_ATTEMPTS) { attempt ->
@@ -1750,7 +1832,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     mutableUi.update { it.copy(reconnecting = null) }
                     return@launch
                 }
-                runCatching { connectInternal(host, port, quiet = true) }
+                runPlaybackCatching { connectInternal(host, port, quiet = true) }
+                if (cleanupFailure != null || controller?.failure?.value?.kind?.recoverable == false) {
+                    pendingFailure = null
+                    val message = cleanupFailure?.message ?: controller?.failure?.value?.let(::failureMessage)
+                    mutableUi.update { it.copy(reconnecting = null, busy = false, error = message) }
+                    return@launch
+                }
                 if (controller?.state?.value == SessionState.BROWSING) {
                     AppLog.i(TAG, "browse reconnect succeeded on attempt ${attempt + 1}")
                     pendingFailure = null
@@ -1803,8 +1891,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * position with the current UI settings. Shared by automatic resume and
      * mid-play model/quality/framing changes.
      */
-    private suspend fun restartPlayback(origin: PlaybackOrigin, positionSeconds: Double) {
-        playerEngine.stop()
+    private suspend fun restartPlayback(
+        origin: PlaybackOrigin,
+        positionSeconds: Double,
+        preserveTrackChoices: Boolean = true,
+    ) {
+        cleanupFailure?.let { throw it }
+        stopPlayerForDisposal(preserveTrackChoices)
         withContext(Dispatchers.IO) { disposeController() }
         val state = mutableUi.value
         val host = state.host.trim()
@@ -1838,26 +1931,35 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
             is PlaybackOrigin.LocalDocument -> {
                 val uri = origin.uriValue.toUri()
-                val source = withContext(Dispatchers.IO) {
-                    AndroidMediaSource.open(getApplication(), uri)
-                }
-                val bridge = localDocumentServer?.takeIf { localDocumentUri == origin.uriValue }
-                    ?: withContext(Dispatchers.IO) {
-                        LocalDocumentHttpServer(getApplication(), uri)
-                    }.also { fresh ->
-                        withContext(Dispatchers.IO) { localDocumentServer?.close() }
-                        localDocumentServer = fresh
-                        localDocumentUri = origin.uriValue
+                var pendingSource: AndroidMediaSource? = null
+                var pendingBridge: LocalDocumentHttpServer? = null
+                try {
+                    val source = withContext(Dispatchers.IO) {
+                        AndroidMediaSource.open(getApplication(), uri).also { pendingSource = it }
                     }
-                next.prepareLocalPlayback(
-                    source = source,
-                    originalMediaUrl = bridge.url,
-                    display = state.display,
-                    requestedModel = model,
-                    qualityTier = tier,
-                    fitMode = state.fitMode,
-                    resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
-                )
+                    val bridge = localDocumentServer?.takeIf { localDocumentUri == origin.uriValue }
+                        ?: withContext(Dispatchers.IO) {
+                            LocalDocumentHttpServer(getApplication(), uri).also { pendingBridge = it }
+                        }.also { fresh ->
+                            withContext(Dispatchers.IO) { localDocumentServer?.close() }
+                            localDocumentServer = fresh
+                            localDocumentUri = origin.uriValue
+                            pendingBridge = null
+                        }
+                    next.prepareLocalPlayback(
+                        source = source,
+                        originalMediaUrl = bridge.url,
+                        display = state.display,
+                        requestedModel = model,
+                        qualityTier = tier,
+                        fitMode = state.fitMode,
+                        resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
+                    ).also { pendingSource = null }
+                } finally {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        try { pendingBridge?.close() } finally { pendingSource?.close() }
+                    }
+                }
             }
         }
         var finalEndpoint = endpoint
@@ -1869,13 +1971,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         subtitlePreferenceAppliedSession = null
         warningDismissed = false
         reconnectExhausted = false
+        val pauseIntent = mutableUi.value.paused
         mutableUi.update {
             it.copy(
                 endpoint = finalEndpoint.localUrl,
                 session = finalEndpoint.session,
                 selectedModel = finalEndpoint.model,
                 qualityTier = finalEndpoint.qualityTier,
-                paused = false,
+                paused = pauseIntent,
                 seeking = false,
                 seekPreviewSeconds = null,
                 seekTargetSeconds = null,
@@ -1889,8 +1992,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         playerEngine.setPanscan(0.0)
         loadRelayEndpoint(finalEndpoint)
-        playerEngine.setPaused(false)
+        playerEngine.setPaused(pauseIntent)
         next.startServerPlayback()
+        if (pauseIntent) next.setPaused(true)
         startMetrics(next)
     }
 
@@ -1901,7 +2005,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.playingPath == null || state.directLocalFallback) return
         if (reconnectJob?.isActive == true) return
         val prior = restartJob
-        restartJob = viewModelScope.launch {
+        restartJob = viewModelScope.launch(actionErrors) {
             prior?.cancelAndJoin()
             seekJob?.cancelAndJoin()
             seekJob = null
@@ -1959,13 +2063,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (state.directLocalFallback) return // the relay server is gone; stay on this file
-        autoAdvanceJob = viewModelScope.launch {
+        autoAdvanceJob = viewModelScope.launch(actionErrors) {
             when (origin) {
                 is PlaybackOrigin.ServerFile -> {
                     val active = controller ?: return@launch
                     val parent =
                         if ('/' in origin.path) origin.path.substringBeforeLast('/') else ""
-                    val next = runCatching { findNextServerFile(active, parent, origin.path) }
+                    val next = runPlaybackCatching { findNextServerFile(active, parent, origin.path) }
                         .getOrNull() ?: return@launch
                     startNextPlayback(
                         origin = PlaybackOrigin.ServerFile(next.path),
@@ -2010,7 +2114,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun findNextLocalFile(currentUri: String): LocalDocumentEntry? {
         val tree = localTreeUri ?: return null
         val directory = localDirectoryStack.lastOrNull()?.first ?: return null
-        val siblings = runCatching {
+        val siblings = runPlaybackCatching {
             withContext(Dispatchers.IO) {
                 LocalDocumentBrowser.children(getApplication(), tree, directory)
             }
@@ -2043,7 +2147,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         try {
-            restartPlayback(origin, 0.0)
+            restartPlayback(origin, 0.0, preserveTrackChoices = false)
             mutableUi.update { it.copy(reconnecting = null) }
             persist {
                 when (origin) {
@@ -2100,12 +2204,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             playing = !mutableUi.value.paused,
         )
         requestAudioFocus()
-        runCatching { PlaybackService.start(getApplication()) }
+        runPlaybackCatching { PlaybackService.start(getApplication()) }
     }
 
     private fun stopSystemMediaIntegration() {
         PlaybackBridge.snapshot.value = PlaybackBridge.Snapshot()
-        runCatching { PlaybackService.stop(getApplication()) }
+        runPlaybackCatching { PlaybackService.stop(getApplication()) }
         abandonAudioFocus()
         mediaSession?.let { session ->
             session.isActive = false
@@ -2166,12 +2270,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun pauseForSystem() {
         val state = mutableUi.value
-        if (state.playingPath != null && !state.paused) runCatching { togglePaused() }
+        if (state.playingPath != null && !state.paused) runPlaybackCatching { togglePaused() }
     }
 
     private fun resumeForSystem() {
         val state = mutableUi.value
-        if (state.playingPath != null && state.paused) runCatching { togglePaused() }
+        if (state.playingPath != null && state.paused) runPlaybackCatching { togglePaused() }
     }
 
     /**
@@ -2187,7 +2291,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val saved = playbackPositions[key]?.positionSeconds ?: return endpoint
         val duration = endpoint.session.durationSeconds ?: return endpoint
         val timeBase = endpoint.session.timeBase ?: return endpoint
-        if (saved < RESUME_MIN_SECONDS || saved > duration - RESUME_END_WINDOW_SECONDS) {
+        if (!saved.isFinite() || saved < RESUME_MIN_SECONDS || saved > duration - RESUME_END_WINDOW_SECONDS) {
             return endpoint
         }
         AppLog.i(TAG, "resuming at saved position %.1fs".format(saved))
@@ -2211,10 +2315,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 streamUrl = endpoint.localUrl,
                 externalMediaUrl = endpoint.originalMediaUrl,
                 subtitleFontsDirectory = endpoint.subtitleFontsDirectory,
-                auxMode = if (endpoint.auxTracks == "muxed") {
-                    RelayAuxMode.MUXED
-                } else {
-                    RelayAuxMode.EXTERNAL
+                auxMode = when {
+                    endpoint.auxTracks == "muxed" -> RelayAuxMode.MUXED
+                    endpoint.session.sourceHasAuxiliary == false -> RelayAuxMode.NONE
+                    endpoint.session.sourceHasAudio == false -> RelayAuxMode.EXTERNAL_SUBTITLES
+                    else -> RelayAuxMode.EXTERNAL
                 },
             ),
         )
@@ -2293,7 +2398,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         rebufferTimestamps = emptyList()
         metricsStartedAt = SystemClock.elapsedRealtime()
         decoderDropsWindow = SystemClock.elapsedRealtime() to 0L
-        metricsJob = viewModelScope.launch {
+        metricsJob = viewModelScope.launch(actionErrors) {
             while (true) {
                 val metrics = playerEngine.snapshot()
                 val tracks = withContext(Dispatchers.IO) { playerEngine.trackSnapshot() }
@@ -2366,7 +2471,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val caughtUp = mutableUi.value.playerState == MpvPlaybackState.PLAYING &&
             kotlin.math.abs(mpv.positionSeconds - target) < SEEK_TARGET_SNAP_SECONDS
         val expired = SystemClock.elapsedRealtime() - seekTargetSetAt > SEEK_TARGET_TIMEOUT_MILLIS
-        if (caughtUp || expired) {
+        if (caughtUp || (expired && controller?.seekProgressIdleMillis() == null)) {
             mutableUi.update { it.copy(seekTargetSeconds = null) }
         }
     }
@@ -2378,6 +2483,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleWatchdogs(transport: TransportStats, mpv: MpvMetrics) {
         val now = SystemClock.elapsedRealtime()
         val state = mutableUi.value
+        val seekIdleMillis = controller?.seekProgressIdleMillis()
 
         // Stalled connection: mpv is starved and the downlink byte counter has
         // not moved. A healthy watermark pause keeps mpv's cache full, so
@@ -2388,6 +2494,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         } else if (
             now - lastReceiveChangeAt > STALL_TIMEOUT_MILLIS &&
             state.sessionState == SessionState.PLAYING &&
+            (seekIdleMillis == null || seekIdleMillis > 60_000) &&
             !state.paused && mpv.pausedForCache &&
             reconnectJob?.isActive != true && restartJob?.isActive != true
         ) {
@@ -2540,18 +2647,44 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             File(getApplication<Application>().filesDir, "phase4-latest.json").writeText(report.toString())
         }
 
-    private suspend fun disposeController() {
-        // A cancelled collector can still publish one last value until its
-        // cancellation is observed.  Wait for it before installing a new
-        // controller so an old FAILED state cannot overwrite a successful
-        // retry's BROWSING state.
-        controllerCollectors?.cancelAndJoin()
-        controllerCollectors = null
-        val current = controller
-        controller = null
-        if (current != null) {
-            withTimeoutOrNull(5_000) { current.teardown() }
-            current.close()
+    private suspend fun stopPlayerForDisposal(preserveTrackChoices: Boolean = false) {
+        try {
+            if (preserveTrackChoices) playerEngine.prepareReload() else playerEngine.stop()
+            playerEngine.awaitIdle()
+        } catch (error: Throwable) {
+            // A native timeout must not orphan the remote session. Retire all
+            // controller owners, but never continue into a replacement load.
+            try {
+                disposeController()
+            } catch (cleanupError: Throwable) {
+                if (cleanupError !== error) cleanupError.addSuppressed(error)
+                throw cleanupError
+            }
+            throw error
+        }
+    }
+
+    private suspend fun disposeController() = withContext(NonCancellable + Dispatchers.IO) {
+        disposalMutex.withLock {
+            // A cancelled collector can still publish one last value until its
+            // cancellation is observed.  Wait for it before installing a new
+            // controller so an old FAILED state cannot overwrite a successful
+            // retry's BROWSING state.
+            controllerCollectors?.cancelAndJoin()
+            controllerCollectors = null
+            val current = controller
+            controller = null
+            if (current != null) {
+                try {
+                    current.teardown()
+                } catch (error: Throwable) {
+                    cleanupFailure = error
+                    throw error
+                } finally {
+                    current.close()
+                }
+            }
+            mutableUi.update { it.copy(seekProgress = null, openingProgress = null) }
         }
     }
 
@@ -2563,19 +2696,36 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         connectivityCallback?.let { callback ->
             val connectivity =
                 getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            runCatching { connectivity.unregisterNetworkCallback(callback) }
+            runPlaybackCatching { connectivity.unregisterNetworkCallback(callback) }
         }
-        runBlocking(Dispatchers.IO) {
-            browseReconnectJob?.cancelAndJoin()
-            autoAdvanceJob?.cancelAndJoin()
-            reconnectJob?.cancelAndJoin()
-            restartJob?.cancelAndJoin()
-            metricsJob?.cancelAndJoin()
-            seekJob?.cancelAndJoin()
-            withTimeoutOrNull(3_000) { disposeController() }
-            localDocumentServer?.close()
+        // Native/network owners may take seconds to stop. Keep the main
+        // thread responsive while cleanup outlives the cancelled ViewModel scope.
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                closingJob?.cancelAndJoin()
+                openingJob?.cancelAndJoin()
+                browseReconnectJob?.cancelAndJoin()
+                autoAdvanceJob?.cancelAndJoin()
+                reconnectJob?.cancelAndJoin()
+                restartJob?.cancelAndJoin()
+                metricsJob?.cancelAndJoin()
+                seekJob?.cancelAndJoin()
+            } catch (error: Throwable) {
+                AppLog.w(TAG, "final action retirement failed: ${error.message}")
+            } finally {
+                runPlaybackCatching {
+                    playerEngine.stop()
+                    playerEngine.awaitIdle()
+                }.onFailure { AppLog.w(TAG, "final player stop failed: ${it.message}") }
+                runPlaybackCatching { disposeController() }
+                    .onFailure { AppLog.w(TAG, "final session cleanup failed: ${it.message}") }
+                try {
+                    localDocumentServer?.close()
+                } finally {
+                    playerEngine.close()
+                }
+            }
         }
-        playerEngine.close()
         super.onCleared()
     }
 
@@ -2673,6 +2823,7 @@ data class RelayUiState(
     val reconnecting: ReconnectStatus? = null,
     // Server loading text while open_session runs (TensorRT engine build).
     val openingProgress: String? = null,
+    val seekProgress: SeekProgress? = null,
     val performanceWarning: String? = null,
     val backupStatus: BackupStatus? = null,
     val discoveredServers: List<DiscoveredServer> = emptyList(),
@@ -2691,3 +2842,14 @@ data class ReconnectStatus(val attempt: Int, val maxAttempts: Int, val reason: S
 data class BackupStatus(val message: String, val failed: Boolean = false)
 
 private val MpvTrack.preferenceKey: String get() = "$language\u001f$title"
+
+/** Coroutine cancellation retires an action; it is never a UI failure callback. */
+internal inline fun <T> runPlaybackCatching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (timeout: TimeoutCancellationException) {
+    Result.failure(timeout)
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Throwable) {
+    Result.failure(error)
+}

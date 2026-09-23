@@ -12,6 +12,27 @@ import kotlin.concurrent.thread
 
 class BoundedMediaQueueTest {
     @Test
+    fun `empty markers also backpressure and resume when consumed`() {
+        val queue = BoundedMediaQueue(1024, maximumPackets = 2)
+        repeat(2) { queue.put(MediaPacket(ByteArray(0))) }
+        val finished = CountDownLatch(1)
+        val producer = thread {
+            queue.put(MediaPacket(ByteArray(0)))
+            finished.countDown()
+        }
+        try {
+            assertFalse(finished.await(100, TimeUnit.MILLISECONDS))
+            assertEquals(2, queue.snapshot().packets)
+            queue.take()
+            assertTrue(finished.await(1, TimeUnit.SECONDS))
+            assertEquals(2, queue.snapshot().packets)
+        } finally {
+            queue.close()
+            producer.join(1_000)
+        }
+    }
+
+    @Test
     fun `producer blocks at byte capacity and close wakes it`() {
         val queue = BoundedMediaQueue(4)
         queue.put(MediaPacket(ByteArray(4)))
@@ -42,4 +63,3 @@ class BoundedMediaQueueTest {
         queue.close()
     }
 }
-

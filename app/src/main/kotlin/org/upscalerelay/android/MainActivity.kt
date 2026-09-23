@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -95,6 +96,12 @@ class MainActivity : ComponentActivity() {
         val builder = PictureInPictureParams.Builder()
             .setAspectRatio(clamped)
             .setActions(if (videoActive) listOf(playPause) else emptyList())
+        // The player Surface fills the window. Supplying its visible bounds
+        // lets Android animate from the actual player into the PiP window.
+        val sourceRect = Rect()
+        if (videoActive && window.decorView.getGlobalVisibleRect(sourceRect)) {
+            builder.setSourceRectHint(sourceRect)
+        }
         if (Build.VERSION.SDK_INT >= 31) {
             builder.setAutoEnterEnabled(videoActive && !state.paused)
         }
@@ -123,10 +130,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         val state = viewModel.ui.value
-        if (state.playingPath != null) {
+        if (state.playingPath != null && event?.isCtrlPressed != true &&
+            event?.isAltPressed != true && event?.isMetaPressed != true
+        ) {
             when (keyCode) {
                 KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_K -> {
-                    runCatching { viewModel.togglePaused() }
+                    // A held key emits repeated DOWN events. One physical
+                    // press must change pause intent only once.
+                    if ((event?.repeatCount ?: 0) == 0) viewModel.togglePaused()
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_J -> {

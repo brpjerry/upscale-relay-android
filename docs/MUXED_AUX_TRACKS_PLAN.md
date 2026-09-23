@@ -1,13 +1,28 @@
 # Android muxed auxiliary tracks and attachment cache plan
 
-Status: **planned; server and Linux reference implementation are complete and
-live-verified**
+Status: **implemented in Android v0.18.0 (`0624bf2`); remaining device
+acceptance gates are recorded in [ANDROID_DEVICE_NOTES.md](ANDROID_DEVICE_NOTES.md)**
+
+The implementation and initial Galaxy Tab S9 Ultra validation landed on
+2026-08-19. The slices below retain the original migration design and acceptance
+checklist; they are not a list of wholly unimplemented work.
+
+September 2026 update: read [RELAY_AUDIT_HANDOFF.md](RELAY_AUDIT_HANDOFF.md)
+alongside this plan. It refines the external-media fallback rules for confirmed
+video-only and subtitle-only sources, adds temporary subtitle-index progress,
+and identifies Android teardown/timeout follow-ups. Its source-presence matrix
+qualifies the unconditional external-URL rules below. The September
+source-presence, seek-progress and teardown follow-ups still need Android
+implementation and validation in that handoff baseline; their subsequent
+implementation and checks are recorded in
+[ANDROID_AUDIT_2026-09-22.md](ANDROID_AUDIT_2026-09-22.md).
 
 The relay server can now stream-copy every original audio/subtitle track into
 each per-seek Matroska epoch. It can also omit immutable subtitle-font bodies
 from those epochs and expose them once through a bounded, authenticated,
-content-addressed cache protocol. The Android client still uses the legacy
-`GET /media/<path>` external-media path for every server-library session.
+content-addressed cache protocol. Android v0.18.0 uses this negotiated path
+for capable server-library sessions and retains `GET /media/<path>` for
+external-mode compatibility.
 
 This plan migrates Android server-library playback to the negotiated muxed
 path without changing local/SAF playback, weakening epoch semantics, or
@@ -20,7 +35,7 @@ authoritative.
 
 ## Why this migration matters
 
-The current Android server-file path combines:
+The pre-migration Android server-file path combined:
 
 ```text
 relay Matroska video over framed TCP
@@ -71,7 +86,10 @@ Rules:
 - Never bump protocol v1 for these additive fields. Missing capability/session
   fields mean `false`/`0` and `external`/`embedded`.
 
-## Current Android implementation points
+## Pre-migration Android implementation points (`562854b`)
+
+These observations describe the baseline used to design the migration. They
+were superseded by `0624bf2`.
 
 - `relay-protocol/.../Messages.kt`: `Capabilities` does not parse
   `muxed_aux_tracks` or `attachment_cache`; `SessionInfo` does not parse the

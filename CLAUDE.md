@@ -111,7 +111,10 @@ release.yml` builds and publishes the signed APK with those notes.
   file as a candidate and leaves it unselected (verified — it produced no
   audio at all). Explicit user track choices are remembered in the engine and
   re-applied after each attach so a seek cannot revert them.
-- **One `audio-add`, never a matching `sub-add`.** mpv exposes *every* track
+- **One external add, never a matching second add.** Confirmed subtitle-only
+  sources use one delayed `sub-add` with no audio-ready wait. Confirmed sources
+  with no auxiliary tracks use no external attach. Missing source metadata
+  retains the single `audio-add` compatibility path. mpv exposes *every* track
   of an external file, so the audio add already contributes this file's
   subtitle track; a second add only opens a duplicate HTTP demuxer that
   re-parses and re-seeks the same file (5+ seconds of it on a busy link) and
@@ -139,6 +142,13 @@ release.yml` builds and publishes the signed APK with those notes.
   may cross the Compose/coroutine UI path.
 - The pre-mpv queue is bounded by bytes (256 MiB), mpv's forward cache by
   bytes (128 MiB). Backpressure must stop producers, never grow memory.
+- Teardown waits for the server's `closed` acknowledgement. A state notification,
+  EOF or timeout is not confirmed native cleanup and must not silently start a
+  replacement session. Stop and await the player's command queue before retiring
+  loopback, external-media or font owners. Native initialize/destroy run off Main
+  and preserve the process-global JNI ownership barrier.
+- Seek inactivity is extended only by advancing subtitle-index coverage for
+  the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
 - **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
   `onStart`/`onStop` do not see it. Anything that has to react to the player

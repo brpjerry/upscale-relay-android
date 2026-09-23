@@ -46,6 +46,8 @@ class FileLogger private constructor(
         } catch (error: Exception) {
             Log.w(TAG, "log writer stopped: ${error.message}")
         } finally {
+            closed = true
+            queue.clear()
             runCatching { stream.flush() }
             runCatching { stream.close() }
         }
@@ -58,8 +60,10 @@ class FileLogger private constructor(
         if (closed) return
         val timestamp = synchronized(timestampFormat) { timestampFormat.format(Date()) }
         // A full queue drops the line rather than stalling playback threads.
-        queue.offer("$timestamp $level/$tag: $message\n")
+        queue.offer("$timestamp $level/$tag: ${message.take(MAX_LINE_CHARS)}\n")
     }
+
+    val isActive: Boolean get() = !closed
 
     /** Flushes what is queued and closes; used on disable and from crashes. */
     fun close(waitMillis: Long = 2_000) {
@@ -73,6 +77,7 @@ class FileLogger private constructor(
         private const val RELATIVE_PATH = "Documents/UpscaleRelay"
         private const val KEEP_FILES = 10
         private const val QUEUE_CAPACITY = 4096
+        private const val MAX_LINE_CHARS = 8192
 
         /** Creates the MediaStore-backed file; null when creation fails. */
         fun start(context: Context): FileLogger? {
@@ -80,6 +85,8 @@ class FileLogger private constructor(
             val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val name = "upscale-relay-" +
                 SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".log"
+            var pendingUri: android.net.Uri? = null
+            var pendingStream: OutputStream? = null
             return try {
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -87,12 +94,20 @@ class FileLogger private constructor(
                     put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)
                 }
                 val uri = resolver.insert(collection, values) ?: return null
+                pendingUri = uri
                 val stream = resolver.openOutputStream(uri, "wa") ?: return null
+                pendingStream = stream
                 pruneOldLogs(context)
-                FileLogger(stream, name)
+                FileLogger(stream, name).also {
+                    pendingStream = null
+                    pendingUri = null
+                }
             } catch (error: Exception) {
                 Log.w(TAG, "unable to create log file: ${error.message}")
                 null
+            } finally {
+                pendingStream?.let { runCatching { it.close() } }
+                pendingUri?.let { runCatching { resolver.delete(it, null, null) } }
             }
         }
 
@@ -114,7 +129,7 @@ class FileLogger private constructor(
                     }
                 }
                 // Names embed the start time, so sorting them is chronological.
-                entries.sortedByDescending { it.second }.drop(KEEP_FILES - 1).forEach { (id, _) ->
+                entries.sortedByDescending { it.second }.drop(KEEP_FILES).forEach { (id, _) ->
                     resolver.delete(android.content.ContentUris.withAppendedId(collection, id), null, null)
                 }
             }
@@ -135,7 +150,7 @@ object AppLog {
     private var previousCrashHandler: Thread.UncaughtExceptionHandler? = null
     private var crashHandlerInstalled = false
 
-    val active: Boolean get() = logger != null
+    val active: Boolean get() = logger?.isActive == true
     val currentFileName: String? get() = logger?.displayName
 
     @Synchronized

@@ -45,7 +45,7 @@ class MpvPlayerEngineTest {
             track(2, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
             track(3, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
         )
-        val remembered = rememberTrack(original, 3)
+        val remembered = rememberTrack(original, MpvTrack.Type.AUDIO, 3)
         val reloaded = listOf(
             track(9, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
             track(10, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
@@ -57,6 +57,7 @@ class MpvPlayerEngineTest {
     fun `numeric id is reused only while its descriptor still matches`() {
         val remembered = rememberTrack(
             listOf(track(2, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass")),
+            MpvTrack.Type.SUBTITLE,
             2,
         )
         val reloaded = listOf(
@@ -64,6 +65,47 @@ class MpvPlayerEngineTest {
             track(7, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass"),
         )
         assertEquals(7, remapTrack(reloaded, remembered))
+    }
+
+    @Test
+    fun `audio and subtitle numeric ids have separate namespaces`() {
+        val original = listOf(
+            track(1, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+            track(1, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass"),
+        )
+        val subtitle = rememberTrack(original, MpvTrack.Type.SUBTITLE, 1)
+        val reloaded = listOf(
+            track(1, MpvTrack.Type.AUDIO, "jpn", "Main", "aac"),
+            track(3, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass"),
+        )
+        assertEquals(3, remapTrack(reloaded, subtitle))
+        assertEquals(null, remapTrack(reloaded, null)) // subtitles off
+    }
+
+    @Test
+    fun `missing remembered track never selects an unrelated replacement`() {
+        val remembered = rememberTrack(
+            listOf(track(1, MpvTrack.Type.SUBTITLE, "eng", "Signs", "ass")),
+            MpvTrack.Type.SUBTITLE,
+            1,
+        )
+        assertEquals(null, remapTrack(listOf(track(1, MpvTrack.Type.SUBTITLE, "spa", "Dialogue", "ass")), remembered))
+    }
+
+    @Test
+    fun `subtitle only sources attach once without opening an audio demuxer`() {
+        assertEquals("sub-add", externalAttachCommand(RelayAuxMode.EXTERNAL_SUBTITLES))
+        assertEquals("audio-add", externalAttachCommand(RelayAuxMode.EXTERNAL))
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `muxed epochs cannot attach an external demuxer`() {
+        externalAttachCommand(RelayAuxMode.MUXED)
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `video only epochs cannot attach an external demuxer`() {
+        externalAttachCommand(RelayAuxMode.NONE)
     }
 
     private fun track(

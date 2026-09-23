@@ -18,6 +18,8 @@ data class UplinkVideoInfo(
     // Sent as open_session.file.chapters; the server echoes them back in
     // session_opened so both playback sources read chapters the same way.
     val chapters: List<ChapterInfo> = emptyList(),
+    val sourceHasAudio: Boolean? = null,
+    val sourceHasAuxiliary: Boolean? = null,
 )
 
 data class UplinkAccessUnit(
