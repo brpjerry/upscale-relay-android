@@ -335,7 +335,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         recentLocalRootUris = value.recentLocalRootUris,
                         playbackProgress = value.playbackPositions,
                         playbackHistoryLimit = value.playbackHistoryLimit,
-                        fastForwardSeconds = value.fastForwardSeconds,
+                        skipSeconds = value.skipSeconds,
                         preferencesLoaded = true,
                     )
                 }
@@ -714,15 +714,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         persist { preferences.setPlaybackHistoryLimit(limit) }
     }
 
-    fun setFastForwardSeconds(value: Int) {
-        val seconds = value.coerceIn(1, MAX_FAST_FORWARD_SECONDS)
-        mutableUi.update { it.copy(fastForwardSeconds = seconds) }
-        persist { preferences.setFastForwardSeconds(seconds) }
+    fun setSkipSeconds(value: Int) {
+        val seconds = value.coerceIn(1, MAX_SKIP_SECONDS)
+        mutableUi.update { it.copy(skipSeconds = seconds) }
+        persist { preferences.setSkipSeconds(seconds) }
     }
 
-    /** The player's configurable skip button (default 1:25, e.g. past an opening). */
-    fun fastForward() {
-        seekRelative(mutableUi.value.fastForwardSeconds.toDouble())
+    /**
+     * Seeks forward (+1) or back (-1) by the configured skip amount (default
+     * 1:25, e.g. past an opening). Shared by the player buttons, keyboard and
+     * media-session controls.
+     */
+    fun skip(direction: Int) {
+        if (direction == 0) return
+        val seconds = mutableUi.value.skipSeconds.toDouble()
+        seekRelative(if (direction > 0) seconds else -seconds)
     }
 
     fun setLibrarySort(value: LibrarySort) {
@@ -2193,9 +2199,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         seekTo(pos / 1000.0)
                     }
 
-                    override fun onFastForward() = seekRelative(10.0)
+                    override fun onFastForward() = skip(1)
 
-                    override fun onRewind() = seekRelative(-10.0)
+                    override fun onRewind() = skip(-1)
 
                     override fun onSkipToNext() = chapterStep(1)
 
@@ -2825,7 +2831,7 @@ data class RelayUiState(
     // for the percentage + last-played labels in the file lists.
     val playbackProgress: Map<String, PlaybackProgress> = emptyMap(),
     val playbackHistoryLimit: Int = MAX_POSITIONS,
-    val fastForwardSeconds: Int = DEFAULT_FAST_FORWARD_SECONDS,
+    val skipSeconds: Int = DEFAULT_SKIP_SECONDS,
     val localDirectoryName: String? = null,
     val localEntries: List<LocalDocumentEntry> = emptyList(),
     val localCanGoUp: Boolean = false,

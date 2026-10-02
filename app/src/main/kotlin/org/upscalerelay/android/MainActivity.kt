@@ -141,11 +141,11 @@ class MainActivity : ComponentActivity() {
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_J -> {
-                    viewModel.seekRelative(-10.0)
+                    viewModel.skip(-1)
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_L -> {
-                    viewModel.seekRelative(10.0)
+                    viewModel.skip(1)
                     return true
                 }
             }

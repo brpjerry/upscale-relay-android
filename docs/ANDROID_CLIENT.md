@@ -857,14 +857,14 @@ still need hands on the device.
   Verified with interpolation on: hardware HEVC decode retained, epoch seek
   clean, external-audio sync at ~30 µs, zero output drops over a 20 s
   steady-state window.
-- **Keyboard.** Space/K toggles pause, arrow keys and J/L seek ±10 s through
-  the epoch protocol, media keys route via the MediaSession — all verified
+- **Keyboard.** Space/K toggles pause, arrow keys and J/L seek by the
+  configured skip amount (default 1:25) through the epoch protocol, media keys route via the MediaSession — all verified
   over adb key events. S Pen behaves as a pointer (no special handling
   required); DeX/freeform and S Pen hover remain manual smoke items.
 - **UI consistency.** The navigation rail, library/local lists, and player
   transport use Material icons with content descriptions (back arrow,
-  Replay10/PlayArrow/Pause/Forward10, subtitle and tune icons, folder/movie
-  glyphs). The last destination persists and restores without flashing an
+  SkipPrevious/FastRewind/PlayArrow/Pause/FastForward/SkipNext, subtitle and
+  tune icons, folder/movie glyphs). The last destination persists and restores without flashing an
   obsolete screen (the shell renders nothing until preferences load). Hidden
   dot-directories are filtered from the Local browser, opaque downloads
   document ids display as "Downloads video", and the server header shows

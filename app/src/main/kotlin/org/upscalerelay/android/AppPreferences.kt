@@ -44,7 +44,7 @@ data class AppPreferences(
     val recentLocalRootUris: List<String> = emptyList(),
     val playbackPositions: Map<String, PlaybackProgress> = emptyMap(),
     val playbackHistoryLimit: Int = MAX_POSITIONS,
-    val fastForwardSeconds: Int = DEFAULT_FAST_FORWARD_SECONDS,
+    val skipSeconds: Int = DEFAULT_SKIP_SECONDS,
 )
 
 /**
@@ -90,8 +90,8 @@ class AppPreferencesStore(context: Context) {
     suspend fun setLibrarySort(value: String) = set(Keys.LIBRARY_SORT, value)
     suspend fun setPlaybackHistoryLimit(value: Int) =
         set(Keys.PLAYBACK_HISTORY_LIMIT, value.coerceIn(1, MAX_POSITIONS_LIMIT))
-    suspend fun setFastForwardSeconds(value: Int) =
-        set(Keys.FAST_FORWARD_SECONDS, value.coerceIn(1, MAX_FAST_FORWARD_SECONDS))
+    suspend fun setSkipSeconds(value: Int) =
+        set(Keys.SKIP_SECONDS, value.coerceIn(1, MAX_SKIP_SECONDS))
     suspend fun setLastDestination(value: String) = set(Keys.LAST_DESTINATION, value)
     suspend fun setLastLibraryPath(value: String) = set(Keys.LAST_LIBRARY_PATH, value)
 
@@ -129,8 +129,8 @@ class AppPreferencesStore(context: Context) {
             preferences[Keys.LAST_LIBRARY_PATH] = value.lastLibraryPath
             preferences[Keys.PLAYBACK_HISTORY_LIMIT] =
                 value.playbackHistoryLimit.coerceIn(1, MAX_POSITIONS_LIMIT)
-            preferences[Keys.FAST_FORWARD_SECONDS] =
-                value.fastForwardSeconds.coerceIn(1, MAX_FAST_FORWARD_SECONDS)
+            preferences[Keys.SKIP_SECONDS] =
+                value.skipSeconds.coerceIn(1, MAX_SKIP_SECONDS)
             preferences[Keys.RECENTS] = value.recentPaths.take(MAX_RECENTS).joinToString("\n")
             preferences[Keys.LOCAL_RECENTS] =
                 value.recentLocalUris.take(MAX_RECENTS).joinToString("\n")
@@ -233,8 +233,8 @@ class AppPreferencesStore(context: Context) {
             historyLimit(preferences),
         ),
         playbackHistoryLimit = historyLimit(preferences),
-        fastForwardSeconds = (preferences[Keys.FAST_FORWARD_SECONDS] ?: DEFAULT_FAST_FORWARD_SECONDS)
-            .coerceIn(1, MAX_FAST_FORWARD_SECONDS),
+        skipSeconds = (preferences[Keys.SKIP_SECONDS] ?: DEFAULT_SKIP_SECONDS)
+            .coerceIn(1, MAX_SKIP_SECONDS),
     )
 
     private object Keys {
@@ -265,7 +265,7 @@ class AppPreferencesStore(context: Context) {
         val LOCAL_ROOT_RECENTS = stringPreferencesKey("recent_local_root_uris")
         val PLAYBACK_POSITIONS = stringPreferencesKey("playback_positions")
         val PLAYBACK_HISTORY_LIMIT = intPreferencesKey("playback_history_limit")
-        val FAST_FORWARD_SECONDS = intPreferencesKey("fast_forward_seconds")
+        val SKIP_SECONDS = intPreferencesKey("skip_seconds")
     }
 }
 
@@ -311,13 +311,13 @@ internal const val MAX_RECENTS = 20
 internal const val MAX_POSITIONS = 50
 internal const val MAX_POSITIONS_LIMIT = 1000
 
-/** Default jump for the player's configurable fast-forward button: 1:25. */
-internal const val DEFAULT_FAST_FORWARD_SECONDS = 85
-internal const val MAX_FAST_FORWARD_SECONDS = 3600
+/** Default jump for the player's skip buttons, keys and media controls: 1:25. */
+internal const val DEFAULT_SKIP_SECONDS = 85
+internal const val MAX_SKIP_SECONDS = 3600
 
 /**
  * Parses a skip amount typed as plain seconds ("85") or minutes:seconds
- * ("1:25"). Returns null for anything else or outside 1..[MAX_FAST_FORWARD_SECONDS].
+ * ("1:25"). Returns null for anything else or outside 1..[MAX_SKIP_SECONDS].
  */
 internal fun parseSkipDuration(text: String): Int? {
     val parts = text.trim().split(':')
@@ -330,7 +330,7 @@ internal fun parseSkipDuration(text: String): Int? {
         }
         else -> null
     }
-    return seconds?.takeIf { it in 1..MAX_FAST_FORWARD_SECONDS }
+    return seconds?.takeIf { it in 1..MAX_SKIP_SECONDS }
 }
 
 /** "1:25" for 85; the form [parseSkipDuration] reads back. */

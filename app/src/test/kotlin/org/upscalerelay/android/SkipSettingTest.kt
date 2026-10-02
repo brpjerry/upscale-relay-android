@@ -4,11 +4,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-class FastForwardSettingTest {
+class SkipSettingTest {
     @Test
     fun `default skip is one minute twenty-five`() {
-        assertEquals(85, AppPreferences().fastForwardSeconds)
-        assertEquals("1:25", formatSkipDuration(DEFAULT_FAST_FORWARD_SECONDS))
+        assertEquals(85, AppPreferences().skipSeconds)
+        assertEquals("1:25", formatSkipDuration(DEFAULT_SKIP_SECONDS))
     }
 
     @Test
@@ -16,7 +16,7 @@ class FastForwardSettingTest {
         assertEquals(85, parseSkipDuration("1:25"))
         assertEquals(85, parseSkipDuration(" 85 "))
         assertEquals(30, parseSkipDuration("0:30"))
-        assertEquals(MAX_FAST_FORWARD_SECONDS, parseSkipDuration("60:00"))
+        assertEquals(MAX_SKIP_SECONDS, parseSkipDuration("60:00"))
     }
 
     @Test
@@ -28,7 +28,7 @@ class FastForwardSettingTest {
 
     @Test
     fun `format round-trips through parse`() {
-        listOf(1, 59, 60, 85, 600, MAX_FAST_FORWARD_SECONDS).forEach {
+        listOf(1, 59, 60, 85, 600, MAX_SKIP_SECONDS).forEach {
             assertEquals(it, parseSkipDuration(formatSkipDuration(it)))
         }
     }
