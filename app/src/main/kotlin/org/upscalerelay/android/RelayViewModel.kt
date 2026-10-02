@@ -335,6 +335,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         recentLocalRootUris = value.recentLocalRootUris,
                         playbackProgress = value.playbackPositions,
                         playbackHistoryLimit = value.playbackHistoryLimit,
+                        fastForwardSeconds = value.fastForwardSeconds,
                         preferencesLoaded = true,
                     )
                 }
@@ -711,6 +712,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // Excess entries are trimmed lazily: decode caps at the limit, and the
         // next position save persists the trimmed list.
         persist { preferences.setPlaybackHistoryLimit(limit) }
+    }
+
+    fun setFastForwardSeconds(value: Int) {
+        val seconds = value.coerceIn(1, MAX_FAST_FORWARD_SECONDS)
+        mutableUi.update { it.copy(fastForwardSeconds = seconds) }
+        persist { preferences.setFastForwardSeconds(seconds) }
+    }
+
+    /** The player's configurable skip button (default 1:25, e.g. past an opening). */
+    fun fastForward() {
+        seekRelative(mutableUi.value.fastForwardSeconds.toDouble())
     }
 
     fun setLibrarySort(value: LibrarySort) {
@@ -2813,6 +2825,7 @@ data class RelayUiState(
     // for the percentage + last-played labels in the file lists.
     val playbackProgress: Map<String, PlaybackProgress> = emptyMap(),
     val playbackHistoryLimit: Int = MAX_POSITIONS,
+    val fastForwardSeconds: Int = DEFAULT_FAST_FORWARD_SECONDS,
     val localDirectoryName: String? = null,
     val localEntries: List<LocalDocumentEntry> = emptyList(),
     val localCanGoUp: Boolean = false,

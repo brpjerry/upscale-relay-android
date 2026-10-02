@@ -52,6 +52,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -1132,12 +1133,48 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                             )
                         }
                     }
+                    FastForwardSetting(state.fastForwardSeconds, viewModel::setFastForwardSeconds)
                     VideoSyncPreferenceControls(viewModel, state)
                 }
             }
             item { BackupSection(viewModel, state) }
         }
     }
+}
+
+/**
+ * Amount for the player's fast-forward button, typed as "1:25" or "85". The
+ * field keeps whatever is typed; only a valid amount is saved.
+ */
+@Composable
+private fun FastForwardSetting(seconds: Int, onChange: (Int) -> Unit) {
+    var text by remember { mutableStateOf(formatSkipDuration(seconds)) }
+    // Follow external changes (a backup import) unless they match what is typed.
+    LaunchedEffect(seconds) {
+        if (parseSkipDuration(text) != seconds) text = formatSkipDuration(seconds)
+    }
+    val valid = parseSkipDuration(text) != null
+    Text("Fast forward amount", style = MaterialTheme.typography.labelLarge)
+    OutlinedTextField(
+        value = text,
+        onValueChange = { value ->
+            text = value
+            parseSkipDuration(value)?.let(onChange)
+        },
+        label = { Text("Minutes:seconds") },
+        supportingText = {
+            Text(
+                if (valid) {
+                    "The fast forward button next to +10 s jumps this far."
+                } else {
+                    "Enter m:ss or seconds, up to 60:00."
+                },
+            )
+        },
+        isError = !valid,
+        singleLine = true,
+        modifier = Modifier.width(220.dp),
+    )
 }
 
 /**
@@ -1756,6 +1793,12 @@ private fun PlayerChrome(
                     PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds", interactionSource) {
                         viewModel.seekRelative(10.0)
                     }
+                    PlayerRoundButton(
+                        Icons.Filled.FastForward,
+                        "Forward ${formatSkipDuration(state.fastForwardSeconds)}",
+                        interactionSource,
+                        onClick = viewModel::fastForward,
+                    )
                     if (chapters.isNotEmpty()) {
                         PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter", interactionSource) {
                             viewModel.chapterStep(1)
