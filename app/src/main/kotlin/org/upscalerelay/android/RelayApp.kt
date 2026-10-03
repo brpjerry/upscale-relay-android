@@ -52,10 +52,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.automirrored.outlined.Toc
@@ -1132,12 +1132,49 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                             )
                         }
                     }
+                    SkipSetting(state.skipSeconds, viewModel::setSkipSeconds)
                     VideoSyncPreferenceControls(viewModel, state)
                 }
             }
             item { BackupSection(viewModel, state) }
         }
     }
+}
+
+/**
+ * Amount for the player's skip buttons, arrow/J/L keys and notification
+ * fast forward/rewind, typed as "1:25" or "85". The
+ * field keeps whatever is typed; only a valid amount is saved.
+ */
+@Composable
+private fun SkipSetting(seconds: Int, onChange: (Int) -> Unit) {
+    var text by remember { mutableStateOf(formatSkipDuration(seconds)) }
+    // Follow external changes (a backup import) unless they match what is typed.
+    LaunchedEffect(seconds) {
+        if (parseSkipDuration(text) != seconds) text = formatSkipDuration(seconds)
+    }
+    val valid = parseSkipDuration(text) != null
+    Text("Skip amount", style = MaterialTheme.typography.labelLarge)
+    OutlinedTextField(
+        value = text,
+        onValueChange = { value ->
+            text = value
+            parseSkipDuration(value)?.let(onChange)
+        },
+        label = { Text("Minutes:seconds") },
+        supportingText = {
+            Text(
+                if (valid) {
+                    "The player's skip buttons, arrow keys and notification controls jump this far."
+                } else {
+                    "Enter m:ss or seconds, up to 60:00."
+                },
+            )
+        },
+        isError = !valid,
+        singleLine = true,
+        modifier = Modifier.width(220.dp),
+    )
 }
 
 /**
@@ -1730,8 +1767,12 @@ private fun PlayerChrome(
                             viewModel.chapterStep(-1)
                         }
                     }
-                    PlayerRoundButton(Icons.Filled.Replay10, "Back 10 seconds", interactionSource) {
-                        viewModel.seekRelative(-10.0)
+                    PlayerRoundButton(
+                        Icons.Filled.FastRewind,
+                        "Back ${formatSkipDuration(state.skipSeconds)}",
+                        interactionSource,
+                    ) {
+                        viewModel.skip(-1)
                     }
                     FilledIconButton(
                         onClick = viewModel::togglePaused,
@@ -1753,8 +1794,12 @@ private fun PlayerChrome(
                             modifier = Modifier.size(34.dp),
                         )
                     }
-                    PlayerRoundButton(Icons.Filled.Forward10, "Forward 10 seconds", interactionSource) {
-                        viewModel.seekRelative(10.0)
+                    PlayerRoundButton(
+                        Icons.Filled.FastForward,
+                        "Forward ${formatSkipDuration(state.skipSeconds)}",
+                        interactionSource,
+                    ) {
+                        viewModel.skip(1)
                     }
                     if (chapters.isNotEmpty()) {
                         PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter", interactionSource) {

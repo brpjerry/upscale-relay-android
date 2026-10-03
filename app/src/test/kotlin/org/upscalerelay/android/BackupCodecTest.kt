@@ -52,6 +52,7 @@ class BackupCodecTest {
             "local:content://provider/doc/a b.mkv" to PlaybackProgress(6.0),
         ),
         playbackHistoryLimit = 250,
+        skipSeconds = 90,
     )
 
     private fun roundTrip(value: AppPreferences, onto: AppPreferences = AppPreferences()) =

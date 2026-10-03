@@ -78,6 +78,7 @@ object BackupCodec {
                 put("interpolationEnabled", preferences.interpolationEnabled)
                 put("interpolationScaler", preferences.interpolationScaler)
                 put("playbackHistoryLimit", preferences.playbackHistoryLimit)
+                put("skipSeconds", preferences.skipSeconds)
             }
             putJsonObject("library") {
                 put("librarySort", preferences.librarySort)
@@ -164,6 +165,9 @@ object BackupCodec {
                 ?.takeIf { it in MpvPlayerEngine.INTERPOLATION_SCALERS }
                 ?: current.interpolationScaler,
             playbackHistoryLimit = historyLimit,
+            skipSeconds = player?.int("skipSeconds")
+                ?.coerceIn(1, MAX_SKIP_SECONDS)
+                ?: current.skipSeconds,
             librarySort = library?.string("librarySort")
                 ?.takeIf { name -> LibrarySort.entries.any { it.name == name } }
                 ?: current.librarySort,

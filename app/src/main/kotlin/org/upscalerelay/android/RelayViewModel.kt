@@ -335,6 +335,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         recentLocalRootUris = value.recentLocalRootUris,
                         playbackProgress = value.playbackPositions,
                         playbackHistoryLimit = value.playbackHistoryLimit,
+                        skipSeconds = value.skipSeconds,
                         preferencesLoaded = true,
                     )
                 }
@@ -711,6 +712,23 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // Excess entries are trimmed lazily: decode caps at the limit, and the
         // next position save persists the trimmed list.
         persist { preferences.setPlaybackHistoryLimit(limit) }
+    }
+
+    fun setSkipSeconds(value: Int) {
+        val seconds = value.coerceIn(1, MAX_SKIP_SECONDS)
+        mutableUi.update { it.copy(skipSeconds = seconds) }
+        persist { preferences.setSkipSeconds(seconds) }
+    }
+
+    /**
+     * Seeks forward (+1) or back (-1) by the configured skip amount (default
+     * 1:25, e.g. past an opening). Shared by the player buttons, keyboard and
+     * media-session controls.
+     */
+    fun skip(direction: Int) {
+        if (direction == 0) return
+        val seconds = mutableUi.value.skipSeconds.toDouble()
+        seekRelative(if (direction > 0) seconds else -seconds)
     }
 
     fun setLibrarySort(value: LibrarySort) {
@@ -2181,9 +2199,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         seekTo(pos / 1000.0)
                     }
 
-                    override fun onFastForward() = seekRelative(10.0)
+                    override fun onFastForward() = skip(1)
 
-                    override fun onRewind() = seekRelative(-10.0)
+                    override fun onRewind() = skip(-1)
 
                     override fun onSkipToNext() = chapterStep(1)
 
@@ -2813,6 +2831,7 @@ data class RelayUiState(
     // for the percentage + last-played labels in the file lists.
     val playbackProgress: Map<String, PlaybackProgress> = emptyMap(),
     val playbackHistoryLimit: Int = MAX_POSITIONS,
+    val skipSeconds: Int = DEFAULT_SKIP_SECONDS,
     val localDirectoryName: String? = null,
     val localEntries: List<LocalDocumentEntry> = emptyList(),
     val localCanGoUp: Boolean = false,
