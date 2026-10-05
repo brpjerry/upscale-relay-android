@@ -642,7 +642,7 @@ the same day.
   automatically ~15 s after Wi-Fi returned, position-continuous, with
   `auto_resume_count` incremented. The behavior is preference-gated
   ("Reconnect automatically during playback", default on).
-- **Superseded in 0.20.0:** the two entries around this note describe the
+- **Superseded in 0.22.0:** the two entries around this note describe the
   original timed design. `ReconnectPolicy`, the attempt counter, **Stop
   trying**, the browse retry loop and the "Reconnect automatically during
   playback" preference are gone; reconnects are made once, on demand or on a
