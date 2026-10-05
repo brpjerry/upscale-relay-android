@@ -651,8 +651,14 @@ private fun ServerDestination(viewModel: RelayViewModel, state: RelayUiState) {
     Column(Modifier.fillMaxSize().padding(contentPadding())) {
         DestinationHeader(
             title = state.capabilities?.serverName ?: "Server library",
-            subtitle = listOf("${state.host}:${state.port}", state.sessionState.userLabel)
-                .filter { it.isNotEmpty() }
+            // "Connection lost" is the banner's companion, not its herald:
+            // while the app is still reconnecting on its own, neither shows.
+            subtitle = listOf(
+                "${state.host}:${state.port}",
+                state.sessionState.userLabel.takeIf {
+                    state.sessionState != SessionState.FAILED || state.error != null
+                }.orEmpty(),
+            ).filter { it.isNotEmpty() }
                 .joinToString("  ·  "),
             action = { OutlinedButton(onClick = viewModel::connect, enabled = !state.busy) { Text("Reconnect") } },
         )
