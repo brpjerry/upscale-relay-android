@@ -69,6 +69,14 @@ release.yml` builds and publishes the signed APK with those notes.
   normally means uninstalling the release one and losing the user's DataStore
   (settings, watch history). Build with `-PcoinstallDebug=true` instead: it
   adds the `.debug` suffix so the two sit side by side.
+- **Data in a debug build is disposable.** Settings, watch history, the
+  library cache and anything else a debug install holds (the amber icon is
+  how you know it is one) can always be cleared, overwritten or lost to an
+  uninstall for the sake of a test — `pm clear`, reinstalling, marking files
+  watched, changing the host — without asking and without preserving it
+  first. There is no need to build a second throwaway copy just to protect a
+  debug install's data. This never extends to the signed release app: its
+  data is the user's and is not touched.
 - `files/phase4-latest.json` is written every second and is the fastest read
   on drops, A/V error, buffer, and transport rates:
   `adb shell run-as <applicationId> cat files/phase4-latest.json`.
