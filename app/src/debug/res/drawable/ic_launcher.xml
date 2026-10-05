@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only. This file shadows main/res/drawable/ic_launcher.xml, so a
+  debug install is told apart from the signed release at a glance: amber
+  instead of navy, with a hazard-striped corner.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M4,4h40v40h-40z" />
+    <path
+        android:fillColor="#152A3A"
+        android:pathData="M18,13L36,24L18,35z" />
+    <!-- Hazard stripes across the bottom-right corner. -->
+    <path
+        android:fillColor="#152A3A"
+        android:pathData="M44,26L44,31L31,44L26,44z" />
+    <path
+        android:fillColor="#152A3A"
+        android:pathData="M44,36L44,41L41,44L36,44z" />
+</vector>

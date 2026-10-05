@@ -57,11 +57,18 @@ release.yml` builds and publishes the signed APK with those notes.
   banner. This cost a round of confounded frame-drop measurements on
   2026-07-26. Match the *network* too: a tier the Wi-Fi cannot carry starves
   the client just as effectively (`average_mbps` in the telemetry snapshot).
+- **Debug builds always carry the debug icon.** `app/src/debug/res/drawable/
+  ic_launcher.xml` (amber, hazard-striped corner) shadows the navy release
+  icon in `app/src/main`, so a debug install is recognisable on the tablet at
+  a glance. Never give a debug build the release icon: do not delete or
+  bypass that file, do not point the manifest's `android:icon` at a different
+  drawable for debug, and when the release icon changes, redraw the debug
+  variant alongside it rather than letting the two converge. This holds for
+  co-installed (`-PcoinstallDebug=true`) and temporary-suffix builds too.
 - Debug and release share an `applicationId`, so installing a debug build
   normally means uninstalling the release one and losing the user's DataStore
-  (settings, watch history). Add a temporary `applicationIdSuffix = ".debug"`
-  under `buildTypes { getByName("debug") { ... } }` instead, and remove it
-  before committing.
+  (settings, watch history). Build with `-PcoinstallDebug=true` instead: it
+  adds the `.debug` suffix so the two sit side by side.
 - `files/phase4-latest.json` is written every second and is the fastest read
   on drops, A/V error, buffer, and transport rates:
   `adb shell run-as <applicationId> cat files/phase4-latest.json`.
