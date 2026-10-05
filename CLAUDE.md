@@ -159,6 +159,13 @@ release.yml` builds and publishes the signed APK with those notes.
   that needs the server must get its controller from `connectionForAction()`
   (or run through `libraryAction`), never from the `controller` field
   directly: that is what waits out the connect in flight.
+- **A connection error in the browser is a last resort.** Reconnect first,
+  report only when that fails: background connects are `quiet` and hand a
+  failure to the browse loop (`retryBackgroundConnectIfNeeded`), a failed
+  library request or file open retries once on a fresh connection, and the
+  loop keeps trying behind its own banner (`connectionError`) and removes it
+  on success. The banner must never be on screen while the server is
+  reachable.
 - **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
   `onStart`/`onStop` do not see it. Anything that has to react to the player
   going away belongs on the metrics loop or the Surface callbacks, not on a
