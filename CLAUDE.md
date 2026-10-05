@@ -150,6 +150,15 @@ release.yml` builds and publishes the signed APK with those notes.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
+- **A loading overlay in the browser is only for a wait the user asked for.**
+  Connects the app makes on its own — after leaving the player
+  (`closingJob`), after a wake with a dead socket, on a cold start behind
+  the cached listing (`files/library-cache.json`, `backgroundConnectJob`) —
+  pass `visible = false` to `connectInternal` and keep the listing on screen
+  (`keepLibrary`). Because the controls stay enabled meanwhile, anything
+  that needs the server must get its controller from `connectionForAction()`
+  (or run through `libraryAction`), never from the `controller` field
+  directly: that is what waits out the connect in flight.
 - **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
   `onStart`/`onStop` do not see it. Anything that has to react to the player
   going away belongs on the metrics loop or the Surface callbacks, not on a

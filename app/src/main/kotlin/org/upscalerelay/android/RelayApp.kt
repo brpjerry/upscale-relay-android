@@ -195,7 +195,7 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
                 !state.preferencesLoaded -> Box(Modifier.fillMaxSize())
                 else -> Box(Modifier.fillMaxSize()) {
                     TabletShell(viewModel, state)
-                    ShellLoadingOverlay(viewModel, state)
+                    ShellLoadingOverlay(state)
                 }
             }
         }
@@ -351,31 +351,24 @@ private fun TabletShell(viewModel: RelayViewModel, state: RelayUiState) {
 }
 
 /**
- * The browse shell's share of the single loading overlay: connecting, opening
- * a file or folder, paging the library, and the automatic reconnect that
- * follows a tablet waking up with a dead control socket.
+ * The browse shell's share of the single loading overlay. It appears only for
+ * a wait the user asked for: a manual connect, opening a folder, paging or
+ * re-sorting the library. Everything the app does on its own — reconnecting
+ * after the tablet wakes, after leaving the player, or on a cold start with a
+ * cached listing — runs behind the list without showing anything.
  */
 @Composable
-private fun ShellLoadingOverlay(viewModel: RelayViewModel, state: RelayUiState) {
-    val reconnecting = state.reconnecting
+private fun ShellLoadingOverlay(state: RelayUiState) {
     // The overlay dims but does not swallow touches: every control underneath
     // already disables itself while busy, and a connect attempt can sit on a
     // 15-second timeout — long enough that the navigation rail has to stay
     // reachable.
-    when {
-        reconnecting != null -> LoadingOverlay(
-            label = reconnecting.reason,
-            detail = "Attempt ${reconnecting.attempt} of ${reconnecting.maxAttempts}. " +
-                "The library reopens where you left it.",
-            appearAfterMillis = 0,
-        ) {
-            OutlinedButton(onClick = viewModel::cancelAutoResume) { Text("Stop trying") }
-        }
-        // One branch for both flags: a connect hands over to a library
-        // restore mid-flight, and two call sites would blink the overlay off
-        // and restart its appearance delay between the two.
-        state.busy || state.libraryLoading -> LoadingOverlay(
-            label = if (state.capabilities == null) "Connecting…" else "Loading…",
+    //
+    // One call site for both flags, so a wait that hands over from one to the
+    // other cannot blink the overlay off and restart its appearance delay.
+    if (state.busy || state.libraryLoading) {
+        LoadingOverlay(
+            label = if (state.sessionState == SessionState.BROWSING) "Loading…" else "Connecting…",
         )
     }
 }
@@ -636,11 +629,11 @@ private fun localUriLabel(value: String): String {
 
 private val SessionState.userLabel: String
     get() = when (this) {
-        SessionState.DISCONNECTED -> "Disconnected"
-        SessionState.CONNECTING -> "Connecting…"
         SessionState.BROWSING -> "Connected"
         SessionState.FAILED -> "Connection lost"
-        else -> "Busy"
+        // In between, the app is connecting on its own behind a list that is
+        // still usable; that is not something to announce.
+        else -> ""
     }
 
 @Composable
@@ -658,7 +651,9 @@ private fun ServerDestination(viewModel: RelayViewModel, state: RelayUiState) {
     Column(Modifier.fillMaxSize().padding(contentPadding())) {
         DestinationHeader(
             title = state.capabilities?.serverName ?: "Server library",
-            subtitle = "${state.host}:${state.port}  ·  ${state.sessionState.userLabel}",
+            subtitle = listOf("${state.host}:${state.port}", state.sessionState.userLabel)
+                .filter { it.isNotEmpty() }
+                .joinToString("  ·  "),
             action = { OutlinedButton(onClick = viewModel::connect, enabled = !state.busy) { Text("Reconnect") } },
         )
         state.error?.let { InlineError(it, viewModel::dismissError) }
@@ -966,6 +961,7 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
                 }
             },
         )
+        state.error?.let { InlineError(it, viewModel::dismissError) }
         Spacer(Modifier.height(20.dp))
         if (state.recentPaths.isEmpty()) {
             PlaceholderCard("Videos you open will appear here.")

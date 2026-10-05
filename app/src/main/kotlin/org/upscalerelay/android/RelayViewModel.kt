@@ -34,7 +34,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,6 +119,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     // retry storm. Playback has its own loop.
     private var browseReconnectJob: Job? = null
     private var browseReconnectArmed = false
+
+    // The cold-start connect that runs behind the cached listing. Like the
+    // connect that follows leaving the player (closingJob), nothing shows
+    // while it runs; an action that needs the server waits for both in
+    // connectionForAction.
+    private var backgroundConnectJob: Job? = null
+    private var quietRefreshJob: Job? = null
+
+    // "host:port" the listing on screen came from. A connect to the same
+    // server keeps that listing up while it runs; any other server starts
+    // from an empty screen.
+    private var libraryOrigin: String? = null
+    private val libraryCacheFile = application.filesDir.resolve("library-cache.json")
     private var appInForeground = true
 
     // A recoverable failure that has not been shown to the user: recovery is
@@ -186,8 +201,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             // away retries here — the player loop first, then the browse
             // screen. (When the failure is detected only after wake, the
             // failure collector routes into the same two calls.)
-            if (!resumePendingPlayback("app foregrounded")) {
-                maybeBrowseReconnect("app foregrounded")
+            if (!resumePendingPlayback("app foregrounded") &&
+                !maybeBrowseReconnect("app foregrounded")
+            ) {
+                // The connection survived, but the server's files may have
+                // changed while the app was away.
+                refreshLibraryQuietly()
             }
         }
 
@@ -251,7 +270,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         ?: mutableUi.value.mpvMetrics.durationSeconds
                     val position = mutableUi.value.mpvMetrics.positionSeconds
                     val atEnd = duration > 0 && position >= duration - RESUME_END_WINDOW_SECONDS
-                    if (!reconnecting && atEnd) {
+                    // Leaving the player stops mpv too; that is never the
+                    // file reaching its end.
+                    val leaving = mutableUi.value.playingPath == null
+                    if (!reconnecting && !leaving && atEnd) {
                         AppLog.i(TAG, "playback ended (natural EOS)")
                         // A completed playthrough keeps a 100% entry (position
                         // == duration); resume ignores it, so the next open
@@ -302,8 +324,22 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 // startup failed; a failed player must not strand the splash.
                 runPlaybackCatching { playerReady.await() }
                 val firstLoad = !mutableUi.value.preferencesLoaded
+                // Read before the first frame is drawn, so the list the user
+                // left is what the app opens on rather than a connect screen.
+                val cachedLibrary = if (firstLoad && value.autoConnect) {
+                    readLibraryCache("${value.host.trim()}:${value.port}")
+                } else {
+                    null
+                }
+                if (cachedLibrary != null) libraryOrigin = cachedLibrary.origin
                 mutableUi.update { state ->
                     state.copy(
+                        currentDirectory = cachedLibrary?.directory ?: state.currentDirectory,
+                        directoryStack = cachedLibrary?.stack ?: state.directoryStack,
+                        directoryCursorStack = cachedLibrary?.stack?.map { null }
+                            ?: state.directoryCursorStack,
+                        libraryRoot = cachedLibrary?.let { it.stack.firstOrNull() ?: it.directory }
+                            ?: state.libraryRoot,
                         host = value.host,
                         port = value.port.toString(),
                         autoConnect = value.autoConnect,
@@ -350,7 +386,42 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 if (firstLoad && value.autoConnect && !autoConnectAttempted) {
                     autoConnectAttempted = true
-                    connect()
+                    connect(visible = cachedLibrary == null)
+                }
+            }
+        }
+        viewModelScope.launch(actionErrors) {
+            // Identity, not equality: listings are replaced wholesale, and a
+            // deep compare of two large trees on every metrics tick is waste.
+            ui.map { it.currentDirectory to it.directoryStack }
+                .distinctUntilChanged { old, new -> old.first === new.first && old.second === new.second }
+                .collectLatest { (directory, stack) ->
+                    val origin = libraryOrigin
+                    if (directory == null || origin == null) return@collectLatest
+                    delay(LIBRARY_CACHE_WRITE_DELAY_MILLIS)
+                    writeLibraryCache(LibrarySnapshot(origin, directory, stack))
+                }
+        }
+    }
+
+    private suspend fun readLibraryCache(origin: String): LibrarySnapshot? =
+        withContext(Dispatchers.IO) {
+            runPlaybackCatching { LibraryCacheCodec.decode(libraryCacheFile.readText()) }.getOrNull()
+        }?.takeIf { it.origin == origin }
+
+    private suspend fun writeLibraryCache(snapshot: LibrarySnapshot) {
+        withContext(Dispatchers.IO) {
+            runPlaybackCatching {
+                val text = LibraryCacheCodec.encode(snapshot)
+                if (text == null) {
+                    libraryCacheFile.delete()
+                } else {
+                    val pending = File(libraryCacheFile.path + ".tmp")
+                    pending.writeText(text)
+                    if (!pending.renameTo(libraryCacheFile)) {
+                        libraryCacheFile.delete()
+                        pending.renameTo(libraryCacheFile)
+                    }
                 }
             }
         }
@@ -767,33 +838,153 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Re-fetches the open server directory in the newly selected order. */
     private fun refreshServerDirectoryForSort() {
-        val state = mutableUi.value
-        val directory = state.currentDirectory ?: return
-        val active = controller ?: return
-        if (state.capabilities?.hasLibrary != true || serverSortParam() == null) return
-        if (state.libraryLoading) return
+        val path = mutableUi.value.currentDirectory?.path ?: return
+        if (mutableUi.value.capabilities?.hasLibrary != true || serverSortParam() == null) return
+        libraryAction("Could not re-sort the library") { active ->
+            val page = active.fetchLibraryPage(path, sort = serverSortParam())
+            if (active !== controller || mutableUi.value.currentDirectory?.path != path) {
+                return@libraryAction
+            }
+            mutableUi.update {
+                it.copy(
+                    currentDirectory = page.directory,
+                    libraryRoot = if (path.isEmpty()) page.directory else it.libraryRoot,
+                    libraryNextCursor = page.nextCursor,
+                    selectedLibraryNode = null,
+                )
+            }
+        }
+    }
+
+    /**
+     * One library request made for a user action. This is where the wait for
+     * a connect that has been running behind the list finally shows: the
+     * action raises the loading overlay, lets the connect finish, and only
+     * then asks the server. The flag is owned here from start to finish so a
+     * controller swapped mid-request cannot leave it set.
+     */
+    private fun libraryAction(
+        failurePrefix: String,
+        request: suspend (RelaySessionController) -> Unit,
+    ) {
+        if (mutableUi.value.libraryLoading) return
         mutableUi.update { it.copy(libraryLoading = true, error = null) }
         viewModelScope.launch(actionErrors) {
-            runPlaybackCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
-                .onSuccess { page ->
-                    if (active !== controller) return@onSuccess
-                    mutableUi.update {
-                        it.copy(
-                            currentDirectory = page.directory,
-                            libraryRoot = if (directory.path.isEmpty()) page.directory else it.libraryRoot,
-                            libraryNextCursor = page.nextCursor,
-                            libraryLoading = false,
-                            selectedLibraryNode = null,
-                        )
-                    }
+            try {
+                // A failed connect has already said why.
+                val active = connectionForAction() ?: return@launch
+                runPlaybackCatching { request(active) }.onFailure { error ->
+                    if (active === controller) reportLibraryError("$failurePrefix: ${error.message}")
                 }
-                .onFailure { error ->
-                    if (active === controller) {
-                        mutableUi.update { it.copy(libraryLoading = false) }
-                        reportLibraryError("Could not re-sort the library: ${error.message}")
-                    }
-                }
+            } finally {
+                mutableUi.update { it.copy(libraryLoading = false) }
+            }
         }
+    }
+
+    /**
+     * The live control connection for a user action. Connects that happen on
+     * their own never block the screen, so the action that actually needs the
+     * server is where the wait lands: it lets a connect already in flight
+     * finish, and makes one attempt of its own when there is still nothing to
+     * talk to. Returns null — with the reason in `error` — when the server
+     * cannot be reached.
+     *
+     * Never call this from closingJob or backgroundConnectJob themselves.
+     */
+    private suspend fun connectionForAction(): RelaySessionController? {
+        closingJob?.join()
+        backgroundConnectJob?.join()
+        // The retry loop can sit in a backoff for seconds; one direct attempt
+        // answers the user sooner than waiting it out.
+        browseReconnectJob?.cancelAndJoin()
+        controller?.takeIf { it.state.value == SessionState.BROWSING }?.let { return it }
+        val host = mutableUi.value.host.trim()
+        val port = mutableUi.value.port.toIntOrNull()
+        if (host.isBlank() || port == null || port !in 1..65535) {
+            mutableUi.update { it.copy(error = "Enter a valid host and port.") }
+            return null
+        }
+        connectInternal(host, port, visible = false, resetPlayback = false)
+        return controller?.takeIf { it.state.value == SessionState.BROWSING }
+    }
+
+    /**
+     * Brings the open directory up to date without showing anything: the
+     * listing on screen stays usable and is swapped for the server's current
+     * one when it arrives. Used when the app returns to the foreground with
+     * its connection intact.
+     */
+    private fun refreshLibraryQuietly() {
+        val state = mutableUi.value
+        val directory = state.currentDirectory ?: return
+        val active = controller?.takeIf { it.state.value == SessionState.BROWSING } ?: return
+        if (state.playingPath != null || state.busy || state.libraryLoading) return
+        if (state.capabilities?.hasLibrary != true) return
+        if (quietRefreshJob?.isActive == true || closingJob?.isActive == true ||
+            backgroundConnectJob?.isActive == true || openingJob?.isActive == true
+        ) {
+            return
+        }
+        quietRefreshJob = viewModelScope.launch(actionErrors) {
+            val (fresh, cursor) = runPlaybackCatching {
+                val first = active.fetchLibraryPage(directory.path, sort = serverSortParam())
+                pageInChildren(active, first.directory, first.nextCursor, directory.children.size)
+            }.getOrElse { error ->
+                AppLog.i(TAG, "quiet library refresh failed: ${error.message}")
+                // Usually a socket that died while the tablet slept and has
+                // not been noticed yet; the reconnect refreshes the listing.
+                if (active === controller) {
+                    maybeBrowseReconnect("library refresh failed", connectionKnownDead = true)
+                }
+                return@launch
+            }
+            mutableUi.update { current ->
+                // Only if the user is still looking at the listing this
+                // replaces, and nothing they started is in flight.
+                if (active !== controller || current.currentDirectory !== directory ||
+                    current.libraryLoading || current.busy
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        currentDirectory = fresh,
+                        libraryRoot = if (fresh.path.isEmpty()) fresh else current.libraryRoot,
+                        libraryNextCursor = cursor,
+                        selectedLibraryNode = current.selectedLibraryNode?.takeIf { selected ->
+                            fresh.children.any { it.path == selected.path }
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Pages [directory] forward until it holds at least [wanted] children, so
+     * a refreshed listing is as long as the one it replaces and the scroll
+     * position still exists in it.
+     */
+    private suspend fun pageInChildren(
+        active: RelaySessionController,
+        directory: LibraryNode,
+        cursor: String?,
+        wanted: Int,
+    ): Pair<LibraryNode, String?> {
+        var current = directory
+        var nextCursor = cursor
+        var extraPages = 0
+        while (nextCursor != null && current.children.size < wanted &&
+            extraPages < RESTORE_MAX_EXTRA_PAGES
+        ) {
+            val more = active.fetchLibraryPage(current.path, nextCursor, sort = serverSortParam())
+            current = current.copy(
+                children = (current.children + more.directory.children).distinctBy { it.path },
+            )
+            nextCursor = more.nextCursor
+            extraPages += 1
+        }
+        return current to nextCursor
     }
 
     fun clearRecents() {
@@ -804,63 +995,99 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutableUi.value = mutableUi.value.copy(error = null)
     }
 
-    fun connect() {
+    fun connect() = connect(visible = true)
+
+    /**
+     * [visible] is false only for the cold-start connect behind a cached
+     * listing; a connect the user asked for always shows that it is working.
+     */
+    private fun connect(visible: Boolean) {
         if (mutableUi.value.busy || openingJob?.isActive == true || closingJob?.isActive == true) return
         cleanupFailure = null
-        browseReconnectJob?.cancel()
         pendingFailure = null
-        openingJob = viewModelScope.launch(actionErrors) {
-            val host = mutableUi.value.host.trim()
-            val port = mutableUi.value.port.toIntOrNull()
-            if (host.isBlank() || port == null || port !in 1..65535) {
-                mutableUi.value = mutableUi.value.copy(error = "Enter a valid host and port.")
-                return@launch
-            }
-            connectInternal(host, port)
+        val host = mutableUi.value.host.trim()
+        val port = mutableUi.value.port.toIntOrNull()
+        if (host.isBlank() || port == null || port !in 1..65535) {
+            mutableUi.value = mutableUi.value.copy(error = "Enter a valid host and port.")
+            return
         }
+        if (visible) mutableUi.update { it.copy(busy = true, error = null) }
+        val inFlight = backgroundConnectJob
+        val retrying = browseReconnectJob
+        val job = viewModelScope.launch(actionErrors) {
+            // Two connects must not interleave on one controller slot.
+            retrying?.cancelAndJoin()
+            inFlight?.join()
+            connectInternal(host, port, visible = visible)
+        }
+        if (visible) openingJob = job else backgroundConnectJob = job
     }
 
     /**
-     * Opens a fresh control connection. [quiet] belongs to the automatic
-     * reconnect loops: a failed attempt there is not news the user needs, so
-     * the banner stays empty until the loop itself gives up.
+     * Opens a fresh control connection.
+     *
+     * When the library on screen already belongs to this server it stays
+     * there, usable, for the whole connect, and is replaced in one step by
+     * the server's current listing of the same directory — so a reconnect
+     * never empties the screen. Only a different server starts from nothing.
+     *
+     * [quiet] belongs to the automatic reconnect loops: a failed attempt
+     * there is not news the user needs, so the banner stays untouched until
+     * the loop itself gives up. [visible] raises the shell's loading overlay
+     * and is for connects the user asked for. [resetPlayback] is off for
+     * callers that manage the player fields themselves, because a file may
+     * already be opening on top of a connect that runs in the background.
      */
-    private suspend fun connectInternal(host: String, port: Int, quiet: Boolean = false) {
+    private suspend fun connectInternal(
+        host: String,
+        port: Int,
+        quiet: Boolean = false,
+        visible: Boolean = true,
+        resetPlayback: Boolean = true,
+    ) {
         playerReady.await()
         cleanupFailure?.let { throw it }
-        mutableUi.update { it.copy(busy = true) }
-        // Remember the directory that was open (exiting a video and manual
-        // reconnects both come through here) so it can be re-opened on the
-        // fresh connection instead of dumping the user at the library root.
-        // With no in-session directory (first connect after an app restart)
-        // the persisted last-browsed path takes its place.
-        val previousDirectoryPath = (mutableUi.value.currentDirectory?.path ?: persistedLibraryPath)
-            .takeIf { it.isNotEmpty() }
+        val origin = "$host:$port"
+        if (visible) mutableUi.update { it.copy(busy = true) }
         // OkHttp's WebSocket close path may touch the socket synchronously.
         // Retrying therefore must not dispose the previous controller on the
         // Android main thread.
         withContext(Dispatchers.IO) { disposeController() }
-        mutableUi.value = mutableUi.value.copy(
-            busy = true,
+        val shown = mutableUi.value.currentDirectory
+        val keepLibrary = shown != null && libraryOrigin == origin
+        // The directory to re-open on the fresh connection (exiting a video
+        // and reconnects both come through here). With nothing on screen
+        // (first connect after an app restart) the persisted last-browsed
+        // path takes its place.
+        val previousDirectoryPath = shown?.path ?: persistedLibraryPath
+        mutableUi.update { state ->
             // A user-initiated connect clears the banner; a quiet retry leaves
             // it, since the message on screen may be one no reconnect answers.
-            error = if (quiet) mutableUi.value.error else null,
-            endpoint = null,
-            session = null,
-            playingPath = null,
-            paused = false,
-            seeking = false,
-            seekPreviewSeconds = null,
-            seekTargetSeconds = null,
-            currentDirectory = null,
-            capabilities = null,
-            libraryRoot = null,
-            libraryNextCursor = null,
-            libraryLoading = false,
-            directoryCursorStack = emptyList(),
-            selectedLibraryNode = null,
-        )
-        AppLog.i(TAG, "connect $host:$port display=${mutableUi.value.display.width}x${mutableUi.value.display.height}")
+            var next = state.copy(error = if (quiet) state.error else null)
+            if (resetPlayback) {
+                next = next.copy(
+                    endpoint = null,
+                    session = null,
+                    playingPath = null,
+                    paused = false,
+                    seeking = false,
+                    seekPreviewSeconds = null,
+                    seekTargetSeconds = null,
+                )
+            }
+            if (!keepLibrary) {
+                next = next.copy(
+                    currentDirectory = null,
+                    capabilities = null,
+                    libraryRoot = null,
+                    libraryNextCursor = null,
+                    directoryCursorStack = emptyList(),
+                    selectedLibraryNode = null,
+                )
+            }
+            next
+        }
+        AppLog.i(TAG, "connect $host:$port display=${mutableUi.value.display.width}x${mutableUi.value.display.height} keepLibrary=$keepLibrary")
         val next = RelaySessionController(host, port, attachmentCacheRoot)
         controller = next
         collectController(next)
@@ -868,66 +1095,97 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             LibrarySort.NAME -> "name"
             LibrarySort.DATE -> "mtime"
         }
-        runPlaybackCatching { next.connect(mutableUi.value.display, rootSort) }
-            .onSuccess { connected ->
-                AppLog.i(
-                    TAG,
-                    "server auxiliary capabilities muxed=${connected.capabilities.muxedAuxTracks} " +
-                        "attachmentCache=${connected.capabilities.attachmentCacheVersion}",
-                )
-                val selectedModel = mutableUi.value.selectedModel.takeIf { selected ->
-                    connected.capabilities.models.any { it.name == selected }
-                } ?: connected.capabilities.phaseOneModel
-                val androidQualities = connected.capabilities.qualityOptions
-                    .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
-                val selectedQuality = mutableUi.value.qualityTier.takeIf { selected ->
-                    androidQualities.any { it.id == selected }
-                } ?: androidQualities.firstOrNull()?.id ?: "lossless-hevc"
-                mutableUi.value = mutableUi.value.copy(
-                    busy = false,
-                    capabilities = connected.capabilities,
-                    libraryRoot = connected.root,
-                    currentDirectory = connected.root,
-                    directoryStack = emptyList(),
-                    directoryCursorStack = emptyList(),
-                    libraryNextCursor = connected.nextCursor,
-                    libraryLoading = false,
-                    selectedLibraryNode = null,
-                    selectedModel = selectedModel,
-                    qualityTier = selectedQuality,
-                )
-                persist {
-                    preferences.setModel(selectedModel)
-                    preferences.setQualityTier(selectedQuality)
+        try {
+            runPlaybackCatching { next.connect(mutableUi.value.display, rootSort) }
+                .onSuccess { connected ->
+                    AppLog.i(
+                        TAG,
+                        "server auxiliary capabilities muxed=${connected.capabilities.muxedAuxTracks} " +
+                            "attachmentCache=${connected.capabilities.attachmentCacheVersion}",
+                    )
+                    val selectedModel = mutableUi.value.selectedModel.takeIf { selected ->
+                        connected.capabilities.models.any { it.name == selected }
+                    } ?: connected.capabilities.phaseOneModel
+                    val androidQualities = connected.capabilities.qualityOptions
+                        .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
+                    val selectedQuality = mutableUi.value.qualityTier.takeIf { selected ->
+                        androidQualities.any { it.id == selected }
+                    } ?: androidQualities.firstOrNull()?.id ?: "lossless-hevc"
+                    // Capabilities first: the restore below sorts by what the
+                    // server advertises.
+                    mutableUi.update {
+                        it.copy(
+                            capabilities = connected.capabilities,
+                            selectedModel = selectedModel,
+                            qualityTier = selectedQuality,
+                        )
+                    }
+                    persist {
+                        preferences.setModel(selectedModel)
+                        preferences.setQualityTier(selectedQuality)
+                    }
+                    val rootView =
+                        RestoredLibrary(connected.root, emptyList(), emptyList(), connected.nextCursor)
+                    val restored = if (connected.capabilities.hasLibrary) {
+                        restoreServerDirectory(
+                            active = next,
+                            root = rootView,
+                            path = previousDirectoryPath,
+                            // At least as long as the listing it replaces.
+                            minimumChildren = if (keepLibrary) shown?.children?.size ?: 0 else 0,
+                        ) ?: rootView
+                    } else {
+                        rootView
+                    }
+                    if (next === controller) {
+                        libraryOrigin = origin
+                        mutableUi.update { state ->
+                            // "Up" stays usable behind a background connect.
+                            val view = if (keepLibrary) {
+                                restored.truncatedTo(state.currentDirectory?.path ?: previousDirectoryPath)
+                            } else {
+                                restored
+                            }
+                            state.copy(
+                                libraryRoot = view.stack.firstOrNull() ?: view.directory,
+                                currentDirectory = view.directory,
+                                directoryStack = view.stack,
+                                directoryCursorStack = view.cursorStack,
+                                libraryNextCursor = view.nextCursor,
+                                selectedLibraryNode = state.selectedLibraryNode?.takeIf { selected ->
+                                    keepLibrary && view.directory.children.any { it.path == selected.path }
+                                },
+                            )
+                        }
+                        pendingFailure = null
+                    }
                 }
-                if (previousDirectoryPath != null && connected.capabilities.hasLibrary) {
-                    mutableUi.update { it.copy(libraryLoading = true) }
-                    restoreServerDirectory(next, previousDirectoryPath)
-                    mutableUi.update { it.copy(libraryLoading = false) }
+                .onFailure { error ->
+                    mutableUi.update { it.copy(error = if (quiet) it.error else error.message) }
                 }
-                pendingFailure = null
-            }
-            .onFailure { error ->
-                mutableUi.value = mutableUi.value.copy(
-                    busy = false,
-                    error = if (quiet) null else error.message,
-                )
-            }
+        } finally {
+            if (visible) mutableUi.update { it.copy(busy = false) }
+        }
     }
 
     /**
-     * Re-opens the directory that was open before a reconnect, walking each
-     * path segment against the fresh library so the Up chain gets current
-     * listings. Any failed segment (the layout changed on the server) leaves
-     * the root listing shown — the pre-restore default.
+     * Re-opens [path] on a fresh connection, walking each path segment against
+     * the current library so the Up chain gets current listings. Returns null
+     * when any segment fails (the layout changed on the server); the caller
+     * shows the root listing instead.
      */
-    private suspend fun restoreServerDirectory(active: RelaySessionController, path: String) {
-        val restored = runPlaybackCatching {
-            var parent = mutableUi.value.currentDirectory ?: return
-            var parentCursor = mutableUi.value.libraryNextCursor
-            val stack = mutableListOf<LibraryNode>()
-            val cursors = mutableListOf<String?>()
-            var currentPath = ""
+    private suspend fun restoreServerDirectory(
+        active: RelaySessionController,
+        root: RestoredLibrary,
+        path: String,
+        minimumChildren: Int,
+    ): RestoredLibrary? = runPlaybackCatching {
+        var parent = root.directory
+        var parentCursor = root.nextCursor
+        val stack = mutableListOf<LibraryNode>()
+        val cursors = mutableListOf<String?>()
+        var currentPath = ""
+        if (path.isNotEmpty()) {
             for (segment in path.split('/')) {
                 currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
                 val page = active.fetchLibraryPage(currentPath, sort = serverSortParam())
@@ -936,99 +1194,60 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 parent = page.directory
                 parentCursor = page.nextCursor
             }
-            // Page in enough children that the remembered scroll position
-            // exists again; LazyListState clamps if the list still ends up
-            // shorter than before.
-            val savedIndex = savedListScroll("server:$path").first
-            var extraPages = 0
-            while (parentCursor != null &&
-                parent.children.size <= savedIndex &&
-                extraPages < RESTORE_MAX_EXTRA_PAGES
-            ) {
-                val more = active.fetchLibraryPage(path, parentCursor, sort = serverSortParam())
-                parent = parent.copy(
-                    children = (parent.children + more.directory.children).distinctBy { it.path },
-                )
-                parentCursor = more.nextCursor
-                extraPages += 1
-            }
-            Triple(parent, stack.toList(), cursors.toList() to parentCursor)
-        }.getOrElse { error ->
-            AppLog.i(TAG, "library restore of '$path' fell back to root: ${error.message}")
-            return
         }
-        if (active !== controller) return
-        val (directory, stack, cursorInfo) = restored
-        mutableUi.update {
-            it.copy(
-                currentDirectory = directory,
-                directoryStack = stack,
-                directoryCursorStack = cursorInfo.first,
-                libraryNextCursor = cursorInfo.second,
-                selectedLibraryNode = null,
-            )
-        }
+        // Page in enough children that the remembered scroll position exists
+        // again; LazyListState clamps if the list still ends up shorter than
+        // before.
+        val wanted = maxOf(savedListScroll("server:$path").first + 1, minimumChildren)
+        val (directory, cursor) = pageInChildren(active, parent, parentCursor, wanted)
+        RestoredLibrary(directory, stack.toList(), cursors.toList(), cursor)
+    }.getOrElse { error ->
+        AppLog.i(TAG, "library restore of '$path' fell back to root: ${error.message}")
+        null
     }
 
     fun openDirectory(directory: LibraryNode) {
         if (directory.type != LibraryNode.Type.DIRECTORY) return
-        val state = mutableUi.value
-        val current = state.currentDirectory ?: return
-        if (state.libraryLoading) return
-        val active = controller ?: return
-        mutableUi.value = state.copy(libraryLoading = true, error = null)
-        viewModelScope.launch(actionErrors) {
-            runPlaybackCatching { active.fetchLibraryPage(directory.path, sort = serverSortParam()) }
-                .onSuccess { page ->
-                    if (active !== controller) return@onSuccess
-                    mutableUi.value = mutableUi.value.copy(
-                        currentDirectory = page.directory,
-                        directoryStack = state.directoryStack + current,
-                        directoryCursorStack = state.directoryCursorStack + state.libraryNextCursor,
-                        libraryNextCursor = page.nextCursor,
-                        libraryLoading = false,
-                        selectedLibraryNode = null,
-                    )
-                    persist { preferences.setLastLibraryPath(page.directory.path) }
-                }
-                .onFailure { error ->
-                    if (active === controller) {
-                        mutableUi.value = mutableUi.value.copy(libraryLoading = false)
-                        reportLibraryError("Could not load ${directory.name}: ${error.message}")
-                    }
-                }
+        if (mutableUi.value.currentDirectory == null) return
+        libraryAction("Could not load ${directory.name}") { active ->
+            val page = active.fetchLibraryPage(directory.path, sort = serverSortParam())
+            if (active !== controller) return@libraryAction
+            // Read here, not before the request: a connect that finished
+            // first has replaced the listing this was tapped in.
+            val state = mutableUi.value
+            val current = state.currentDirectory ?: return@libraryAction
+            mutableUi.value = state.copy(
+                currentDirectory = page.directory,
+                directoryStack = state.directoryStack + current,
+                directoryCursorStack = state.directoryCursorStack + state.libraryNextCursor,
+                libraryNextCursor = page.nextCursor,
+                selectedLibraryNode = null,
+            )
+            persist { preferences.setLastLibraryPath(page.directory.path) }
         }
     }
 
     fun loadMoreLibrary() {
-        val state = mutableUi.value
-        val cursor = state.libraryNextCursor ?: return
-        val directory = state.currentDirectory ?: return
-        if (state.libraryLoading) return
-        val active = controller ?: return
-        mutableUi.value = state.copy(libraryLoading = true, error = null)
-        viewModelScope.launch(actionErrors) {
-            runPlaybackCatching { active.fetchLibraryPage(directory.path, cursor, sort = serverSortParam()) }
-                .onSuccess { page ->
-                    if (active !== controller || mutableUi.value.currentDirectory?.path != directory.path) {
-                        return@onSuccess
-                    }
-                    val merged = directory.copy(
-                        children = (directory.children + page.directory.children).distinctBy { it.path },
-                    )
-                    mutableUi.value = mutableUi.value.copy(
-                        currentDirectory = merged,
-                        libraryRoot = if (directory.path.isEmpty()) merged else mutableUi.value.libraryRoot,
-                        libraryNextCursor = page.nextCursor,
-                        libraryLoading = false,
-                    )
-                }
-                .onFailure { error ->
-                    if (active === controller) {
-                        mutableUi.value = mutableUi.value.copy(libraryLoading = false)
-                        reportLibraryError("Could not load more files: ${error.message}")
-                    }
-                }
+        if (mutableUi.value.libraryNextCursor == null) return
+        val path = mutableUi.value.currentDirectory?.path ?: return
+        libraryAction("Could not load more files") { active ->
+            val state = mutableUi.value
+            val directory = state.currentDirectory?.takeIf { it.path == path } ?: return@libraryAction
+            val cursor = state.libraryNextCursor ?: return@libraryAction
+            val page = active.fetchLibraryPage(directory.path, cursor, sort = serverSortParam())
+            if (active !== controller || mutableUi.value.currentDirectory !== directory) {
+                return@libraryAction
+            }
+            val merged = directory.copy(
+                children = (directory.children + page.directory.children).distinctBy { it.path },
+            )
+            mutableUi.update {
+                it.copy(
+                    currentDirectory = merged,
+                    libraryRoot = if (directory.path.isEmpty()) merged else it.libraryRoot,
+                    libraryNextCursor = page.nextCursor,
+                )
+            }
         }
     }
 
@@ -1065,17 +1284,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openRecent(path: String) {
-        val connected = mutableUi.value.currentDirectory != null &&
-            mutableUi.value.capabilities?.hasLibrary == true
-        if (connected && path.isNotBlank()) openFile(LibraryNode(
+        // No connection needed up front: opening a file connects on demand.
+        if (path.isNotBlank()) openFile(LibraryNode(
             type = LibraryNode.Type.FILE,
             name = path.substringAfterLast('/'),
             path = path,
         ))
-        else mutableUi.value = mutableUi.value.copy(
-            destination = TabletDestination.SERVER,
-            error = "Reconnect to the server to open this recent item.",
-        )
     }
 
     fun openRecentLocal(uri: String) = openLocalDocument(uri)
@@ -1174,19 +1388,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun openLocalDocument(uriValue: String) {
         if (mutableUi.value.busy) return
         openingJob = viewModelScope.launch(actionErrors) {
-            if (controller?.state?.value != SessionState.BROWSING) {
-                val host = mutableUi.value.host.trim()
-                val port = mutableUi.value.port.toIntOrNull()
-                if (host.isBlank() || port == null || port !in 1..65535) {
-                    mutableUi.value = mutableUi.value.copy(error = "Enter a valid server host and port.")
-                    return@launch
-                }
-                connectInternal(host, port)
-            }
-            val currentController = controller
-            if (currentController?.state?.value != SessionState.BROWSING ||
-                mutableUi.value.capabilities == null
-            ) {
+            mutableUi.update { it.copy(busy = true, error = null) }
+            val currentController = connectionForAction()
+            if (currentController == null || mutableUi.value.capabilities == null) {
                 mutableUi.value = mutableUi.value.copy(
                     busy = false,
                     error = mutableUi.value.error ?: "Unable to connect to the upscale server.",
@@ -1298,8 +1502,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 seekPreviewSeconds = null,
                 seekTargetSeconds = null,
             )
-            val currentController = requireNotNull(controller)
             runPlaybackCatching {
+                // The player is already up with its "Preparing" overlay, so a
+                // connect still running behind the library is waited out
+                // there.
+                val currentController = checkNotNull(connectionForAction()) {
+                    mutableUi.value.error ?: "Unable to connect to the upscale server."
+                }
                 // Setting playingPath asks the Activity to enter sensor
                 // landscape. Wait for the recreated Compose surface to report
                 // its real pixels before negotiating the server output size.
@@ -1315,9 +1524,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     fitMode = landscape.fitMode,
                     resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
                 )
-                applyResumePoint(currentController, endpoint, "server:${file.path}")
+                applyResumePoint(currentController, endpoint, "server:${file.path}") to
+                    currentController
             }
-                .onSuccess { endpoint ->
+                .onSuccess { (endpoint, currentController) ->
                     AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
                     activeOrigin = PlaybackOrigin.ServerFile(file.path)
                     warningDismissed = false
@@ -1511,13 +1721,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closePlayback() {
         AppLog.i(TAG, "close playback at %.1fs".format(mutableUi.value.mpvMetrics.positionSeconds))
-        if (closingJob?.isActive == true) return
+        val closing = closingJob
+        // Nothing left to close: this is a second back press on the same exit.
+        if (closing?.isActive == true && mutableUi.value.playingPath == null) return
         closingJob = viewModelScope.launch(actionErrors) {
+            // The library the user came from is still in memory, so it is
+            // back on screen at once; tearing the session down and opening a
+            // fresh control connection happen behind it.
+            mutableUi.update { it.copy(endpoint = null, playingPath = null) }
             openingJob?.cancelAndJoin()
             openingJob = null
-            val host = mutableUi.value.host
+            closing?.join()
+            backgroundConnectJob?.cancelAndJoin()
+            val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
-            mutableUi.value = mutableUi.value.copy(busy = true, endpoint = null, playingPath = null)
             activeOrigin = null
             reconnectExhausted = false
             pendingFailure = null
@@ -1532,6 +1749,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             seekJob = null
             metricsJob?.cancelAndJoin()
             metricsJob = null
+            // Stop listening first: stopping mpv resets the session's sockets,
+            // and that is the teardown working, not a failure to recover from
+            // or report over the library.
+            controllerCollectors?.cancelAndJoin()
+            controllerCollectors = null
             stopPlayerForDisposal()
             stopSystemMediaIntegration()
             subtitlePreferenceAppliedSession = null
@@ -1542,13 +1764,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 localDocumentServer = null
                 localDocumentUri = null
             }
-            mutableUi.value = mutableUi.value.copy(
-                localPlayback = false,
-                directLocalFallback = false,
-                reconnecting = null,
-                performanceWarning = null,
-            )
-            connectInternal(host, port)
+            mutableUi.update {
+                it.copy(
+                    busy = false,
+                    session = null,
+                    paused = false,
+                    seeking = false,
+                    seekPreviewSeconds = null,
+                    seekTargetSeconds = null,
+                    localPlayback = false,
+                    directLocalFallback = false,
+                    reconnecting = null,
+                    performanceWarning = null,
+                )
+            }
+            connectInternal(host, port, visible = false, resetPlayback = false)
         }
     }
 
@@ -1615,16 +1845,27 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) { localDocumentServer?.close() }
             localDocumentServer = null
             localDocumentUri = null
-            mutableUi.value = mutableUi.value.copy(endpoint = null, playingPath = null, error = null)
-            mutableUi.value = mutableUi.value.copy(
-                localPlayback = false,
-                directLocalFallback = false,
-                reconnecting = null,
-                performanceWarning = null,
-            )
+            mutableUi.update {
+                it.copy(
+                    busy = false,
+                    endpoint = null,
+                    session = null,
+                    playingPath = null,
+                    error = null,
+                    paused = false,
+                    seeking = false,
+                    seekPreviewSeconds = null,
+                    seekTargetSeconds = null,
+                    localPlayback = false,
+                    directLocalFallback = false,
+                    reconnecting = null,
+                    performanceWarning = null,
+                )
+            }
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
-            connectInternal(host, port)
+            // Back to the library, which is still in memory: connect behind it.
+            connectInternal(host, port, visible = false, resetPlayback = false)
         }
     }
 
@@ -1830,37 +2071,32 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         browseReconnectJob = viewModelScope.launch(actionErrors) {
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
+            // A connect already running behind the library may be about to
+            // make this unnecessary; two must never interleave either way.
+            closingJob?.join()
+            backgroundConnectJob?.join()
+            if (controller?.state?.value == SessionState.BROWSING) return@launch
             repeat(BROWSE_RECONNECT_ATTEMPTS) { attempt ->
-                // Never clears `error`: quiet attempts set none, so anything
-                // showing belongs to someone else (a server rejection the
-                // reconnect cannot answer) and must survive.
-                mutableUi.update {
-                    it.copy(
-                        reconnecting = ReconnectStatus(
-                            attempt = attempt + 1,
-                            maxAttempts = BROWSE_RECONNECT_ATTEMPTS,
-                            reason = "Reconnecting to the server",
-                        ),
-                    )
-                }
+                // Nothing is shown while this runs: the library stays on
+                // screen and usable, and an action that needs the server takes
+                // over through connectionForAction. `error` is never cleared
+                // either — quiet attempts set none, so anything showing belongs
+                // to someone else (a server rejection the reconnect cannot
+                // answer) and must survive.
                 // Give Wi-Fi a moment to come back after wake; later attempts
                 // back off but return early once a network appears.
                 awaitRetryWindow(if (attempt == 0) 750L else attempt * 3_000L)
-                if (mutableUi.value.busy || mutableUi.value.playingPath != null) {
-                    mutableUi.update { it.copy(reconnecting = null) }
-                    return@launch
-                }
-                runPlaybackCatching { connectInternal(host, port, quiet = true) }
+                if (mutableUi.value.busy || mutableUi.value.playingPath != null) return@launch
+                runPlaybackCatching { connectInternal(host, port, quiet = true, visible = false) }
                 if (cleanupFailure != null || controller?.failure?.value?.kind?.recoverable == false) {
                     pendingFailure = null
                     val message = cleanupFailure?.message ?: controller?.failure?.value?.let(::failureMessage)
-                    mutableUi.update { it.copy(reconnecting = null, busy = false, error = message) }
+                    mutableUi.update { it.copy(error = message) }
                     return@launch
                 }
                 if (controller?.state?.value == SessionState.BROWSING) {
                     AppLog.i(TAG, "browse reconnect succeeded on attempt ${attempt + 1}")
                     pendingFailure = null
-                    mutableUi.update { it.copy(reconnecting = null) }
                     return@launch
                 }
             }
@@ -1870,10 +2106,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val message = pendingFailure?.let(::failureMessage)
             pendingFailure = null
             mutableUi.update {
-                it.copy(
-                    reconnecting = null,
-                    error = it.error ?: message ?: "Could not reach the server at $host:$port.",
-                )
+                it.copy(error = it.error ?: message ?: "Could not reach the server at $host:$port.")
             }
         }
         return ownsMessage
@@ -2769,6 +3002,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val AUTO_ADVANCE_MAX_PAGES = 20
         private const val RESTORE_MAX_EXTRA_PAGES = 10
         private const val BROWSE_RECONNECT_ATTEMPTS = 3
+        private const val LIBRARY_CACHE_WRITE_DELAY_MILLIS = 500L
     }
 
     private fun persist(block: suspend () -> Unit) {
