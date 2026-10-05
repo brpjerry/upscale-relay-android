@@ -335,7 +335,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 val firstLoad = !mutableUi.value.preferencesLoaded
                 // Read before the first frame is drawn, so the list the user
                 // left is what the app opens on rather than a connect screen.
-                val cachedLibrary = if (firstLoad && value.autoConnect) {
+                val cachedLibrary = if (firstLoad) {
                     readLibraryCache("${value.host.trim()}:${value.port}")
                 } else {
                     null
@@ -351,7 +351,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             ?: state.libraryRoot,
                         host = value.host,
                         port = value.port.toString(),
-                        autoConnect = value.autoConnect,
                         autoPlayNext = value.autoPlayNext,
                         selectedModel = value.model,
                         qualityTier = value.qualityTier,
@@ -392,9 +391,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     interpolation = value.interpolationEnabled,
                     scaler = value.interpolationScaler,
                 )
-                if (firstLoad && value.autoConnect && !autoConnectAttempted) {
+                if (firstLoad && !autoConnectAttempted) {
                     autoConnectAttempted = true
-                    connect(visible = cachedLibrary == null)
+                    // Opening the app is asking for the library: connect
+                    // without being told to, and without a word if the
+                    // server is not there — the Connect button says so when
+                    // it is pressed.
+                    connect(visible = false)
                 }
             }
         }
@@ -534,11 +537,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             interpolation = state.interpolationEnabled,
             scaler = state.interpolationScaler,
         )
-    }
-
-    fun setAutoConnect(value: Boolean) {
-        mutableUi.value = mutableUi.value.copy(autoConnect = value)
-        persist { preferences.setAutoConnect(value) }
     }
 
     fun setAutoPlayNext(value: Boolean) {
@@ -1003,8 +1001,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun connect() = connect(visible = true)
 
     /**
-     * [visible] is false only for the cold-start connect behind a cached
-     * listing; a connect the user asked for always shows that it is working.
+     * [visible] is false only for the connect the app makes when it opens,
+     * behind the cached listing or the connect panel; a connect the user
+     * asked for always shows that it is working.
      */
     private fun connect(visible: Boolean) {
         if (mutableUi.value.busy || openingJob?.isActive == true || closingJob?.isActive == true) return
@@ -1013,7 +1012,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val host = mutableUi.value.host.trim()
         val port = mutableUi.value.port.toIntOrNull()
         if (host.isBlank() || port == null || port !in 1..65535) {
-            mutableUi.value = mutableUi.value.copy(error = "Enter a valid host and port.")
+            if (visible) mutableUi.value = mutableUi.value.copy(error = "Enter a valid host and port.")
             return
         }
         if (visible) mutableUi.update { it.copy(busy = true, error = null) }
@@ -2082,9 +2081,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableUi.value
         if (!state.preferencesLoaded || cleanupFailure != null) return false
         if (state.playingPath != null || state.busy || !appInForeground) return false
-        // Only a server this session has already shown a library from; a
-        // first connect is the user's to start.
-        if (libraryOrigin == null) return false
         // On wake the UI state is the only signal; a failure event is proof
         // by itself.
         if (!connectionKnownDead &&
@@ -3058,7 +3054,6 @@ data class RelayUiState(
     val destination: TabletDestination = TabletDestination.SERVER,
     val selectedLibraryNode: LibraryNode? = null,
     val selectedModel: String = "",
-    val autoConnect: Boolean = false,
     val subtitlesEnabled: Boolean = true,
     val preferredSubtitle: String = "",
     val diagnosticsVisible: Boolean = false,

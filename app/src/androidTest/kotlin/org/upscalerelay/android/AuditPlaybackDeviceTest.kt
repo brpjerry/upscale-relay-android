@@ -90,7 +90,6 @@ class AuditPlaybackDeviceTest {
             onMain {
                 model.setHost(arguments.getString("auditHost") ?: "192.168.0.115")
                 model.setPort(arguments.getString("auditPort") ?: "8590")
-                model.setAutoConnect(false)
                 model.setAutoPlayNext(false)
                 model.setModel("passthrough")
                 model.setQualityTier("hevc-qp18")

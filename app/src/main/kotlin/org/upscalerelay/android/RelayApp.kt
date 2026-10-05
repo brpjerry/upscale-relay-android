@@ -112,6 +112,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -994,6 +995,13 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
 
 @Composable
 private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) {
+    // A server can publish twenty or more models; listed inline they pushed
+    // every other setting off the screen, so they get a page of their own.
+    var modelPageOpen by rememberSaveable { mutableStateOf(false) }
+    if (modelPageOpen) {
+        ModelSettingsPage(viewModel, state) { modelPageOpen = false }
+        return
+    }
     Column(Modifier.fillMaxSize().padding(contentPadding()).imePadding()) {
         DestinationHeader("Settings", "Tablet and relay preferences")
         Spacer(Modifier.height(20.dp))
@@ -1017,7 +1025,6 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                         )
                         Button(onClick = viewModel::connect, enabled = !state.busy) { Text("Connect") }
                     }
-                    SettingToggle("Connect automatically", state.autoConnect, viewModel::setAutoConnect)
                     if (state.discoveredServers.isNotEmpty()) {
                         Text("Discovered servers", style = MaterialTheme.typography.labelLarge)
                         state.discoveredServers.forEach { server ->
@@ -1045,8 +1052,20 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
             item {
                 SettingsSection("Playback defaults") {
                     Text("Model", style = MaterialTheme.typography.labelLarge)
-                    state.capabilities?.models.orEmpty().forEach { model ->
-                        RadioSetting(model.name, state.selectedModel == model.name) { viewModel.setModel(model.name) }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { modelPageOpen = true }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            state.selectedModel.ifEmpty { "Server default" },
+                            Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text("Change", color = MaterialTheme.colorScheme.primary)
                     }
                     Text("Quality", style = MaterialTheme.typography.labelLarge)
                     state.capabilities?.qualityOptions.orEmpty()
@@ -1247,6 +1266,58 @@ private fun VideoSyncPreferenceControls(viewModel: RelayViewModel, state: RelayU
                 RadioSetting(scaler, state.interpolationScaler == scaler) {
                     viewModel.setInterpolationScaler(scaler)
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The default upscaling model, on a page of its own inside Settings. Opens
+ * scrolled to the current choice; Back (system or the arrow) returns to the
+ * settings list.
+ */
+@Composable
+private fun ModelSettingsPage(viewModel: RelayViewModel, state: RelayUiState, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val models = state.capabilities?.models.orEmpty()
+    val listState = rememberLazyListState()
+    // Once per list: re-running it on every selection would yank the list
+    // back to the top of the row the user just tapped. Keyed on the list
+    // being there at all, because the page can open before the connect that
+    // delivers it has finished.
+    LaunchedEffect(models.isNotEmpty()) {
+        val index = models.indexOfFirst { it.name == state.selectedModel }
+        if (index > 0) listState.scrollToItem(index)
+    }
+    Column(Modifier.fillMaxSize().padding(contentPadding())) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to settings")
+            }
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text("Model", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "Used for the next video you start",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        if (models.isEmpty()) {
+            PlaceholderCard("The model list comes from the server and appears once it is connected.")
+        } else {
+            LazyColumn(state = listState) {
+                items(models, key = { it.name }) { model ->
+                    RadioSetting(
+                        label = model.name,
+                        selected = state.selectedModel == model.name,
+                        supporting = model.scaleFactor?.let { "×$it" },
+                    ) {
+                        viewModel.setModel(model.name)
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
             }
         }
     }

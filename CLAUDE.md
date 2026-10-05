@@ -167,7 +167,7 @@ release.yml` builds and publishes the signed APK with those notes.
   (or run through `libraryAction`), never from the `controller` field
   directly: that is what waits out the connect in flight.
 - **Reconnects are made on demand, never on a timer, and there is no setting
-  for them.** No retry loops, attempt counters or backoff. A connection is
+  for them — nor for connecting at launch, which always happens, quietly.** No retry loops, attempt counters or backoff. A connection is
   re-made when something makes it worth trying: the user needs the server
   (`connectionForAction`, which may retry a failed request once on a fresh
   connection), a live connection was seen to die, the app came to the
