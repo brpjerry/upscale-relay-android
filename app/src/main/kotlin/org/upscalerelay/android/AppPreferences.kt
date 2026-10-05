@@ -19,8 +19,6 @@ private val Context.phaseThreeDataStore by preferencesDataStore(name = "phase_th
 data class AppPreferences(
     val host: String = "192.168.0.115",
     val port: Int = 8590,
-    val autoConnect: Boolean = false,
-    val autoResume: Boolean = true,
     val autoPlayNext: Boolean = true,
     val model: String = "",
     val qualityTier: String = "lossless-hevc",
@@ -70,8 +68,6 @@ class AppPreferencesStore(context: Context) {
 
     suspend fun setHost(value: String) = set(Keys.HOST, value)
     suspend fun setPort(value: Int) = set(Keys.PORT, value)
-    suspend fun setAutoConnect(value: Boolean) = set(Keys.AUTO_CONNECT, value)
-    suspend fun setAutoResume(value: Boolean) = set(Keys.AUTO_RESUME, value)
     suspend fun setAutoPlayNext(value: Boolean) = set(Keys.AUTO_PLAY_NEXT, value)
     suspend fun setModel(value: String) = set(Keys.MODEL, value)
     suspend fun setQualityTier(value: String) = set(Keys.QUALITY_TIER, value)
@@ -107,8 +103,6 @@ class AppPreferencesStore(context: Context) {
         dataStore.edit { preferences ->
             preferences[Keys.HOST] = value.host
             preferences[Keys.PORT] = value.port
-            preferences[Keys.AUTO_CONNECT] = value.autoConnect
-            preferences[Keys.AUTO_RESUME] = value.autoResume
             preferences[Keys.AUTO_PLAY_NEXT] = value.autoPlayNext
             preferences[Keys.MODEL] = value.model
             preferences[Keys.QUALITY_TIER] = value.qualityTier
@@ -202,8 +196,6 @@ class AppPreferencesStore(context: Context) {
     private fun decode(preferences: Preferences) = AppPreferences(
         host = preferences[Keys.HOST] ?: "192.168.0.115",
         port = preferences[Keys.PORT] ?: 8590,
-        autoConnect = preferences[Keys.AUTO_CONNECT] ?: false,
-        autoResume = preferences[Keys.AUTO_RESUME] ?: true,
         autoPlayNext = preferences[Keys.AUTO_PLAY_NEXT] ?: true,
         model = preferences[Keys.MODEL].orEmpty(),
         qualityTier = when (val tier = preferences[Keys.QUALITY_TIER] ?: "lossless-hevc") {
@@ -240,8 +232,6 @@ class AppPreferencesStore(context: Context) {
     private object Keys {
         val HOST = stringPreferencesKey("host")
         val PORT = intPreferencesKey("port")
-        val AUTO_CONNECT = booleanPreferencesKey("auto_connect")
-        val AUTO_RESUME = booleanPreferencesKey("auto_resume")
         val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
         val MODEL = stringPreferencesKey("model")
         val QUALITY_TIER = stringPreferencesKey("quality_tier")

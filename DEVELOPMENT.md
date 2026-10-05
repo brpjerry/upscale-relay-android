@@ -92,8 +92,9 @@ Ultra:
 - Bad handshakes, future epochs, oversized payloads, truncated framing,
   initial-media timeout, loopback accept timeout, and lost control/media
   sockets are classified (network-lost, connect-timeout, server-closed,
-  media-stalled, server-rejected, unsupported); transient kinds feed the
-  automatic reconnect/resume loop, terminal ones surface the failure card.
+  media-stalled, server-rejected, unsupported); transient kinds are
+  reconnected on demand (see `CLAUDE.md`), terminal ones surface the
+  failure card.
 - Android may prefer IPv6 for its generic loopback address, so the per-load
   listener binds explicitly to `127.0.0.1`, matching the URL supplied to
   mpv.

@@ -18,7 +18,7 @@ acceptance gates, seek-latency history), and `docs/ANDROID_DEVICE_NOTES.md`
 - `relay-protocol/` — framing, handshake, JSON messages, golden fixtures
   shared with the Python server.
 - `relay-client/` — control WS, downlink receiver, per-epoch bounded queue and
-  loopback server, session state machine, reconnect policy.
+  loopback server, session state machine, failure taxonomy.
 - `relay-demux/` — SAF `MediaExtractor` uplink for local files plus a private
   Range-capable `127.0.0.1` HTTP bridge.
 - `player-mpv/` — `MPVLib` JNI (adapted from mpv-android) and
@@ -57,11 +57,26 @@ release.yml` builds and publishes the signed APK with those notes.
   banner. This cost a round of confounded frame-drop measurements on
   2026-07-26. Match the *network* too: a tier the Wi-Fi cannot carry starves
   the client just as effectively (`average_mbps` in the telemetry snapshot).
+- **Debug builds always carry the debug icon.** `app/src/debug/res/drawable/
+  ic_launcher.xml` (amber, hazard-striped corner) shadows the navy release
+  icon in `app/src/main`, so a debug install is recognisable on the tablet at
+  a glance. Never give a debug build the release icon: do not delete or
+  bypass that file, do not point the manifest's `android:icon` at a different
+  drawable for debug, and when the release icon changes, redraw the debug
+  variant alongside it rather than letting the two converge. This holds for
+  co-installed (`-PcoinstallDebug=true`) and temporary-suffix builds too.
 - Debug and release share an `applicationId`, so installing a debug build
   normally means uninstalling the release one and losing the user's DataStore
-  (settings, watch history). Add a temporary `applicationIdSuffix = ".debug"`
-  under `buildTypes { getByName("debug") { ... } }` instead, and remove it
-  before committing.
+  (settings, watch history). Build with `-PcoinstallDebug=true` instead: it
+  adds the `.debug` suffix so the two sit side by side.
+- **Data in a debug build is disposable.** Settings, watch history, the
+  library cache and anything else a debug install holds (the amber icon is
+  how you know it is one) can always be cleared, overwritten or lost to an
+  uninstall for the sake of a test — `pm clear`, reinstalling, marking files
+  watched, changing the host — without asking and without preserving it
+  first. There is no need to build a second throwaway copy just to protect a
+  debug install's data. This never extends to the signed release app: its
+  data is the user's and is not touched.
 - `files/phase4-latest.json` is written every second and is the fastest read
   on drops, A/V error, buffer, and transport rates:
   `adb shell run-as <applicationId> cat files/phase4-latest.json`.
@@ -150,6 +165,27 @@ release.yml` builds and publishes the signed APK with those notes.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
+- **A loading overlay in the browser is only for a wait the user asked for.**
+  Connects the app makes on its own — after leaving the player
+  (`closingJob`), after a wake with a dead socket, on a cold start behind
+  the cached listing (`files/library-cache.json`, `backgroundConnectJob`) —
+  pass `visible = false` to `connectInternal` and keep the listing on screen
+  (`keepLibrary`). Because the controls stay enabled meanwhile, anything
+  that needs the server must get its controller from `connectionForAction()`
+  (or run through `libraryAction`), never from the `controller` field
+  directly: that is what waits out the connect in flight.
+- **Reconnects are made on demand, never on a timer, and there is no setting
+  for them — nor for connecting at launch, which always happens, quietly.** No retry loops, attempt counters or backoff. A connection is
+  re-made when something makes it worth trying: the user needs the server
+  (`connectionForAction`, which may retry a failed request once on a fresh
+  connection), a live connection was seen to die, the app came to the
+  foreground, or a network appeared (`reconnectQuietly` in the browser,
+  `resumePendingPlayback` in the player). The automatic ones are `quiet` and
+  never report; only a connect the user asked for may show an error, and the
+  next successful connect removes it (`connectionError`). A connect that
+  never got through must not trigger another — that is the chase the
+  `established` flag in `collectController` prevents. `awaitNetwork` holds a
+  connect until the radio is back after a wake instead of failing into it.
 - **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
   `onStart`/`onStop` do not see it. Anything that has to react to the player
   going away belongs on the metrics loop or the Surface callbacks, not on a

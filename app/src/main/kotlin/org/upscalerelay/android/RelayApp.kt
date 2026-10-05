@@ -112,6 +112,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -195,7 +196,7 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
                 !state.preferencesLoaded -> Box(Modifier.fillMaxSize())
                 else -> Box(Modifier.fillMaxSize()) {
                     TabletShell(viewModel, state)
-                    ShellLoadingOverlay(viewModel, state)
+                    ShellLoadingOverlay(state)
                 }
             }
         }
@@ -351,31 +352,24 @@ private fun TabletShell(viewModel: RelayViewModel, state: RelayUiState) {
 }
 
 /**
- * The browse shell's share of the single loading overlay: connecting, opening
- * a file or folder, paging the library, and the automatic reconnect that
- * follows a tablet waking up with a dead control socket.
+ * The browse shell's share of the single loading overlay. It appears only for
+ * a wait the user asked for: a manual connect, opening a folder, paging or
+ * re-sorting the library. Everything the app does on its own — reconnecting
+ * after the tablet wakes, after leaving the player, or on a cold start with a
+ * cached listing — runs behind the list without showing anything.
  */
 @Composable
-private fun ShellLoadingOverlay(viewModel: RelayViewModel, state: RelayUiState) {
-    val reconnecting = state.reconnecting
+private fun ShellLoadingOverlay(state: RelayUiState) {
     // The overlay dims but does not swallow touches: every control underneath
     // already disables itself while busy, and a connect attempt can sit on a
     // 15-second timeout — long enough that the navigation rail has to stay
     // reachable.
-    when {
-        reconnecting != null -> LoadingOverlay(
-            label = reconnecting.reason,
-            detail = "Attempt ${reconnecting.attempt} of ${reconnecting.maxAttempts}. " +
-                "The library reopens where you left it.",
-            appearAfterMillis = 0,
-        ) {
-            OutlinedButton(onClick = viewModel::cancelAutoResume) { Text("Stop trying") }
-        }
-        // One branch for both flags: a connect hands over to a library
-        // restore mid-flight, and two call sites would blink the overlay off
-        // and restart its appearance delay between the two.
-        state.busy || state.libraryLoading -> LoadingOverlay(
-            label = if (state.capabilities == null) "Connecting…" else "Loading…",
+    //
+    // One call site for both flags, so a wait that hands over from one to the
+    // other cannot blink the overlay off and restart its appearance delay.
+    if (state.busy || state.libraryLoading) {
+        LoadingOverlay(
+            label = if (state.sessionState == SessionState.BROWSING) "Loading…" else "Connecting…",
         )
     }
 }
@@ -636,11 +630,11 @@ private fun localUriLabel(value: String): String {
 
 private val SessionState.userLabel: String
     get() = when (this) {
-        SessionState.DISCONNECTED -> "Disconnected"
-        SessionState.CONNECTING -> "Connecting…"
         SessionState.BROWSING -> "Connected"
         SessionState.FAILED -> "Connection lost"
-        else -> "Busy"
+        // In between, the app is connecting on its own behind a list that is
+        // still usable; that is not something to announce.
+        else -> ""
     }
 
 @Composable
@@ -658,7 +652,15 @@ private fun ServerDestination(viewModel: RelayViewModel, state: RelayUiState) {
     Column(Modifier.fillMaxSize().padding(contentPadding())) {
         DestinationHeader(
             title = state.capabilities?.serverName ?: "Server library",
-            subtitle = "${state.host}:${state.port}  ·  ${state.sessionState.userLabel}",
+            // "Connection lost" is the banner's companion, not its herald:
+            // while the app is still reconnecting on its own, neither shows.
+            subtitle = listOf(
+                "${state.host}:${state.port}",
+                state.sessionState.userLabel.takeIf {
+                    state.sessionState != SessionState.FAILED || state.error != null
+                }.orEmpty(),
+            ).filter { it.isNotEmpty() }
+                .joinToString("  ·  "),
             action = { OutlinedButton(onClick = viewModel::connect, enabled = !state.busy) { Text("Reconnect") } },
         )
         state.error?.let { InlineError(it, viewModel::dismissError) }
@@ -966,6 +968,7 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
                 }
             },
         )
+        state.error?.let { InlineError(it, viewModel::dismissError) }
         Spacer(Modifier.height(20.dp))
         if (state.recentPaths.isEmpty()) {
             PlaceholderCard("Videos you open will appear here.")
@@ -992,6 +995,13 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
 
 @Composable
 private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) {
+    // A server can publish twenty or more models; listed inline they pushed
+    // every other setting off the screen, so they get a page of their own.
+    var modelPageOpen by rememberSaveable { mutableStateOf(false) }
+    if (modelPageOpen) {
+        ModelSettingsPage(viewModel, state) { modelPageOpen = false }
+        return
+    }
     Column(Modifier.fillMaxSize().padding(contentPadding()).imePadding()) {
         DestinationHeader("Settings", "Tablet and relay preferences")
         Spacer(Modifier.height(20.dp))
@@ -1015,12 +1025,6 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                         )
                         Button(onClick = viewModel::connect, enabled = !state.busy) { Text("Connect") }
                     }
-                    SettingToggle("Connect automatically", state.autoConnect, viewModel::setAutoConnect)
-                    SettingToggle(
-                        "Reconnect automatically during playback",
-                        state.autoResume,
-                        viewModel::setAutoResume,
-                    )
                     if (state.discoveredServers.isNotEmpty()) {
                         Text("Discovered servers", style = MaterialTheme.typography.labelLarge)
                         state.discoveredServers.forEach { server ->
@@ -1048,8 +1052,20 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
             item {
                 SettingsSection("Playback defaults") {
                     Text("Model", style = MaterialTheme.typography.labelLarge)
-                    state.capabilities?.models.orEmpty().forEach { model ->
-                        RadioSetting(model.name, state.selectedModel == model.name) { viewModel.setModel(model.name) }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { modelPageOpen = true }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            state.selectedModel.ifEmpty { "Server default" },
+                            Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text("Change", color = MaterialTheme.colorScheme.primary)
                     }
                     Text("Quality", style = MaterialTheme.typography.labelLarge)
                     state.capabilities?.qualityOptions.orEmpty()
@@ -1250,6 +1266,58 @@ private fun VideoSyncPreferenceControls(viewModel: RelayViewModel, state: RelayU
                 RadioSetting(scaler, state.interpolationScaler == scaler) {
                     viewModel.setInterpolationScaler(scaler)
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The default upscaling model, on a page of its own inside Settings. Opens
+ * scrolled to the current choice; Back (system or the arrow) returns to the
+ * settings list.
+ */
+@Composable
+private fun ModelSettingsPage(viewModel: RelayViewModel, state: RelayUiState, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val models = state.capabilities?.models.orEmpty()
+    val listState = rememberLazyListState()
+    // Once per list: re-running it on every selection would yank the list
+    // back to the top of the row the user just tapped. Keyed on the list
+    // being there at all, because the page can open before the connect that
+    // delivers it has finished.
+    LaunchedEffect(models.isNotEmpty()) {
+        val index = models.indexOfFirst { it.name == state.selectedModel }
+        if (index > 0) listState.scrollToItem(index)
+    }
+    Column(Modifier.fillMaxSize().padding(contentPadding())) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to settings")
+            }
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text("Model", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "Used for the next video you start",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        if (models.isEmpty()) {
+            PlaceholderCard("The model list comes from the server and appears once it is connected.")
+        } else {
+            LazyColumn(state = listState) {
+                items(models, key = { it.name }) { model ->
+                    RadioSetting(
+                        label = model.name,
+                        selected = state.selectedModel == model.name,
+                        supporting = model.scaleFactor?.let { "×$it" },
+                    ) {
+                        viewModel.setModel(model.name)
+                    }
+                }
+                item { Spacer(Modifier.height(24.dp)) }
             }
         }
     }
@@ -1494,7 +1562,6 @@ private fun PlayerScreen(
                     status = state.reconnecting,
                     canFallback = state.localPlayback && !state.directLocalFallback,
                     onFallback = viewModel::playLocalFallback,
-                    onCancel = viewModel::cancelAutoResume,
                 )
                 state.error != null -> PlayerError(
                     message = state.error,
@@ -1762,10 +1829,14 @@ private fun PlayerChrome(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipPrevious, "Previous chapter", interactionSource) {
-                            viewModel.chapterStep(-1)
-                        }
+                    // Always present. Without chapters — and at the first and
+                    // last one — they restart and finish the file.
+                    PlayerRoundButton(
+                        Icons.Filled.SkipPrevious,
+                        if (chapters.isEmpty()) "Restart" else "Previous chapter",
+                        interactionSource,
+                    ) {
+                        viewModel.chapterStep(-1)
                     }
                     PlayerRoundButton(
                         Icons.Filled.FastRewind,
@@ -1801,10 +1872,12 @@ private fun PlayerChrome(
                     ) {
                         viewModel.skip(1)
                     }
-                    if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter", interactionSource) {
-                            viewModel.chapterStep(1)
-                        }
+                    PlayerRoundButton(
+                        Icons.Filled.SkipNext,
+                        if (chapters.isEmpty()) "Finish" else "Next chapter",
+                        interactionSource,
+                    ) {
+                        viewModel.chapterStep(1)
                     }
                 }
             }
@@ -2302,23 +2375,19 @@ private fun ReconnectOverlay(
     status: ReconnectStatus,
     canFallback: Boolean,
     onFallback: () -> Unit,
-    onCancel: () -> Unit,
 ) {
+    // Work in progress, shown like any other wait in the player: no attempt
+    // counter and nothing to cancel — Back leaves, as it does everywhere else.
     LoadingOverlay(
         label = status.reason,
-        detail = if (status.maxAttempts > 1) {
-            "Reconnecting — attempt ${status.attempt} of ${status.maxAttempts}. " +
-                "Playback resumes where it stopped."
-        } else {
-            "Restarting playback at the current position."
-        },
+        detail = "Playback resumes where it stopped.",
         appearAfterMillis = 0,
-    ) {
-        OutlinedButton(onClick = onCancel) { Text("Stop trying") }
-        if (canFallback) {
-            OutlinedButton(onClick = onFallback) { Text("Play original") }
-        }
-    }
+        actions = if (canFallback) {
+            { OutlinedButton(onClick = onFallback) { Text("Play original") } }
+        } else {
+            null
+        },
+    )
 }
 
 @Composable
