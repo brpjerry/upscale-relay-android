@@ -1174,9 +1174,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    AppLog.i(TAG, "connect to $origin failed: ${error.message}")
                     if (!quiet) {
-                        connectionError = error.message
-                        mutableUi.update { it.copy(error = error.message) }
+                        // A server that is simply not there gets a sentence,
+                        // not a socket exception; a server that answered and
+                        // refused keeps its own words.
+                        val message = if (classifyFailure(error).recoverable) {
+                            "Could not reach the server at $origin."
+                        } else {
+                            error.message
+                        }
+                        connectionError = message
+                        mutableUi.update { it.copy(error = message) }
                     }
                 }
         } finally {
