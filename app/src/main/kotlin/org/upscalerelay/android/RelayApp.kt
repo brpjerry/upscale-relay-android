@@ -1829,10 +1829,14 @@ private fun PlayerChrome(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipPrevious, "Previous chapter", interactionSource) {
-                            viewModel.chapterStep(-1)
-                        }
+                    // Always present. Without chapters — and at the first and
+                    // last one — they restart and finish the file.
+                    PlayerRoundButton(
+                        Icons.Filled.SkipPrevious,
+                        if (chapters.isEmpty()) "Restart" else "Previous chapter",
+                        interactionSource,
+                    ) {
+                        viewModel.chapterStep(-1)
                     }
                     PlayerRoundButton(
                         Icons.Filled.FastRewind,
@@ -1868,10 +1872,12 @@ private fun PlayerChrome(
                     ) {
                         viewModel.skip(1)
                     }
-                    if (chapters.isNotEmpty()) {
-                        PlayerRoundButton(Icons.Filled.SkipNext, "Next chapter", interactionSource) {
-                            viewModel.chapterStep(1)
-                        }
+                    PlayerRoundButton(
+                        Icons.Filled.SkipNext,
+                        if (chapters.isEmpty()) "Finish" else "Next chapter",
+                        interactionSource,
+                    ) {
+                        viewModel.chapterStep(1)
                     }
                 }
             }

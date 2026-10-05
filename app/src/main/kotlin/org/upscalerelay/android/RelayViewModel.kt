@@ -184,6 +184,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var metricsStartedAt = 0L
     private var playbackPositions: Map<String, PlaybackProgress> = emptyMap()
     private var lastProgressSaveAt = 0L
+    // When "previous" last restarted the file; a second press soon after means
+    // the previous file (see resolveChapterStep).
+    private var lastFileRestartPressAt = 0L
     private var decoderDropsWindow: Pair<Long, Long> = 0L to 0L
     private var warningDismissed = false
 
@@ -1673,27 +1676,116 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Seeks to the next (+1) or previous (-1) chapter mark. Previous restarts
-     * the current chapter when already well into it, like every player's back
-     * button. A no-op when the session has no chapters.
+     * The player's previous (-1) / next (+1) button, also reached from the
+     * media-session skip actions. Between chapter marks it seeks; at the
+     * edges of the file — and everywhere in a file without chapters — it
+     * restarts or finishes the file, and with auto-play on moves between
+     * files. See [resolveChapterStep] for the rules.
      */
     fun chapterStep(direction: Int) {
-        val chapters = mutableUi.value.session?.chapters.orEmpty()
-        if (chapters.isEmpty() || direction == 0) return
-        val position = mutableUi.value.mpvMetrics.positionSeconds
-        val current = chapters.indexOfLast { it.startSeconds <= position }
-        val target = if (direction > 0) {
-            chapters.getOrNull(current + 1)?.startSeconds
-        } else {
-            when {
-                current < 0 -> null
-                position - chapters[current].startSeconds > CHAPTER_RESTART_THRESHOLD_SECONDS ->
-                    chapters[current].startSeconds
-                current > 0 -> chapters[current - 1].startSeconds
-                else -> 0.0
-            }
+        val state = mutableUi.value
+        if (state.playingPath == null || state.busy || closingJob?.isActive == true) return
+        if (autoAdvanceJob?.isActive == true) return
+        val now = SystemClock.elapsedRealtime()
+        // Mid-seek mpv reports a transient 0:00; the seek's target is where
+        // the user actually is.
+        val position = state.seekTargetSeconds?.takeIf { state.seeking }
+            ?: state.mpvMetrics.positionSeconds
+        val step = resolveChapterStep(
+            direction = direction,
+            chapterStarts = state.session?.chapters.orEmpty().map { it.startSeconds },
+            positionSeconds = position,
+            // Direct local playback has no relay to open another file with.
+            autoPlayNext = state.autoPlayNext && !state.directLocalFallback,
+            repeatedRestart = now - lastFileRestartPressAt < PREVIOUS_FILE_REPEAT_MILLIS,
+        ) ?: return
+        lastFileRestartPressAt = if (step == ChapterStep.RestartFile) now else 0L
+        when (step) {
+            is ChapterStep.Seek -> seekTo(step.seconds)
+            ChapterStep.RestartFile -> seekTo(0.0)
+            ChapterStep.FinishFile -> finishFile()
+            ChapterStep.PreviousFile -> playPreviousFile()
         }
-        if (target != null) seekTo(target)
+    }
+
+    /**
+     * "Next" past the last chapter: the file is marked watched, and then
+     * either the next one plays (auto-play on) or the player closes, exactly
+     * as if the file had played to its end.
+     */
+    private fun finishFile() {
+        val origin = activeOrigin
+        if (origin == null) {
+            closePlayback()
+            return
+        }
+        val state = mutableUi.value
+        val duration = (state.session?.durationSeconds ?: state.mpvMetrics.durationSeconds)
+            .takeIf { it > 0 } ?: 1.0
+        val key = progressKey(origin)
+        fun markWatched() {
+            // Also holds off the periodic save, which would put the real
+            // position back over the 100%.
+            lastProgressSaveAt = SystemClock.elapsedRealtime()
+            persist { preferences.setPlaybackPosition(key, duration, duration) }
+        }
+        AppLog.i(TAG, "finishing '${state.playingPath?.substringAfterLast('/')}' from the next button")
+        if (!state.autoPlayNext || state.directLocalFallback) {
+            markWatched()
+            closePlayback()
+            return
+        }
+        autoAdvanceJob = viewModelScope.launch(actionErrors) {
+            val next = adjacentFile(origin, forward = true)
+            markWatched()
+            if (next == null) {
+                // Nothing left to play in this folder.
+                closePlayback()
+                return@launch
+            }
+            startAdjacentPlayback(next, "Playing next video")
+        }
+    }
+
+    /** A second "previous" at the start of a file, with auto-play on. */
+    private fun playPreviousFile() {
+        val origin = activeOrigin ?: return
+        autoAdvanceJob = viewModelScope.launch(actionErrors) {
+            // No file before this one: the restart the first press did stands.
+            val previous = adjacentFile(origin, forward = false) ?: return@launch
+            startAdjacentPlayback(previous, "Playing previous video")
+        }
+    }
+
+    private data class AdjacentFile(val origin: PlaybackOrigin, val displayPath: String, val local: Boolean)
+
+    /**
+     * The file after ([forward]) or before the one playing, in the same
+     * folder and in name order. Forward skips anything already watched, as
+     * auto-play does; backward is simply the file before.
+     */
+    private suspend fun adjacentFile(origin: PlaybackOrigin, forward: Boolean): AdjacentFile? =
+        when (origin) {
+            is PlaybackOrigin.ServerFile -> {
+                val active = controller ?: return null
+                val parent = if ('/' in origin.path) origin.path.substringBeforeLast('/') else ""
+                runPlaybackCatching {
+                    if (forward) findNextServerFile(active, parent, origin.path)
+                    else findPreviousServerFile(active, parent, origin.path)
+                }.getOrNull()?.let { AdjacentFile(PlaybackOrigin.ServerFile(it.path), it.path, local = false) }
+            }
+            is PlaybackOrigin.LocalDocument ->
+                (if (forward) findNextLocalFile(origin.uriValue) else findPreviousLocalFile(origin.uriValue))
+                    ?.let { AdjacentFile(PlaybackOrigin.LocalDocument(it.uri), it.name, local = true) }
+        }
+
+    /** Hands a button-initiated file change to the same restart auto-play uses. */
+    private suspend fun startAdjacentPlayback(file: AdjacentFile, reason: String) {
+        seekJob?.cancelAndJoin()
+        seekJob = null
+        metricsJob?.cancelAndJoin()
+        metricsJob = null
+        startNextPlayback(file.origin, file.displayPath, file.local, reason)
     }
 
     fun previewSeek(seconds: Double) {
@@ -2318,28 +2410,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (state.directLocalFallback) return // the relay server is gone; stay on this file
         autoAdvanceJob = viewModelScope.launch(actionErrors) {
-            when (origin) {
-                is PlaybackOrigin.ServerFile -> {
-                    val active = controller ?: return@launch
-                    val parent =
-                        if ('/' in origin.path) origin.path.substringBeforeLast('/') else ""
-                    val next = runPlaybackCatching { findNextServerFile(active, parent, origin.path) }
-                        .getOrNull() ?: return@launch
-                    startNextPlayback(
-                        origin = PlaybackOrigin.ServerFile(next.path),
-                        displayPath = next.path,
-                        local = false,
-                    )
-                }
-                is PlaybackOrigin.LocalDocument -> {
-                    val next = findNextLocalFile(origin.uriValue) ?: return@launch
-                    startNextPlayback(
-                        origin = PlaybackOrigin.LocalDocument(next.uri),
-                        displayPath = next.name,
-                        local = true,
-                    )
-                }
-            }
+            val next = adjacentFile(origin, forward = true) ?: return@launch
+            startNextPlayback(next.origin, next.displayPath, next.local)
         }
     }
 
@@ -2365,7 +2437,40 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         return null
     }
 
+    private suspend fun findPreviousServerFile(
+        controller: RelaySessionController,
+        directory: String,
+        currentPath: String,
+    ): LibraryNode? {
+        var cursor: String? = null
+        var previous: LibraryNode? = null
+        repeat(AUTO_ADVANCE_MAX_PAGES) {
+            val sort = "name".takeIf { it in mutableUi.value.capabilities?.librarySortKeys.orEmpty() }
+            val page = controller.fetchLibraryPage(directory, cursor, sort = sort)
+            for (child in page.directory.children) {
+                if (child.type != LibraryNode.Type.FILE) continue
+                if (child.path == currentPath) return previous
+                previous = child
+            }
+            cursor = page.nextCursor ?: return null
+        }
+        return null
+    }
+
+    private suspend fun findPreviousLocalFile(currentUri: String): LocalDocumentEntry? {
+        val files = sortedLocalSiblings() ?: return null
+        return files.getOrNull(files.indexOfFirst { it.uri == currentUri } - 1)
+    }
+
     private suspend fun findNextLocalFile(currentUri: String): LocalDocumentEntry? {
+        val files = sortedLocalSiblings() ?: return null
+        val index = files.indexOfFirst { it.uri == currentUri }
+        if (index < 0) return null
+        return files.drop(index + 1).firstOrNull { !isWatched("local:${it.uri}") }
+    }
+
+    /** The video files of the open local folder, in name order. */
+    private suspend fun sortedLocalSiblings(): List<LocalDocumentEntry>? {
         val tree = localTreeUri ?: return null
         val directory = localDirectoryStack.lastOrNull()?.first ?: return null
         val siblings = runPlaybackCatching {
@@ -2373,19 +2478,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 LocalDocumentBrowser.children(getApplication(), tree, directory)
             }
         }.getOrNull() ?: return null
-        val files = siblings.filterNot { it.isDirectory }
+        return siblings.filterNot { it.isDirectory }
             .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
-        val index = files.indexOfFirst { it.uri == currentUri }
-        if (index < 0) return null
-        return files.drop(index + 1).firstOrNull { !isWatched("local:${it.uri}") }
     }
 
     private suspend fun startNextPlayback(
         origin: PlaybackOrigin,
         displayPath: String,
         local: Boolean,
+        reason: String = "Playing next video",
     ) {
-        AppLog.i(TAG, "auto-advancing to '${displayPath.substringAfterLast('/')}'")
+        AppLog.i(TAG, "$reason: '${displayPath.substringAfterLast('/')}'")
         activeOrigin = origin
         mutableUi.update {
             it.copy(
@@ -2396,7 +2499,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 seeking = false,
                 seekPreviewSeconds = null,
                 seekTargetSeconds = null,
-                reconnecting = ReconnectStatus("Playing next video"),
+                reconnecting = ReconnectStatus(reason),
                 error = null,
             )
         }
@@ -2416,7 +2519,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             mutableUi.update {
                 it.copy(
                     reconnecting = null,
-                    error = "Could not play the next video: ${error.message}",
+                    error = "Could not play the video: ${error.message}",
                 )
             }
         }
@@ -2620,9 +2723,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             publishedMetadataKey = metadataKey
         }
         val playing = !state.paused
-        val chapterActions = if (state.session?.chapters?.isNotEmpty() == true) {
+        // Always offered: without chapters they restart and finish the file.
+        val chapterActions =
             PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS
-        } else 0L
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -2988,7 +3091,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val PROGRESS_SAVE_INTERVAL_MILLIS = 5_000L
         private const val RESUME_MIN_SECONDS = 10.0
         private const val RESUME_END_WINDOW_SECONDS = 90.0
-        private const val CHAPTER_RESTART_THRESHOLD_SECONDS = 3.0
+        private const val PREVIOUS_FILE_REPEAT_MILLIS = 4_000L
         private const val SEEK_TARGET_SNAP_SECONDS = 8.0
 
         /**
