@@ -18,7 +18,7 @@ acceptance gates, seek-latency history), and `docs/ANDROID_DEVICE_NOTES.md`
 - `relay-protocol/` — framing, handshake, JSON messages, golden fixtures
   shared with the Python server.
 - `relay-client/` — control WS, downlink receiver, per-epoch bounded queue and
-  loopback server, session state machine, reconnect policy.
+  loopback server, session state machine, failure taxonomy.
 - `relay-demux/` — SAF `MediaExtractor` uplink for local files plus a private
   Range-capable `127.0.0.1` HTTP bridge.
 - `player-mpv/` — `MPVLib` JNI (adapted from mpv-android) and
@@ -159,13 +159,18 @@ release.yml` builds and publishes the signed APK with those notes.
   that needs the server must get its controller from `connectionForAction()`
   (or run through `libraryAction`), never from the `controller` field
   directly: that is what waits out the connect in flight.
-- **A connection error in the browser is a last resort.** Reconnect first,
-  report only when that fails: background connects are `quiet` and hand a
-  failure to the browse loop (`retryBackgroundConnectIfNeeded`), a failed
-  library request or file open retries once on a fresh connection, and the
-  loop keeps trying behind its own banner (`connectionError`) and removes it
-  on success. The banner must never be on screen while the server is
-  reachable.
+- **Reconnects are made on demand, never on a timer, and there is no setting
+  for them.** No retry loops, attempt counters or backoff. A connection is
+  re-made when something makes it worth trying: the user needs the server
+  (`connectionForAction`, which may retry a failed request once on a fresh
+  connection), a live connection was seen to die, the app came to the
+  foreground, or a network appeared (`reconnectQuietly` in the browser,
+  `resumePendingPlayback` in the player). The automatic ones are `quiet` and
+  never report; only a connect the user asked for may show an error, and the
+  next successful connect removes it (`connectionError`). A connect that
+  never got through must not trigger another — that is the chase the
+  `established` flag in `collectController` prevents. `awaitNetwork` holds a
+  connect until the radio is back after a wake instead of failing into it.
 - **Picture-in-Picture never stops the Activity**, so `ProcessLifecycleOwner`'s
   `onStart`/`onStop` do not see it. Anything that has to react to the player
   going away belongs on the metrics loop or the Surface callbacks, not on a

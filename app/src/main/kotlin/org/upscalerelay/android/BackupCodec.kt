@@ -57,7 +57,6 @@ object BackupCodec {
                 put("host", preferences.host)
                 put("port", preferences.port)
                 put("autoConnect", preferences.autoConnect)
-                put("autoResume", preferences.autoResume)
             }
             putJsonObject("playbackDefaults") {
                 put("model", preferences.model)
@@ -143,7 +142,6 @@ object BackupCodec {
             host = connection?.string("host")?.trim()?.takeIf(String::isNotEmpty) ?: current.host,
             port = connection?.int("port")?.takeIf { it in 1..65535 } ?: current.port,
             autoConnect = connection?.bool("autoConnect") ?: current.autoConnect,
-            autoResume = connection?.bool("autoResume") ?: current.autoResume,
             model = playback?.string("model") ?: current.model,
             qualityTier = playback?.string("qualityTier")?.takeIf(String::isNotEmpty)
                 ?: current.qualityTier,

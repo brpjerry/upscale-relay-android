@@ -1018,11 +1018,6 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                         Button(onClick = viewModel::connect, enabled = !state.busy) { Text("Connect") }
                     }
                     SettingToggle("Connect automatically", state.autoConnect, viewModel::setAutoConnect)
-                    SettingToggle(
-                        "Reconnect automatically during playback",
-                        state.autoResume,
-                        viewModel::setAutoResume,
-                    )
                     if (state.discoveredServers.isNotEmpty()) {
                         Text("Discovered servers", style = MaterialTheme.typography.labelLarge)
                         state.discoveredServers.forEach { server ->
@@ -1496,7 +1491,6 @@ private fun PlayerScreen(
                     status = state.reconnecting,
                     canFallback = state.localPlayback && !state.directLocalFallback,
                     onFallback = viewModel::playLocalFallback,
-                    onCancel = viewModel::cancelAutoResume,
                 )
                 state.error != null -> PlayerError(
                     message = state.error,
@@ -2304,23 +2298,19 @@ private fun ReconnectOverlay(
     status: ReconnectStatus,
     canFallback: Boolean,
     onFallback: () -> Unit,
-    onCancel: () -> Unit,
 ) {
+    // Work in progress, shown like any other wait in the player: no attempt
+    // counter and nothing to cancel — Back leaves, as it does everywhere else.
     LoadingOverlay(
         label = status.reason,
-        detail = if (status.maxAttempts > 1) {
-            "Reconnecting — attempt ${status.attempt} of ${status.maxAttempts}. " +
-                "Playback resumes where it stopped."
-        } else {
-            "Restarting playback at the current position."
-        },
+        detail = "Playback resumes where it stopped.",
         appearAfterMillis = 0,
-    ) {
-        OutlinedButton(onClick = onCancel) { Text("Stop trying") }
-        if (canFallback) {
-            OutlinedButton(onClick = onFallback) { Text("Play original") }
-        }
-    }
+        actions = if (canFallback) {
+            { OutlinedButton(onClick = onFallback) { Text("Play original") } }
+        } else {
+            null
+        },
+    )
 }
 
 @Composable

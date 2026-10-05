@@ -642,6 +642,11 @@ the same day.
   automatically ~15 s after Wi-Fi returned, position-continuous, with
   `auto_resume_count` incremented. The behavior is preference-gated
   ("Reconnect automatically during playback", default on).
+- **Superseded in 0.20.0:** the two entries around this note describe the
+  original timed design. `ReconnectPolicy`, the attempt counter, **Stop
+  trying**, the browse retry loop and the "Reconnect automatically during
+  playback" preference are gone; reconnects are made once, on demand or on a
+  foreground/network event, as `CLAUDE.md` describes.
 - **Recovery before prompts (2026-07-25).** A recoverable failure never
   opens with an error banner: the failure event goes to the playback resume
   loop first, then to the browse-screen reconnect, and only a loop that runs

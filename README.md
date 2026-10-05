@@ -35,7 +35,7 @@ Modules:
 - `relay-protocol` — pure-Kotlin protocol v1 framing and JSON models.
 - `relay-client` — control WebSocket, session state machine, downlink
   receiver, uplink sender, bounded media queue, localhost media server,
-  verified attachment cache, reconnect policy and failure taxonomy.
+  verified attachment cache and failure taxonomy.
 - `player-mpv` — lifecycle-checked libmpv wrapper and `SurfaceView` host.
 - `relay-demux` — SAF browsing, MediaExtractor access-unit source, and the
   local HTTP bridge for repeated document access.

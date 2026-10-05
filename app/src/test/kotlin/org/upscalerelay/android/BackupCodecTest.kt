@@ -25,7 +25,6 @@ class BackupCodecTest {
         host = "10.0.0.5",
         port = 9001,
         autoConnect = true,
-        autoResume = false,
         autoPlayNext = false,
         model = "2x_AnimeJaNai_HD_V3_Compact",
         qualityTier = "hevc-qp10",
