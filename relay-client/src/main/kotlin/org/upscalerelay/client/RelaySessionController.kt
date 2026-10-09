@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.WebSocket
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
@@ -33,11 +34,16 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToLong
 
-class RelaySessionController(
+class RelaySessionController internal constructor(
     val host: String,
-    val port: Int = 8590,
-    private val attachmentCacheRoot: Path? = null,
+    val port: Int,
+    private val attachmentCacheRoot: Path?,
+    private val webSocketFactory: WebSocket.Factory?,
+    private val playerConnectTimeoutMillis: Long,
 ) : Closeable {
+    constructor(host: String, port: Int = 8590, attachmentCacheRoot: Path? = null) :
+        this(host, port, attachmentCacheRoot, null, PLAYER_CONNECT_TIMEOUT_MILLIS)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateMachine = SessionStateMachine()
     val state: StateFlow<SessionState> = stateMachine.state
@@ -90,7 +96,7 @@ class RelaySessionController(
         teardownResult.set(null)
         stateMachine.transition(SessionState.CONNECTING)
         return try {
-            val channel = ControlChannel(host, port, ::fail)
+            val channel = ControlChannel(host, port, ::fail, webSocketFactory)
             channel.onOpeningProgress = { text -> mutableOpeningProgress.value = text }
             channel.onSeekProgress = { progress ->
                 synchronized(seekProgressTracker) {
@@ -216,7 +222,7 @@ class RelaySessionController(
 
             val mediaQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             queue = mediaQueue
-            val localServer = LoopbackMediaServer(mediaQueue, ::fail)
+            val localServer = LoopbackMediaServer(mediaQueue, playerConnectTimeoutMillis, ::fail)
             loopback = localServer
             localServer.start()
             val downlink = DownlinkReceiver(
@@ -243,6 +249,7 @@ class RelaySessionController(
             }
             startReporter()
             stateMachine.transition(SessionState.BUFFERING)
+            localServer.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = localServer.url,
                 originalMediaUrl = originalMediaUrl,
@@ -309,7 +316,7 @@ class RelaySessionController(
 
             val mediaQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             queue = mediaQueue
-            val localServer = LoopbackMediaServer(mediaQueue, ::fail)
+            val localServer = LoopbackMediaServer(mediaQueue, playerConnectTimeoutMillis, ::fail)
             loopback = localServer
             localServer.start()
             val downlink = DownlinkReceiver(
@@ -342,6 +349,7 @@ class RelaySessionController(
             currentEpoch.set(session.epoch)
             startReporter()
             stateMachine.transition(SessionState.BUFFERING)
+            localServer.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = localServer.url,
                 originalMediaUrl = this.originalMediaUrl,
@@ -418,7 +426,7 @@ class RelaySessionController(
             }
             startSeekWatchdog(epoch)
             val nextQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
-            val nextLoopback = LoopbackMediaServer(nextQueue, ::fail).also { it.start() }
+            val nextLoopback = LoopbackMediaServer(nextQueue, playerConnectTimeoutMillis, ::fail).also { it.start() }
             val previousLoopback = loopback
 
             try {
@@ -443,6 +451,7 @@ class RelaySessionController(
                     if (desiredPaused.get()) SessionState.PAUSED else SessionState.BUFFERING,
                 )
             }
+            nextLoopback.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = nextLoopback.url,
                 originalMediaUrl = originalMediaUrl,
@@ -641,6 +650,9 @@ class RelaySessionController(
     companion object {
         const val TEARDOWN_TIMEOUT_MILLIS = 30_000L
         const val SEEK_PROGRESS_TIMEOUT_MILLIS = 60_000L
+
+        /** How long mpv has to connect once an endpoint has been handed out. */
+        const val PLAYER_CONNECT_TIMEOUT_MILLIS = 30_000L
         const val MEDIA_QUEUE_BYTES = 256L * 1024 * 1024
         val ANDROID_HEVC_TIERS = setOf(
             "lossless-hevc", "hevc-qp2", "hevc-qp4", "hevc-qp6",
