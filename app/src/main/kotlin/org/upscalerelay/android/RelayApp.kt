@@ -131,9 +131,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
@@ -791,22 +793,7 @@ private fun ConnectPanel(viewModel: RelayViewModel, state: RelayUiState) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(
-                        value = state.host,
-                        onValueChange = viewModel::setHost,
-                        label = { Text("Server host") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = state.port,
-                        onValueChange = viewModel::setPort,
-                        label = { Text("Port") },
-                        singleLine = true,
-                        modifier = Modifier.width(150.dp),
-                    )
-                }
+                ServerAddressFields(viewModel, state)
                 state.error?.let {
                     Spacer(Modifier.height(16.dp))
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -868,10 +855,56 @@ private fun DestinationHeader(
     }
 }
 
+/**
+ * The server address fields shared by the connect panel and Settings. A value
+ * that cannot be connected to is marked on its own field as it is typed, so a
+ * Connect that will fail says why where it was pressed.
+ */
+@Composable
+private fun ServerAddressFields(
+    viewModel: RelayViewModel,
+    state: RelayUiState,
+    trailing: @Composable () -> Unit = {},
+) {
+    val hostMissing = state.host.isBlank()
+    val portInvalid = state.port.toIntOrNull()?.takeIf { it in 1..65535 } == null
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+            value = state.host,
+            onValueChange = viewModel::setHost,
+            label = { Text("Server host") },
+            singleLine = true,
+            isError = hostMissing,
+            supportingText = if (hostMissing) {
+                { Text("Enter the server's address") }
+            } else {
+                null
+            },
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = state.port,
+            onValueChange = viewModel::setPort,
+            label = { Text("Port") },
+            singleLine = true,
+            isError = portInvalid,
+            supportingText = if (portInvalid) {
+                { Text("1 to 65535") }
+            } else {
+                null
+            },
+            modifier = Modifier.width(150.dp),
+        )
+        trailing()
+    }
+}
+
 @Composable
 private fun InlineError(message: String, onDismiss: () -> Unit) {
     Card(
-        Modifier.fillMaxWidth().padding(top = 12.dp),
+        // Announced when it appears: it is usually the answer to something
+        // the user just pressed.
+        Modifier.fillMaxWidth().padding(top = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1004,25 +1037,15 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
     }
     Column(Modifier.fillMaxSize().padding(contentPadding()).imePadding()) {
         DestinationHeader("Settings", "Tablet and relay preferences")
+        // Settings has its own Connect button, so what that connect (or
+        // anything else here) ran into belongs on this screen too, above the
+        // list so it stays in view wherever the list is scrolled.
+        state.error?.let { InlineError(it, viewModel::dismissError) }
         Spacer(Modifier.height(20.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
             item {
                 SettingsSection("Connection") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = state.host,
-                            onValueChange = viewModel::setHost,
-                            label = { Text("Server host") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedTextField(
-                            value = state.port,
-                            onValueChange = viewModel::setPort,
-                            label = { Text("Port") },
-                            singleLine = true,
-                            modifier = Modifier.width(150.dp),
-                        )
+                    ServerAddressFields(viewModel, state) {
                         Button(onClick = viewModel::connect, enabled = !state.busy) { Text("Connect") }
                     }
                     if (state.discoveredServers.isNotEmpty()) {
