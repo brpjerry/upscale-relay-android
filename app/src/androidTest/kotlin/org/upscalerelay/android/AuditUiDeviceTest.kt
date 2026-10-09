@@ -1,26 +1,37 @@
 package org.upscalerelay.android
 
+import android.net.Uri
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onFirst
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.upscalerelay.client.SessionState
+import org.upscalerelay.player.mpv.MpvPlaybackState
+import java.io.File
 import java.net.ServerSocket
 
 /**
@@ -67,6 +78,79 @@ class AuditUiDeviceTest {
             compose.onNodeWithText(message).assertIsDisplayed()
             assertEquals(TabletDestination.SETTINGS, model().ui.value.destination)
         }
+    }
+
+    /**
+     * A scrub held past the auto-hide timeout keeps the controls up, and
+     * releasing or cancelling it lets them hide again. Plays the generated
+     * clip through the original-file fallback, so no relay server is needed.
+     */
+    @Test
+    fun seekBarDragOutlastsTheControlsTimeout() {
+        val file = File(context.filesDir, "audit-clip-150s.mp4")
+        assumeTrue("push audit-clip-150s.mp4 into the debug app's files directory", file.isFile)
+        val uri = Uri.fromFile(file).toString()
+        FakeRelay().use { relay ->
+            try {
+                awaitModel { it.preferencesLoaded }
+                onModel {
+                    it.setHost("127.0.0.1")
+                    it.setPort(relay.port.toString())
+                    it.setAutoPlayNext(false)
+                    it.connect()
+                }
+                awaitModel { it.sessionState == SessionState.BROWSING && !it.busy && it.capabilities != null }
+                onModel { it.openLocalDocument(uri) }
+                awaitModel(30_000) { !it.busy && it.error != null && it.playingPath != null }
+                onModel { it.playLocalFallback() }
+                awaitModel(30_000) {
+                    it.directLocalFallback && it.playerState == MpvPlaybackState.PLAYING &&
+                        it.mpvMetrics.positionSeconds > 1.0
+                }
+
+                for (release in listOf("up", "cancel")) {
+                    compose.mainClock.autoAdvance = false
+                    showControls()
+                    val bar = compose.onNodeWithContentDescription("Playback position")
+                    // Pointer handling needs the clock running; the timeout
+                    // below is then stepped by hand.
+                    compose.mainClock.autoAdvance = true
+                    bar.performTouchInput {
+                        down(Offset(width * 0.2f, centerY))
+                        repeat(4) { moveBy(Offset(viewConfiguration.touchSlop, 0f)) }
+                    }
+                    compose.waitForIdle()
+                    compose.mainClock.autoAdvance = false
+                    check(model().ui.value.seekPreviewSeconds != null) { "the drag was not taken as a scrub" }
+                    compose.mainClock.advanceTimeBy(15_000)
+                    // Still scrubbing well past the timeout: the bar is there.
+                    compose.onNodeWithContentDescription("Playback position").assertExists()
+                    bar.performTouchInput {
+                        moveBy(Offset(40f, 0f))
+                        if (release == "up") up() else cancel()
+                    }
+                    compose.mainClock.advanceTimeBy(15_000)
+                    compose.onNodeWithContentDescription("Playback position").assertDoesNotExist()
+                }
+            } finally {
+                compose.mainClock.autoAdvance = true
+                onModel { it.closePlayback() }
+                awaitModel(30_000) { it.playingPath == null }
+                restorePreferences()
+            }
+        }
+    }
+
+    private fun showControls() {
+        repeat(3) {
+            val shown = compose.onAllNodes(hasContentDescription("Playback position"))
+                .fetchSemanticsNodes().isNotEmpty()
+            if (shown) return
+            compose.onRoot().performTouchInput { click(center) }
+            // Past the double-tap window, so the tap counts as one.
+            compose.mainClock.advanceTimeBy(1_000)
+        }
+        compose.onNodeWithContentDescription("Playback position").assertExists()
     }
 
     private fun withSettings(body: () -> Unit) {

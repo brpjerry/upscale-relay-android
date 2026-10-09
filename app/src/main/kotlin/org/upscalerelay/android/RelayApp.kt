@@ -1419,6 +1419,10 @@ private fun PlayerScreen(
     var chapterSheetVisible by remember { mutableStateOf(false) }
     var modelSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
+    // A drag on the seek bar in progress. Pressed buttons report through
+    // chromeInteractionSource; a scrub can outlast the timeout and must not
+    // have the bar it is dragging removed from under it.
+    var scrubbing by remember { mutableStateOf(false) }
     val accessibilityManager = LocalAccessibilityManager.current
     val chromeInteractionSource = remember { MutableInteractionSource() }
     val chromePressed by chromeInteractionSource.collectIsPressedAsState()
@@ -1449,10 +1453,11 @@ private fun PlayerScreen(
         state.seeking,
         sheetOpen,
         chromePressed,
+        scrubbing,
     ) {
         if (
             controlsVisible && !controlsLocked && !state.paused && !state.seeking &&
-            !sheetOpen && !chromePressed
+            !sheetOpen && !chromePressed && !scrubbing
         ) {
             delay(
                 accessibilityManager?.calculateRecommendedTimeoutMillis(
@@ -1515,6 +1520,7 @@ private fun PlayerScreen(
                     onChapters = { chapterSheetVisible = true },
                     onModels = { modelSheetVisible = true },
                     interactionSource = chromeInteractionSource,
+                    onScrubbingChange = { scrubbing = it },
                     onLock = {
                         controlsLocked = true
                         controlsVisible = false
@@ -1747,6 +1753,7 @@ private fun PlayerChrome(
     onChapters: () -> Unit,
     onModels: () -> Unit,
     interactionSource: MutableInteractionSource,
+    onScrubbingChange: (Boolean) -> Unit,
     onLock: () -> Unit,
 ) {
     val chapters = state.session?.chapters.orEmpty()
@@ -1818,6 +1825,7 @@ private fun PlayerChrome(
                     onScrub = { viewModel.previewSeek(it) },
                     onScrubFinished = viewModel::commitSeek,
                     onScrubCancelled = viewModel::cancelSeekPreview,
+                    onScrubbingChange = onScrubbingChange,
                     modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
                 )
                 Text(formatTime(duration), color = Color.White, style = MaterialTheme.typography.labelLarge)
@@ -1975,9 +1983,16 @@ private fun PlayerSeekBar(
     onScrub: (Double) -> Unit,
     onScrubFinished: () -> Unit,
     onScrubCancelled: () -> Unit,
+    onScrubbingChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var dragging by remember { mutableStateOf(false) }
+    val scrubbingChanged by rememberUpdatedState(onScrubbingChange)
+    // A bar removed mid-drag (Picture-in-Picture) gets no end or cancel
+    // callback; without this the controls would never hide again.
+    DisposableEffect(Unit) {
+        onDispose { if (dragging) scrubbingChanged(false) }
+    }
     var scrubStart by remember { mutableDoubleStateOf(0.0) }
     var barWidthPx by remember { mutableIntStateOf(0) }
     var bubbleWidthPx by remember { mutableIntStateOf(0) }
@@ -2025,6 +2040,7 @@ private fun PlayerSeekBar(
                     onDragStart = { offset ->
                         scrubStart = latestPosition
                         dragging = true
+                        scrubbingChanged(true)
                         onScrub(secondsAt(offset.x))
                     },
                     onHorizontalDrag = { change, _ ->
@@ -2033,10 +2049,12 @@ private fun PlayerSeekBar(
                     },
                     onDragEnd = {
                         dragging = false
+                        scrubbingChanged(false)
                         onScrubFinished()
                     },
                     onDragCancel = {
                         dragging = false
+                        scrubbingChanged(false)
                         onScrubCancelled()
                     },
                 )
