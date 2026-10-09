@@ -7,10 +7,15 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.upscalerelay.client.SessionState
+import org.upscalerelay.player.mpv.MpvPlaybackState
 import java.io.File
 import java.time.Instant
 
@@ -71,6 +76,92 @@ class AuditFixesDeviceTest {
         }
     }
 
+    @Test
+    fun firstOpenFallbackSavesProgressAndEndsAtEof() {
+        requireDebugPackage()
+        val (uri, key) = localClip()
+        withRejectingRelay { model, relay ->
+            openRejectedLocal(model, relay, uri)
+            onMain { model.playLocalFallback() }
+            await("direct playback", model, 30_000) {
+                it.directLocalFallback && it.playerState == MpvPlaybackState.PLAYING
+            }
+            await("progress saved during direct playback", model, 40_000) {
+                (it.playbackProgress[key]?.positionSeconds ?: 0.0) >= 10.0
+            }
+            onMain { model.seekTo(147.0) }
+            // Auto-play is off: a natural end returns to the library.
+            await("natural EOF returns to the library", model, 30_000) { it.playingPath == null }
+            val saved = runBlocking { preferences.snapshot() }.playbackPositions[key]
+            assertNotNull("EOF must leave a history entry", saved)
+            assertEquals("EOF pins the entry at 100%", saved!!.durationSeconds, saved.positionSeconds, 0.5)
+        }
+    }
+
+    @Test
+    fun firstOpenFallbackResumesAtSavedPosition() {
+        requireDebugPackage()
+        val (uri, key) = localClip()
+        runBlocking { preferences.setPlaybackPosition(key, 40.0, 150.0) }
+        withRejectingRelay { model, relay ->
+            openRejectedLocal(model, relay, uri)
+            onMain { model.playLocalFallback() }
+            await("direct playback resumes at the saved position", model, 30_000) {
+                it.directLocalFallback && it.playerState == MpvPlaybackState.PLAYING &&
+                    it.mpvMetrics.positionSeconds >= 39.0
+            }
+            onMain { model.closePlayback() }
+            await("close", model, 30_000) { it.playingPath == null && !it.busy }
+        }
+    }
+
+    /** The generated 150 s fixture; push it with `run-as ... cp` into files/. */
+    private fun localClip(): Pair<String, String> {
+        val file = File(context.filesDir, "audit-clip-150s.mp4")
+        assumeTrue("push audit-clip-150s.mp4 into the debug app's files directory", file.isFile)
+        val uri = Uri.fromFile(file).toString()
+        val key = "local:$uri"
+        runBlocking { preferences.clearPlaybackPosition(key) }
+        return uri to key
+    }
+
+    private fun withRejectingRelay(body: (RelayViewModel, RejectingRelay) -> Unit) {
+        val original = runBlocking { preferences.snapshot() }
+        try {
+            RejectingRelay().use { relay ->
+                ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                    val model = model(scenario)
+                    await("preferences", model) { it.preferencesLoaded }
+                    onMain {
+                        model.setHost("127.0.0.1")
+                        model.setPort(relay.port.toString())
+                        model.setAutoPlayNext(false)
+                        model.connect()
+                    }
+                    await("connect to the rejecting relay", model) {
+                        it.sessionState == SessionState.BROWSING && !it.busy && it.capabilities != null
+                    }
+                    body(model, relay)
+                }
+            }
+        } finally {
+            runBlocking {
+                preferences.setHost(original.host)
+                preferences.setPort(original.port)
+                preferences.setAutoPlayNext(original.autoPlayNext)
+            }
+        }
+    }
+
+    /** The relay refuses the session after the document bridge is already open. */
+    private fun openRejectedLocal(model: RelayViewModel, relay: RejectingRelay, uri: String) {
+        onMain { model.openLocalDocument(uri) }
+        await("relay rejection with the original still offered", model, 30_000) {
+            !it.busy && it.error != null && it.playingPath != null && it.localPlayback
+        }
+        assertEquals(1, relay.openRequests.get())
+    }
+
     private fun backup(name: String, value: AppPreferences): Uri {
         val file = File(context.cacheDir, "audit-backup-$name.json")
         file.writeText(BackupCodec.encode(value, "audit-test", Instant.now()))
@@ -106,7 +197,8 @@ class AuditFixesDeviceTest {
         error(
             "Timed out: $label; session=${state.sessionState} player=${state.playerState} " +
                 "playing=${state.playingPath} busy=${state.busy} error=${state.error} " +
-                "logging=${state.fileLoggingEnabled}/${state.logFileName}",
+                "logging=${state.fileLoggingEnabled}/${state.logFileName} " +
+                "fallback=${state.directLocalFallback} position=${state.mpvMetrics.positionSeconds}",
         )
     }
 }

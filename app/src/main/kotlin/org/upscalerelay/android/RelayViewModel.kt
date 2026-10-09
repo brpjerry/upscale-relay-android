@@ -1931,9 +1931,23 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playLocalFallback() {
         val bridge = localDocumentServer ?: return
-        val position = mutableUi.value.mpvMetrics.positionSeconds
-        AppLog.i(TAG, "direct local fallback at %.1fs".format(position))
+        val uriValue = localDocumentUri ?: return
         if (closingJob?.isActive == true) return
+        // A relay session that played hands over where it was. When the very
+        // first relay open failed nothing has played yet (and the metrics may
+        // still hold an earlier file's position), so start where the saved
+        // history says, as a relay open would have.
+        val relayPlayed = activeOrigin != null
+        val position = if (relayPlayed) {
+            mutableUi.value.mpvMetrics.positionSeconds
+        } else {
+            val key = progressKey(PlaybackOrigin.LocalDocument(uriValue))
+            resumeSeconds(key, playbackPositions[key]?.durationSeconds) ?: 0.0
+        }
+        AppLog.i(TAG, "direct local fallback at %.1fs (relay played: %b)".format(position, relayPlayed))
+        // The original is what plays now: progress, history and the end of
+        // the file all belong to it, whether or not the relay ever started.
+        activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
         closingJob = viewModelScope.launch(actionErrors) {
             openingJob?.cancelAndJoin()
             openingJob = null
@@ -2656,14 +2670,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         endpoint: PlaybackEndpoint,
         key: String,
     ): PlaybackEndpoint {
-        val saved = playbackPositions[key]?.positionSeconds ?: return endpoint
-        val duration = endpoint.session.durationSeconds ?: return endpoint
+        val saved = resumeSeconds(key, endpoint.session.durationSeconds) ?: return endpoint
         val timeBase = endpoint.session.timeBase ?: return endpoint
-        if (!saved.isFinite() || saved < RESUME_MIN_SECONDS || saved > duration - RESUME_END_WINDOW_SECONDS) {
-            return endpoint
-        }
         AppLog.i(TAG, "resuming at saved position %.1fs".format(saved))
         return controller.seek((saved / timeBase.value).roundToLong())
+    }
+
+    /** The saved position worth resuming at, or null near either end of the file. */
+    private fun resumeSeconds(key: String, durationSeconds: Double?): Double? {
+        val saved = playbackPositions[key]?.positionSeconds ?: return null
+        val duration = durationSeconds?.takeIf { it > 0 } ?: return null
+        if (!saved.isFinite() || saved < RESUME_MIN_SECONDS || saved > duration - RESUME_END_WINDOW_SECONDS) {
+            return null
+        }
+        return saved
     }
 
     private fun loadRelayEndpoint(endpoint: PlaybackEndpoint) {
