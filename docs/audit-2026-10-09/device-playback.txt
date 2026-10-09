@@ -1,0 +1,23 @@
+INSTRUMENTATION_STATUS: class=org.upscalerelay.android.AuditPlaybackDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stream=
+org.upscalerelay.android.AuditPlaybackDeviceTest:
+INSTRUMENTATION_STATUS: test=pausedSeekAndSettingsRestartRetainIntent
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=org.upscalerelay.android.AuditPlaybackDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stream=.
+INSTRUMENTATION_STATUS: test=pausedSeekAndSettingsRestartRetainIntent
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_RESULT: stream=
+
+Time: 17.202
+
+OK (1 test)
+
+
+INSTRUMENTATION_CODE: -1

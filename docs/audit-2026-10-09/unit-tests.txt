@@ -1,0 +1,116 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build
+> Task :relay-demux:preBuild UP-TO-DATE
+> Task :relay-client:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :relay-protocol:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :relay-demux:preDebugBuild UP-TO-DATE
+> Task :player-mpv:verifyMpvNative
+> Task :player-mpv:preBuild
+> Task :player-mpv:preDebugBuild
+> Task :relay-client:processResources NO-SOURCE
+> Task :relay-client:processTestResources NO-SOURCE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :relay-demux:generateDebugResources UP-TO-DATE
+> Task :player-mpv:generateDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :relay-demux:packageDebugResources UP-TO-DATE
+> Task :player-mpv:packageDebugResources UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :relay-demux:processDebugNavigationResources UP-TO-DATE
+> Task :player-mpv:processDebugNavigationResources UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :relay-demux:parseDebugLocalResources UP-TO-DATE
+> Task :player-mpv:parseDebugLocalResources UP-TO-DATE
+> Task :relay-demux:generateDebugRFile UP-TO-DATE
+> Task :player-mpv:generateDebugRFile UP-TO-DATE
+> Task :relay-demux:javaPreCompileDebug UP-TO-DATE
+> Task :relay-demux:preDebugUnitTestBuild UP-TO-DATE
+> Task :relay-protocol:compileKotlin UP-TO-DATE
+> Task :relay-demux:generateDebugUnitTestStubRFile UP-TO-DATE
+> Task :relay-protocol:compileJava NO-SOURCE
+> Task :relay-demux:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :relay-protocol:processResources NO-SOURCE
+> Task :relay-protocol:classes UP-TO-DATE
+> Task :relay-demux:writeDebugAarMetadata UP-TO-DATE
+> Task :relay-demux:extractDeepLinksDebug UP-TO-DATE
+> Task :relay-protocol:jar UP-TO-DATE
+> Task :player-mpv:compileDebugKotlin UP-TO-DATE
+> Task :relay-demux:processDebugManifest UP-TO-DATE
+> Task :player-mpv:javaPreCompileDebug UP-TO-DATE
+> Task :relay-demux:mapDebugSourceSetPaths UP-TO-DATE
+> Task :player-mpv:compileDebugJavaWithJavac NO-SOURCE
+> Task :relay-demux:compileDebugLibraryResources UP-TO-DATE
+> Task :player-mpv:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :player-mpv:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :player-mpv:preDebugUnitTestBuild
+> Task :player-mpv:generateDebugUnitTestStubRFile UP-TO-DATE
+> Task :relay-protocol:compileTestKotlin UP-TO-DATE
+> Task :relay-protocol:compileTestJava NO-SOURCE
+> Task :relay-protocol:processTestResources UP-TO-DATE
+> Task :relay-protocol:testClasses UP-TO-DATE
+> Task :player-mpv:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :player-mpv:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :player-mpv:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :player-mpv:processDebugJavaRes UP-TO-DATE
+> Task :player-mpv:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :relay-client:compileKotlin UP-TO-DATE
+> Task :relay-client:compileJava NO-SOURCE
+> Task :relay-client:classes UP-TO-DATE
+> Task :relay-client:jar UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:generateDebugRFile UP-TO-DATE
+> Task :relay-client:compileTestKotlin UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :relay-client:compileTestJava NO-SOURCE
+> Task :relay-client:testClasses UP-TO-DATE
+> Task :relay-demux:compileDebugKotlin UP-TO-DATE
+> Task :relay-demux:compileDebugJavaWithJavac NO-SOURCE
+> Task :relay-demux:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :relay-demux:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :relay-demux:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :relay-demux:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :relay-demux:processDebugJavaRes UP-TO-DATE
+> Task :relay-demux:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac NO-SOURCE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :relay-protocol:test
+> Task :player-mpv:testDebugUnitTest
+> Task :relay-demux:testDebugUnitTest
+> Task :player-mpv:writeDebugAarMetadata UP-TO-DATE
+> Task :player-mpv:extractDeepLinksDebug UP-TO-DATE
+> Task :player-mpv:processDebugManifest UP-TO-DATE
+> Task :player-mpv:mapDebugSourceSetPaths UP-TO-DATE
+> Task :player-mpv:compileDebugLibraryResources UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :app:testDebugUnitTest
+> Task :relay-client:test
+
+[Incubating] Problems report is available at: file:///C:/Users/b580v/Documents/CC/upscale-relay-android/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 8s
+74 actionable tasks: 6 executed, 68 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.7.1/userguide/configuration_cache_enabling.html
