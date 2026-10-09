@@ -370,6 +370,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         interpolationEnabled = value.interpolationEnabled,
                         interpolationScaler = value.interpolationScaler,
                         backgroundPlayback = value.backgroundPlayback,
+                        // Restored once, so the logger below can start. After
+                        // that the switch owns the flag: the snapshots its own
+                        // writes produce can arrive behind older ones, and an
+                        // import applies its value itself (importData).
+                        fileLoggingEnabled = if (firstLoad) {
+                            value.fileLoggingEnabled
+                        } else {
+                            state.fileLoggingEnabled
+                        },
                         destination = if (firstLoad) {
                             TabletDestination.entries.firstOrNull { it.name == value.lastDestination }
                                 ?: state.destination
@@ -728,6 +737,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 AppLog.i(TAG, "imported backup (${restored.playbackPositions.size} history entries)")
                 mutableUi.update {
                     it.copy(
+                        fileLoggingEnabled = restored.fileLoggingEnabled,
                         backupStatus = BackupStatus(
                             "Restored all settings and ${restored.playbackPositions.size} " +
                                 "watch-history ${entryWord(restored.playbackPositions.size)}. " +
@@ -735,6 +745,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         ),
                     )
                 }
+                syncFileLogging(restored.fileLoggingEnabled)
             }.onFailure { error ->
                 AppLog.e(TAG, "backup import failed: ${error.message}")
                 mutableUi.update {
