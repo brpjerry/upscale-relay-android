@@ -157,6 +157,45 @@ class AuditFixesDeviceTest {
         }
     }
 
+    @Test
+    fun sortChangeInAChildRefreshesTheParentListingAndItsCursor() {
+        requireDebugPackage()
+        // 150 files, so the root pages; the mtimes make newest-first differ from name order.
+        val files = (0 until 150).map { FakeEntry("f%03d.mkv".format(it), mtime = (it * 37L) % 150) }
+        val root = listOf(FakeEntry("Child", directory = true)) + files
+        val relay = FakeRelay(
+            library = mapOf("" to root, "Child" to listOf(FakeEntry("c1.mkv"), FakeEntry("c2.mkv"))),
+        )
+        withFakeRelay(relay, sort = LibrarySort.NAME) { model ->
+            assertEquals(
+                relay.order(root, "name").take(100).map { it.name },
+                model.ui.value.currentDirectory?.children?.map { it.name },
+            )
+            openChild(model, "Child")
+            onMain { model.setLibrarySort(LibrarySort.DATE) }
+            await("child re-sorted", model) {
+                !it.libraryLoading && it.librarySort == LibrarySort.DATE &&
+                    it.currentDirectory?.path == "Child"
+            }
+            onMain { model.upDirectory() }
+            await("parent listed newest first", model) {
+                !it.libraryLoading && it.currentDirectory?.path == "" &&
+                    it.currentDirectory?.children?.map { child -> child.name } ==
+                    relay.order(root, "mtime").take(100).map { entry -> entry.name }
+            }
+            assertNotNull("the parent must still page", model.ui.value.libraryNextCursor)
+            onMain { model.loadMoreLibrary() }
+            await("second page", model) {
+                !it.libraryLoading && (it.currentDirectory?.children?.size ?: 0) > 100
+            }
+            assertEquals(
+                "pages must continue the newest-first order with no duplicates or gaps",
+                relay.order(root, "mtime").map { it.name },
+                model.ui.value.currentDirectory?.children?.map { it.name },
+            )
+        }
+    }
+
     private fun openChild(model: RelayViewModel, name: String) {
         val target = child(model, name)
         onMain { model.openDirectory(target) }

@@ -128,6 +128,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var backgroundConnectJob: Job? = null
     private var quietRefreshJob: Job? = null
 
+    // The sort changed while a library request was running; the re-sort
+    // follows it (refreshServerDirectoryForSort).
+    private var sortRefreshPending = false
+
     // "host:port" the listing on screen came from. A connect to the same
     // server keeps that listing up while it runs; any other server starts
     // from an empty screen.
@@ -832,20 +836,47 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-    /** Re-fetches the open server directory in the newly selected order. */
+    /**
+     * Re-fetches the open server directory, and every listing above it that
+     * Up returns to, in the newly selected order.
+     *
+     * A cursor is an offset into one ordering; replayed under another, the
+     * server answers with a wrong page, not an error. So nothing listed under
+     * the old sort may page again: its cursors go at once, and the refreshed
+     * chain brings new ones. Until it lands, Up shows the old listings.
+     */
     private fun refreshServerDirectoryForSort() {
         val path = mutableUi.value.currentDirectory?.path ?: return
         if (mutableUi.value.capabilities?.hasLibrary != true || serverSortParam() == null) return
+        mutableUi.update {
+            it.copy(libraryNextCursor = null, directoryCursorStack = it.directoryCursorStack.map { null })
+        }
+        if (mutableUi.value.libraryLoading) {
+            // libraryAction runs one request at a time; this one follows.
+            sortRefreshPending = true
+            return
+        }
         libraryAction("Could not re-sort the library") { active ->
-            val page = active.fetchLibraryPage(path, sort = serverSortParam())
-            if (active !== controller || mutableUi.value.currentDirectory?.path != path) {
-                return@libraryAction
-            }
-            mutableUi.update {
-                it.copy(
-                    currentDirectory = page.directory,
-                    libraryRoot = if (path.isEmpty()) page.directory else it.libraryRoot,
-                    libraryNextCursor = page.nextCursor,
+            val sort = serverSortParam()
+            val root = active.fetchLibraryPage("", sort = sort)
+            val restored = restoreServerDirectory(
+                active = active,
+                root = RestoredLibrary(root.directory, emptyList(), emptyList(), root.nextCursor),
+                path = path,
+                minimumChildren = 0,
+            ) ?: throw IOException("the listing of '$path' could not be fetched")
+            if (active !== controller || serverSortParam() != sort) return@libraryAction
+            mutableUi.update { state ->
+                // Up stays usable while this runs: show the directory the
+                // user is standing in, never put them back down.
+                val view = restored.truncatedTo(state.currentDirectory?.path ?: path)
+                if (view.directory.path != state.currentDirectory?.path) return@update state
+                state.copy(
+                    libraryRoot = view.stack.firstOrNull() ?: view.directory,
+                    currentDirectory = view.directory,
+                    directoryStack = view.stack,
+                    directoryCursorStack = view.cursorStack,
+                    libraryNextCursor = view.nextCursor,
                     selectedLibraryNode = null,
                 )
             }
@@ -883,6 +914,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 mutableUi.update { it.copy(libraryLoading = false) }
+                if (sortRefreshPending) {
+                    sortRefreshPending = false
+                    refreshServerDirectoryForSort()
+                }
             }
         }
     }
