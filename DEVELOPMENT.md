@@ -90,6 +90,10 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   adb shell run-as org.upscalerelay.android.debug cp /data/local/tmp/audit-clip-150s.mp4 files/
   ```
 
+- The pixel-aspect test needs three 720x576, 16:15 clips: MP4, Matroska with
+  display sizes, and Matroska that leaves the aspect to the bitstream.
+  `tools/make_anamorphic_clips.py <dir>` writes all three; push them the
+  same way.
 - `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
   fails without it.
 

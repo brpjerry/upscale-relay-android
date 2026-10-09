@@ -20,7 +20,25 @@ data class UplinkVideoInfo(
     val chapters: List<ChapterInfo> = emptyList(),
     val sourceHasAudio: Boolean? = null,
     val sourceHasAuxiliary: Boolean? = null,
-)
+    // Pixel (sample) aspect ratio of the coded frames, when the extractor
+    // reports one. Anamorphic sources need it to be fitted by display aspect.
+    val sampleAspectNumerator: Int? = null,
+    val sampleAspectDenominator: Int? = null,
+) {
+    /**
+     * The ratio worth sending: reduced, positive, and not square. Square or
+     * unknown pixels are omitted, which the server reads as 1:1.
+     */
+    fun anamorphicSampleAspect(): Pair<Int, Int>? {
+        val numerator = sampleAspectNumerator?.takeIf { it > 0 } ?: return null
+        val denominator = sampleAspectDenominator?.takeIf { it > 0 } ?: return null
+        if (numerator == denominator) return null
+        val divisor = gcd(numerator, denominator)
+        return numerator / divisor to denominator / divisor
+    }
+
+    private fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+}
 
 data class UplinkAccessUnit(
     val payload: ByteArray,

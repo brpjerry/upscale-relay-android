@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.player.mpv.MpvPlaybackState
+import org.upscalerelay.demux.AndroidMediaSource
 import org.upscalerelay.protocol.LibraryNode
 import java.io.File
 import java.time.Instant
@@ -119,6 +120,37 @@ class AuditFixesDeviceTest {
             }
             onMain { model.closePlayback() }
             await("close", model, 30_000) { it.playingPath == null && !it.busy }
+        }
+    }
+
+    /**
+     * An anamorphic local file's pixel aspect reaches open_session (the
+     * server then fits by display aspect). 720x576 clips at 16:15: MP4 is
+     * reported by MediaExtractor, Matroska with display sizes by its Video
+     * element. A Matroska file that leaves the aspect to the bitstream
+     * (DisplayUnit 4, as FFmpeg writes without a stream SAR) is not read yet.
+     * Generate them as DEVELOPMENT.md describes.
+     */
+    @Test
+    fun anamorphicLocalSourceReportsItsSampleAspect() {
+        requireDebugPackage()
+        val expected = linkedMapOf(
+            "audit-sar-16x15.mp4" to (16 to 15),
+            "audit-sar-16x15-display.mkv" to (16 to 15),
+            "audit-sar-16x15.mkv" to null,
+        )
+        for ((name, aspect) in expected) {
+            val file = File(context.filesDir, name)
+            assumeTrue("push $name into the debug app's files directory", file.isFile)
+            AndroidMediaSource.open(context, Uri.fromFile(file)).use { source ->
+                assertEquals(name, aspect, source.videoInfo.anamorphicSampleAspect())
+            }
+        }
+        val square = File(context.filesDir, "audit-clip-150s.mp4")
+        if (square.isFile) {
+            AndroidMediaSource.open(context, Uri.fromFile(square)).use { source ->
+                assertEquals(null, source.videoInfo.anamorphicSampleAspect())
+            }
         }
     }
 

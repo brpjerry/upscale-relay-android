@@ -77,6 +77,11 @@ class AndroidMediaSource private constructor(
                         format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
                     val chapters = readChapters(resolver, uri)
+                    // MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT (API 30)
+                    // arrive for MP4; Matroska's sit in its Video element.
+                    val sampleAspect = format.intOrNull("sar-width")?.let { width ->
+                        format.intOrNull("sar-height")?.let { height -> width to height }
+                    } ?: readMatroskaSampleAspect(resolver, uri)
                     val hasAudio = (0 until extractor.trackCount).any { index ->
                         extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
                             ?.startsWith("audio/") == true
@@ -102,6 +107,8 @@ class AndroidMediaSource private constructor(
                             // the original has no audio or subtitle tracks.
                             sourceHasAudio = if (hasAudio) true else null,
                             sourceHasAuxiliary = if (hasAudio) true else null,
+                            sampleAspectNumerator = sampleAspect?.first,
+                            sampleAspectDenominator = sampleAspect?.second,
                         ),
                     )
                 } finally {
@@ -123,6 +130,16 @@ class AndroidMediaSource private constructor(
                     }
                 }
             }.getOrNull().orEmpty()
+
+        /** Null for non-Matroska documents and square pixels; best-effort like chapters. */
+        private fun readMatroskaSampleAspect(resolver: ContentResolver, uri: Uri): Pair<Int, Int>? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaVideoAspect.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
 
         private fun codecName(mime: String): String = when (mime) {
             MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"

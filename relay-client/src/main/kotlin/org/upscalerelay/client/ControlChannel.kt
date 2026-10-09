@@ -204,6 +204,13 @@ internal class ControlChannel(
                         add(kotlinx.serialization.json.JsonPrimitive(video.averageRateDenominator))
                     })
                 }
+                // Optional and additive: absent means square pixels.
+                video.anamorphicSampleAspect()?.let { (numerator, denominator) ->
+                    put("sample_aspect_ratio", kotlinx.serialization.json.buildJsonArray {
+                        add(kotlinx.serialization.json.JsonPrimitive(numerator))
+                        add(kotlinx.serialization.json.JsonPrimitive(denominator))
+                    })
+                }
             })
             put("model", model)
             put("quality_tier", qualityTier)
