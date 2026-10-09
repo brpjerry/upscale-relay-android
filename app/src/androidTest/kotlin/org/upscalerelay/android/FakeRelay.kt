@@ -25,11 +25,13 @@ data class FakeEntry(val name: String, val directory: Boolean = false, val mtime
  * a local open fails after its document bridge is up. With a [library] it
  * also serves GET /library the way the server does: directories first, then
  * name or newest-first order, and a cursor that is a bare offset into that
- * order. [libraryDelayMillis] holds a directory's response back.
+ * order. [libraryDelayMillis] holds a directory's response back. A
+ * [serverId] is advertised in capabilities as the server's stable identity.
  */
 class FakeRelay(
     private val library: Map<String, List<FakeEntry>> = emptyMap(),
     private val libraryDelayMillis: (path: String) -> Long = { 0 },
+    private val serverId: String? = null,
 ) : AutoCloseable {
     private val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
     private val connections = CopyOnWriteArrayList<Socket>()
@@ -178,7 +180,8 @@ class FakeRelay(
         } else {
             """"library":true,"library_sort":["name","mtime"]"""
         }
-        return """{"type":"capabilities","protocol_version":1,"server_name":"audit-fake-relay",""" +
+        val identity = serverId?.let { ""","server_id":"$it"""" }.orEmpty()
+        return """{"type":"capabilities","protocol_version":1,"server_name":"audit-fake-relay"$identity,""" +
             """"models":[{"name":"passthrough","scale_factor":1}],""" +
             """"quality_tiers":["lossless-hevc","hevc-qp2","hevc-qp4","hevc-qp6",""" +
             """"hevc-qp10","hevc-qp14","hevc-qp18"],$library}"""

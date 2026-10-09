@@ -201,14 +201,42 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var warningDismissed = false
 
     private sealed interface PlaybackOrigin {
-        data class ServerFile(val path: String) : PlaybackOrigin
+        /** [scope] is the server's history scope (serverHistoryScope) when it opened. */
+        data class ServerFile(val path: String, val scope: String) : PlaybackOrigin
         data class LocalDocument(val uriValue: String) : PlaybackOrigin
     }
 
     private fun progressKey(origin: PlaybackOrigin): String = when (origin) {
-        is PlaybackOrigin.ServerFile -> "server:${origin.path}"
+        is PlaybackOrigin.ServerFile -> serverHistoryKey(origin.scope, origin.path)
         is PlaybackOrigin.LocalDocument -> "local:${origin.uriValue}"
     }
+
+    // Every server's recents (history keys); the UI gets the current server's.
+    private var recentServerKeys: List<String> = emptyList()
+
+    // The "host:port" the saved history scope was recorded for.
+    private var historyScopeOrigin = ""
+
+    /**
+     * Makes [scope] the server whose history and recents the UI shows, and
+     * remembers it for [origin] so the next cold start shows it before the
+     * connect has confirmed the server.
+     */
+    private fun adoptHistoryScope(origin: String, scope: String) {
+        val changed = mutableUi.value.historyScope != scope
+        if (changed) {
+            mutableUi.update {
+                it.copy(historyScope = scope, recentPaths = recentPathsIn(scope))
+            }
+        }
+        if (changed || historyScopeOrigin != origin) {
+            historyScopeOrigin = origin
+            persist { preferences.setHistoryScope(origin, scope) }
+        }
+    }
+
+    private fun recentPathsIn(scope: String): List<String> =
+        recentServerKeys.mapNotNull { serverHistoryPath(it, scope) }
 
     // Phase 5.5: system media integration.
     private var mediaSession: MediaSession? = null
@@ -354,7 +382,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     null
                 }
                 if (cachedLibrary != null) libraryOrigin = cachedLibrary.origin
+                recentServerKeys = value.recentServerKeys
+                if (firstLoad) historyScopeOrigin = value.historyScopeOrigin
+                // At launch the saved scope stands in for the server's
+                // identity until the connect confirms it.
+                val launchOrigin = "${value.host.trim()}:${value.port}"
+                val launchScope = value.historyScope.takeIf {
+                    it.isNotEmpty() && value.historyScopeOrigin == launchOrigin
+                } ?: serverHistoryScope(null, value.host, value.port)
                 mutableUi.update { state ->
+                    val scope = if (firstLoad) launchScope else state.historyScope
                     state.copy(
                         currentDirectory = cachedLibrary?.directory ?: state.currentDirectory,
                         directoryStack = cachedLibrary?.stack ?: state.directoryStack,
@@ -395,7 +432,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             state.destination
                         },
-                        recentPaths = value.recentPaths,
+                        historyScope = scope,
+                        recentPaths = recentPathsIn(scope),
                         recentLocalUris = value.recentLocalUris,
                         recentLocalRootUris = value.recentLocalRootUris,
                         playbackProgress = value.playbackPositions,
@@ -1045,8 +1083,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         return current to nextCursor
     }
 
+    /** Clears the recents of the server on screen. */
     fun clearRecents() {
-        persist { preferences.clearRecents() }
+        val scope = mutableUi.value.historyScope
+        persist { preferences.clearRecents(scope) }
     }
 
     fun dismissError() {
@@ -1208,6 +1248,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     if (next === controller) {
                         libraryOrigin = origin
+                        adoptHistoryScope(origin, serverHistoryScope(connected.capabilities.serverId, host, port))
                         // Reachable again: the banner that said otherwise goes.
                         val stale = connectionError
                         connectionError = null
@@ -1600,6 +1641,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 var currentController = checkNotNull(connectionForAction()) {
                     mutableUi.value.error ?: "Unable to connect to the upscale server."
                 }
+                // Connected: the scope is now the server's own.
+                val origin = PlaybackOrigin.ServerFile(file.path, mutableUi.value.historyScope)
                 // Setting playingPath asks the Activity to enter sensor
                 // landscape. Wait for the recreated Compose surface to report
                 // its real pixels before negotiating the server output size.
@@ -1637,12 +1680,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     prepare(currentController)
                 }
                 openRetryPending = false
-                applyResumePoint(currentController, endpoint, "server:${file.path}") to
-                    currentController
+                Triple(applyResumePoint(currentController, endpoint, progressKey(origin)), currentController, origin)
             }
-                .onSuccess { (endpoint, currentController) ->
+                .onSuccess { (endpoint, currentController, origin) ->
                     AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
-                    activeOrigin = PlaybackOrigin.ServerFile(file.path)
+                    activeOrigin = origin
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
@@ -1658,7 +1700,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     subtitlePreferenceAppliedSession = null
                     persist {
                         preferences.setModel(endpoint.model)
-                        preferences.addRecent(file.path)
+                        preferences.addRecent(progressKey(origin))
                     }
                     playerEngine.setPanscan(0.0)
                     loadRelayEndpoint(endpoint)
@@ -1836,9 +1878,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 val active = controller ?: return null
                 val parent = if ('/' in origin.path) origin.path.substringBeforeLast('/') else ""
                 runPlaybackCatching {
-                    if (forward) findNextServerFile(active, parent, origin.path)
+                    if (forward) findNextServerFile(active, parent, origin.path, origin.scope)
                     else findPreviousServerFile(active, parent, origin.path)
-                }.getOrNull()?.let { AdjacentFile(PlaybackOrigin.ServerFile(it.path), it.path, local = false) }
+                }.getOrNull()?.let {
+                    AdjacentFile(PlaybackOrigin.ServerFile(it.path, origin.scope), it.path, local = false)
+                }
             }
             is PlaybackOrigin.LocalDocument ->
                 (if (forward) findNextLocalFile(origin.uriValue) else findPreviousLocalFile(origin.uriValue))
@@ -2346,6 +2390,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 libraryRoot = connected.root,
             )
         }
+        adoptHistoryScope("$host:$port", serverHistoryScope(connected.capabilities.serverId, host, port))
         val endpoint = when (origin) {
             is PlaybackOrigin.ServerFile -> next.preparePlayback(
                 path = origin.path,
@@ -2499,6 +2544,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         controller: RelaySessionController,
         directory: String,
         currentPath: String,
+        scope: String,
     ): LibraryNode? {
         var cursor: String? = null
         var seenCurrent = false
@@ -2509,7 +2555,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val page = controller.fetchLibraryPage(directory, cursor, sort = sort)
             for (child in page.directory.children) {
                 if (child.type != LibraryNode.Type.FILE) continue
-                if (seenCurrent && !isWatched("server:${child.path}")) return child
+                if (seenCurrent && !isWatched(serverHistoryKey(scope, child.path))) return child
                 if (child.path == currentPath) seenCurrent = true
             }
             cursor = page.nextCursor ?: return null
@@ -2589,7 +2635,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             mutableUi.update { it.copy(reconnecting = null) }
             persist {
                 when (origin) {
-                    is PlaybackOrigin.ServerFile -> preferences.addRecent(origin.path)
+                    is PlaybackOrigin.ServerFile -> preferences.addRecent(progressKey(origin))
                     is PlaybackOrigin.LocalDocument -> preferences.addRecentLocalUri(origin.uriValue)
                 }
             }
@@ -3249,12 +3295,15 @@ data class RelayUiState(
     val diagnosticsVisible: Boolean = false,
     val gesturesEnabled: Boolean = true,
     val librarySort: LibrarySort = LibrarySort.NAME,
+    // The current server's recents, as library paths.
     val recentPaths: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),
-    // Saved watch state keyed like progressKey ("server:<path>"/"local:<uri>"),
+    // Saved watch state keyed like progressKey (serverHistoryKey/"local:<uri>"),
     // for the percentage + last-played labels in the file lists.
     val playbackProgress: Map<String, PlaybackProgress> = emptyMap(),
+    // The server whose watch state and recents are shown (serverHistoryScope).
+    val historyScope: String = "",
     val playbackHistoryLimit: Int = MAX_POSITIONS,
     val skipSeconds: Int = DEFAULT_SKIP_SECONDS,
     val localDirectoryName: String? = null,

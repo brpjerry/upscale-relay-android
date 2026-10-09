@@ -82,8 +82,10 @@ object BackupCodec {
                 put("librarySort", preferences.librarySort)
                 put("lastDestination", preferences.lastDestination)
                 put("lastLibraryPath", preferences.lastLibraryPath)
-                putJsonArray("recentServerPaths") {
-                    preferences.recentPaths.forEach { add(JsonPrimitive(it)) }
+                // Server-scoped keys. The unscoped "recentServerPaths" of
+                // older backups is not read back: those paths name no server.
+                putJsonArray("recentServerKeys") {
+                    preferences.recentServerKeys.forEach { add(JsonPrimitive(it)) }
                 }
                 putJsonArray("recentLocalUris") {
                     preferences.recentLocalUris.forEach { add(JsonPrimitive(it)) }
@@ -175,8 +177,9 @@ object BackupCodec {
                 }
                 ?: current.lastDestination,
             lastLibraryPath = library?.string("lastLibraryPath") ?: current.lastLibraryPath,
-            recentPaths = library?.strings("recentServerPaths")?.take(MAX_RECENTS)
-                ?: current.recentPaths,
+            recentServerKeys = library?.strings("recentServerKeys")
+                ?.filter(::isServerHistoryKey)?.take(MAX_RECENTS)
+                ?: current.recentServerKeys,
             recentLocalUris = library?.strings("recentLocalUris")?.take(MAX_RECENTS)
                 ?: current.recentLocalUris,
             recentLocalRootUris = library?.strings("recentLocalFolderUris")?.take(MAX_RECENTS)
@@ -199,6 +202,9 @@ object BackupCodec {
                 // The separator is the store's record delimiter; a key holding
                 // one would corrupt every later line on the next write.
                 if (!validHistoryKey(key)) continue
+                // Older backups key server files by path alone, naming no
+                // server; that history is not carried over.
+                if (isUnscopedServerKey(key)) continue
                 val position = row.double("positionSeconds") ?: continue
                 if (!position.isFinite() || position < 0) continue
                 val duration = row.double("durationSeconds")?.takeIf { it.isFinite() && it >= 0 } ?: 0.0

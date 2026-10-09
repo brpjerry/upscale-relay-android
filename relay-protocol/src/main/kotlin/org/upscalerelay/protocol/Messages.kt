@@ -45,6 +45,9 @@ data class QualityOption(
     val p95Mbps: Int?,
 )
 
+/** Longer server_id values are ignored, as if absent. */
+const val MAX_SERVER_ID_CHARS = 256
+
 data class Capabilities(
     val protocolVersion: Int,
     val serverName: String,
@@ -60,6 +63,12 @@ data class Capabilities(
     val muxedAuxTracks: Boolean = false,
     /** Content-addressed subtitle attachment protocol version; zero means absent. */
     val attachmentCacheVersion: Int = 0,
+    /**
+     * The server's stable identity, unchanged across restarts and address
+     * changes; null from servers that predate it. Per-server client state
+     * (watch history, recents) is scoped by it.
+     */
+    val serverId: String? = null,
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -111,6 +120,8 @@ data class Capabilities(
                 muxedAuxTracks = value["muxed_aux_tracks"]?.jsonPrimitive?.booleanOrNull ?: false,
                 attachmentCacheVersion = value["attachment_cache"]?.jsonPrimitive?.intOrNull
                     ?.coerceAtLeast(0) ?: 0,
+                serverId = value["server_id"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() && it.length <= MAX_SERVER_ID_CHARS },
             )
         }
     }

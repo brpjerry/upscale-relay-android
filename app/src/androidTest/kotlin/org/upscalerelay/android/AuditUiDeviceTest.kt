@@ -12,6 +12,8 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -24,6 +26,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
@@ -78,6 +81,54 @@ class AuditUiDeviceTest {
             compose.onNodeWithText(message).assertIsDisplayed()
             assertEquals(TabletDestination.SETTINGS, model().ui.value.destination)
         }
+    }
+
+    /**
+     * Two servers can hold different media at the same path. What was
+     * watched on one must not show as watched on the other, and must still be
+     * there on returning to the first.
+     */
+    @Test
+    fun watchedStateBelongsToTheServerItWasWatchedOn() {
+        val library = mapOf("" to listOf(FakeEntry("show.mkv")))
+        FakeRelay(library = library, serverId = "alpha").use { alpha ->
+            FakeRelay(library = library, serverId = "bravo").use { bravo ->
+                try {
+                    awaitModel { it.preferencesLoaded }
+                    onModel { it.selectDestination(TabletDestination.SERVER) }
+                    connectTo(alpha)
+                    compose.onAllNodesWithText("show.mkv").onFirst().performTouchInput { longClick() }
+                    awaitText("100% watched", substring = true)
+
+                    connectTo(bravo)
+                    compose.waitForIdle()
+                    assertTrue(
+                        "the other server's show.mkv must not read as watched",
+                        compose.onAllNodes(hasText("watched", substring = true)).fetchSemanticsNodes().isEmpty(),
+                    )
+
+                    connectTo(alpha)
+                    awaitText("100% watched", substring = true)
+                } finally {
+                    restorePreferences()
+                }
+            }
+        }
+    }
+
+    /** Points the app at [relay] and waits for its listing. */
+    private fun connectTo(relay: FakeRelay) {
+        onModel {
+            it.setHost("127.0.0.1")
+            it.setPort(relay.port.toString())
+            it.connect()
+        }
+        awaitModel {
+            it.sessionState == SessionState.BROWSING && !it.busy && !it.libraryLoading &&
+                it.port == relay.port.toString() &&
+                it.currentDirectory?.children?.any { child -> child.name == "show.mkv" } == true
+        }
+        awaitText("show.mkv")
     }
 
     /**
@@ -179,9 +230,9 @@ class AuditUiDeviceTest {
             SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button),
     ).onFirst()
 
-    private fun awaitText(text: String, timeoutMillis: Long = 10_000) {
+    private fun awaitText(text: String, timeoutMillis: Long = 10_000, substring: Boolean = false) {
         compose.waitUntil(timeoutMillis) {
-            compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodes(hasText(text, substring = substring)).fetchSemanticsNodes().isNotEmpty()
         }
     }
 

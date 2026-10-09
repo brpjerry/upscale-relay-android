@@ -723,11 +723,11 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
             items(directory.children, key = { it.path }) { node ->
                 LibraryItem(
                     node = node,
-                    progress = state.playbackProgress["server:${node.path}"],
+                    progress = state.playbackProgress[serverHistoryKey(state.historyScope, node.path)],
                     selected = state.selectedLibraryNode?.path == node.path,
                     enabled = !state.busy && !state.libraryLoading,
                     onMarkWatched = if (node.type == LibraryNode.Type.FILE) {
-                        { viewModel.markWatched("server:${node.path}") }
+                        { viewModel.markWatched(serverHistoryKey(state.historyScope, node.path)) }
                     } else null,
                 ) {
                     if (node.type == LibraryNode.Type.DIRECTORY) viewModel.openDirectory(node)
@@ -1011,13 +1011,13 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
                     Card(
                         Modifier.fillMaxWidth().fileCardClicks(
                             enabled = true,
-                            onLongClick = { viewModel.markWatched("server:$path") },
+                            onLongClick = { viewModel.markWatched(serverHistoryKey(state.historyScope, path)) },
                         ) { viewModel.openRecent(path) },
                     ) {
                         Column(Modifier.padding(18.dp)) {
                             Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium)
                             Text(path, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            PlaybackHistoryText(state.playbackProgress["server:$path"])
+                            PlaybackHistoryText(state.playbackProgress[serverHistoryKey(state.historyScope, path)])
                         }
                     }
                 }

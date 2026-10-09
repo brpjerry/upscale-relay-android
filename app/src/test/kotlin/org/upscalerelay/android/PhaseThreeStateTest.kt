@@ -45,7 +45,7 @@ class PhaseThreeStateTest {
     @Test
     fun `playback positions round-trip with awkward keys and stay bounded`() {
         val positions = linkedMapOf(
-            "server:Shows/A, B=1 [x].mkv" to PlaybackProgress(123.45, 3600.0, 1_721_000_000_000L),
+            "server[id:a]:Shows/A, B=1 [x].mkv" to PlaybackProgress(123.45, 3600.0, 1_721_000_000_000L),
             "local:content://provider/tree/primary%3AMovies/doc/a b.mkv" to PlaybackProgress(6.0),
         )
         assertEquals(positions, decodePositions(encodePositions(positions)))
@@ -75,8 +75,8 @@ class PhaseThreeStateTest {
     fun `legacy two-field position lines decode with unknown duration and timestamp`() {
         val separator = Char(31)
         assertEquals(
-            mapOf("server:old.mkv" to PlaybackProgress(42.5)),
-            decodePositions("server:old.mkv${separator}42.5"),
+            mapOf("server[id:a]:old.mkv" to PlaybackProgress(42.5)),
+            decodePositions("server[id:a]:old.mkv${separator}42.5"),
         )
     }
 

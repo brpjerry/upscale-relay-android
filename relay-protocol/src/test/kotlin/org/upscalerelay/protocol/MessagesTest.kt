@@ -64,6 +64,20 @@ class MessagesTest {
     }
 
     @Test
+    fun `server id is optional and ignored when blank or oversized`() {
+        fun parse(extra: String) = Capabilities.fromJson(
+            Json.parseToJsonElement(
+                """{"protocol_version":1,"server_name":"s","models":[],"quality_tiers":[]$extra}""",
+            ).jsonObject,
+        ).serverId
+        assertEquals("4f1c2b7e-9a1d-4c55-8e0e-3b2f6a7d9c10", parse(""","server_id":"4f1c2b7e-9a1d-4c55-8e0e-3b2f6a7d9c10""""))
+        assertEquals(null, parse(""))
+        assertEquals(null, parse(""","server_id":null"""))
+        assertEquals(null, parse(""","server_id":"  """"))
+        assertEquals(null, parse(""","server_id":"${"x".repeat(MAX_SERVER_ID_CHARS + 1)}""""))
+    }
+
+    @Test
     fun `capabilities choose a real model before passthrough`() {
         val value = Json.parseToJsonElement(
             """{"protocol_version":1,"server_name":"relay","models":[{"name":"passthrough","scale_factor":1},{"name":"anime-x2","scale_factor":2}],"quality_tiers":["lossless-hevc"],"library":true}""",
