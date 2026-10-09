@@ -4,9 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
-import java.nio.channels.SeekableByteChannel
 
-/** Byte-level EBML builder + an in-memory channel; no real files needed. */
+/** Builds Matroska bytes in memory (EbmlTestBuilders); no real files needed. */
 class MatroskaChaptersTest {
     @Test
     fun `chapters ahead of the clusters are parsed with titles`() {
@@ -62,11 +61,6 @@ class MatroskaChaptersTest {
 
     // -- EBML builders -------------------------------------------------------
 
-    private fun mkv(segmentChildren: ByteArray): ByteArray =
-        element(0x1A45DFA3, ByteArray(0)) + element(0x18538067, segmentChildren)
-
-    private fun cluster(): ByteArray = element(0x1F43B675, ByteArray(16))
-
     private fun chaptersElement(vararg editions: ByteArray): ByteArray =
         element(0x1043A770, editions.fold(ByteArray(0), ByteArray::plus))
 
@@ -96,64 +90,4 @@ class MatroskaChaptersTest {
             element(0x53AC, ByteBuffer.allocate(8).putLong(chaptersPosition).array())
         return element(0x114D9B74, element(0x4DBB, seek))
     }
-
-    private fun element(id: Long, payload: ByteArray): ByteArray =
-        idBytes(id) + sizeBytes(payload.size.toLong()) + payload
-
-    private fun idBytes(id: Long): ByteArray {
-        var length = 1
-        while (id ushr (8 * length) != 0L) length++
-        return ByteArray(length) { index -> (id ushr (8 * (length - 1 - index))).toByte() }
-    }
-
-    /** Four-byte size vint (marker 0x10) — plenty for test payloads. */
-    private fun sizeBytes(size: Long): ByteArray {
-        require(size < (1L shl 28) - 1)
-        return byteArrayOf(
-            (0x10 or (size ushr 24).toInt()).toByte(),
-            (size ushr 16).toByte(),
-            (size ushr 8).toByte(),
-            size.toByte(),
-        )
-    }
-
-    private fun uint(value: Long): ByteArray {
-        var length = 1
-        while (value ushr (8 * length) != 0L) length++
-        return ByteArray(length) { index -> (value ushr (8 * (length - 1 - index))).toByte() }
-    }
-
-    private fun memoryChannel(bytes: ByteArray): SeekableByteChannel =
-        object : SeekableByteChannel {
-            private var position = 0L
-            private var open = true
-
-            override fun isOpen(): Boolean = open
-
-            override fun close() {
-                open = false
-            }
-
-            override fun read(dst: ByteBuffer): Int {
-                if (position >= bytes.size) return -1
-                val count = minOf(dst.remaining().toLong(), bytes.size - position).toInt()
-                dst.put(bytes, position.toInt(), count)
-                position += count
-                return count
-            }
-
-            override fun write(src: ByteBuffer): Int = throw UnsupportedOperationException()
-
-            override fun position(): Long = position
-
-            override fun position(newPosition: Long): SeekableByteChannel {
-                position = newPosition
-                return this
-            }
-
-            override fun size(): Long = bytes.size.toLong()
-
-            override fun truncate(size: Long): SeekableByteChannel =
-                throw UnsupportedOperationException()
-        }
 }
