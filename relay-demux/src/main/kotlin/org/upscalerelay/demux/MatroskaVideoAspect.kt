@@ -10,7 +10,8 @@ import java.nio.channels.SeekableByteChannel
  * MediaExtractor reports sar-width/sar-height for MP4 but not for Matroska
  * (verified on a Galaxy Tab S9 Ultra, Android 16), and anamorphic sources
  * in MKV are the common case. Best-effort: anything unexpected yields null,
- * which means square pixels.
+ * and the field is omitted. An aspect carried only in the bitstream
+ * (DisplayUnit 4) is the server's to read from the codec parameter sets.
  */
 object MatroskaVideoAspect {
     private const val ID_TRACKS = 0x1654AE6BL

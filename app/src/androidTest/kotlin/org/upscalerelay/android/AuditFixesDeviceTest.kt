@@ -128,7 +128,8 @@ class AuditFixesDeviceTest {
      * server then fits by display aspect). 720x576 clips at 16:15: MP4 is
      * reported by MediaExtractor, Matroska with display sizes by its Video
      * element. A Matroska file that leaves the aspect to the bitstream
-     * (DisplayUnit 4, as FFmpeg writes without a stream SAR) is not read yet.
+     * (DisplayUnit 4, as FFmpeg writes without a stream SAR) sends nothing;
+     * the server reads that one from the codec parameter sets.
      * Generate them as DEVELOPMENT.md describes.
      */
     @Test

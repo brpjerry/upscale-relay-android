@@ -209,3 +209,16 @@ release.yml` builds and publishes the signed APK with those notes.
 - PGS/VobSub bitmap subtitle rendering is still unverified — the test library
   has only SSA samples.
 - S Pen and Samsung DeX interactive smoke tests remain hands-on.
+- A local source that fails mid-read ends playback early with no error.
+  MediaExtractor reports a read error the same way as end of file
+  (`sampleTime < 0`), so `ExtractorPacketReader` returns null and the uplink
+  sends EOS. A provider that drops out (network storage, a cloud document)
+  looks like a short file. Telling the two apart would need a heuristic, such
+  as an end far short of the declared duration, which risks false errors on
+  files with wrong duration headers, so it is deliberately unhandled
+  (decided 2026-10-09).
+- Pixel aspect for local uplinks comes from the container: MediaExtractor for
+  MP4, `MatroskaVideoAspect` for Matroska display sizes. An aspect carried
+  only in the video bitstream (Matroska `DisplayUnit` 4) is left to the
+  server, which reads it from the uplink's codec parameter sets when
+  `open_session.video.sample_aspect_ratio` is absent.
