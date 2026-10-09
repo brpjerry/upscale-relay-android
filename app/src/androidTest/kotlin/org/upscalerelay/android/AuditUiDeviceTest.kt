@@ -91,6 +91,10 @@ class AuditUiDeviceTest {
     @Test
     fun watchedStateBelongsToTheServerItWasWatchedOn() {
         val library = mapOf("" to listOf(FakeEntry("show.mkv")))
+        // Long press toggles, so start (and leave) both entries unwatched.
+        val entries = listOf("id:alpha", "id:bravo").map { serverHistoryKey(it, "show.mkv") }
+        fun forget() = runBlocking { entries.forEach { preferences.clearPlaybackPosition(it) } }
+        forget()
         FakeRelay(library = library, serverId = "alpha").use { alpha ->
             FakeRelay(library = library, serverId = "bravo").use { bravo ->
                 try {
@@ -111,6 +115,7 @@ class AuditUiDeviceTest {
                     awaitText("100% watched", substring = true)
                 } finally {
                     restorePreferences()
+                    forget()
                 }
             }
         }
