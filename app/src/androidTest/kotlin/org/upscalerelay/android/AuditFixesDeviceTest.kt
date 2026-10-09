@@ -1,5 +1,6 @@
 package org.upscalerelay.android
 
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.SystemClock
 import androidx.lifecycle.ViewModelProvider
@@ -194,6 +195,105 @@ class AuditFixesDeviceTest {
                 model.ui.value.currentDirectory?.children?.map { it.name },
             )
         }
+    }
+
+    /**
+     * The P1 race: a server file opened while the cold-start connect is still
+     * waiting for the network must survive that connect finishing. Wi-Fi is
+     * switched off for the launch and back on once the open is waiting; it is
+     * always switched back on. Needs the real relay (passthrough is enough).
+     */
+    @Test
+    fun openWhileTheLaunchConnectWaitsForTheNetworkKeepsThePlayer() {
+        requireDebugPackage()
+        val arguments = InstrumentationRegistry.getArguments()
+        val host = arguments.getString("auditHost") ?: "192.168.0.115"
+        val port = arguments.getString("auditPort")?.toInt() ?: 8590
+        val original = runBlocking { preferences.snapshot() }
+        runBlocking {
+            preferences.setHost(host)
+            preferences.setPort(port)
+            preferences.setAutoPlayNext(false)
+            preferences.setModel("passthrough")
+            preferences.setQualityTier("hevc-qp18")
+        }
+        try {
+            val file = findServerVideo()
+            setWifi(enabled = false)
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                val model = model(scenario)
+                await("preferences", model) { it.preferencesLoaded }
+                // The launch connect is now waiting in awaitNetwork.
+                onMain { model.openFile(file) }
+                await("open waiting on the launch connect", model) { it.playingPath == file.path && it.busy }
+                setWifi(enabled = true)
+                await("playback of the opened file", model, 120_000) {
+                    check(it.playingPath == file.path) {
+                        "the launch connect dropped the open (playingPath=${it.playingPath}, " +
+                            "endpoint=${it.endpoint}, error=${it.error})"
+                    }
+                    it.endpoint != null && !it.busy && it.playerState == MpvPlaybackState.PLAYING
+                }
+                onMain { model.closePlayback() }
+                await("close", model, 60_000) {
+                    it.playingPath == null && !it.busy && it.sessionState == SessionState.BROWSING
+                }
+            }
+        } finally {
+            setWifi(enabled = true)
+            runBlocking {
+                preferences.setHost(original.host)
+                preferences.setPort(original.port)
+                preferences.setAutoPlayNext(original.autoPlayNext)
+                preferences.setModel(original.model)
+                preferences.setQualityTier(original.qualityTier)
+            }
+        }
+    }
+
+    /** The first video file found walking the server library, depth first. */
+    private fun findServerVideo(): LibraryNode {
+        var found: LibraryNode? = null
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val model = model(scenario)
+            await("preferences", model) { it.preferencesLoaded }
+            onMain { model.connect() }
+            await("connect to the relay", model, 30_000) {
+                it.sessionState == SessionState.BROWSING && !it.busy && it.currentDirectory != null &&
+                    !it.libraryLoading
+            }
+            while (model.ui.value.directoryStack.isNotEmpty()) {
+                onMain { model.upDirectory() }
+            }
+            val videos = Regex(".*\\.(mkv|mp4|m4v|mov|webm)$", RegexOption.IGNORE_CASE)
+            repeat(6) {
+                val children = model.ui.value.currentDirectory?.children.orEmpty()
+                children.firstOrNull { it.type == LibraryNode.Type.FILE && videos.matches(it.name) }
+                    ?.let { found = it; return@use }
+                val next = children.firstOrNull { it.type == LibraryNode.Type.DIRECTORY } ?: return@use
+                onMain { model.openDirectory(next) }
+                await("open ${next.name}", model, 30_000) {
+                    !it.libraryLoading && it.currentDirectory?.path == next.path
+                }
+            }
+        }
+        return requireNotNull(found) { "no video file found in the server library" }
+    }
+
+    private fun setWifi(enabled: Boolean) {
+        val command = "cmd wifi set-wifi-enabled ${if (enabled) "enabled" else "disabled"}"
+        instrumentation.uiAutomation.executeShellCommand(command).close()
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val deadline = SystemClock.elapsedRealtime() + 30_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val up = connectivity.activeNetwork != null
+            // Coming back, return as soon as the switch flips: the open must
+            // still be waiting when the network arrives.
+            if (!enabled && !up) return
+            if (enabled) return
+            SystemClock.sleep(100)
+        }
+        error("Wi-Fi did not switch ${if (enabled) "on" else "off"}")
     }
 
     private fun openChild(model: RelayViewModel, name: String) {

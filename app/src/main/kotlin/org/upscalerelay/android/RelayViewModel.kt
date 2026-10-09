@@ -142,6 +142,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     // next connect that succeeds takes it down.
     private var connectionError: String? = null
 
+    // Counts every playback the user (or auto-play) starts. A connect may
+    // clear the player fields only for playback that is older than itself:
+    // an open made while the connect waited — on the network after a wake or
+    // at launch — is newer, and the connect must leave its file alone.
+    private var playbackRequests = 0L
+
     // An open is on its first attempt and will reconnect and try again by
     // itself if the control socket turns out to be dead, so the failure
     // collector must not put that first failure on screen.
@@ -1091,6 +1097,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * and is for connects the user asked for. [resetPlayback] is off for
      * callers that manage the player fields themselves, because a file may
      * already be opening on top of a connect that runs in the background.
+     * Even when it is on, playback started after this connect began is left
+     * alone (see playbackRequests).
      */
     private suspend fun connectInternal(
         host: String,
@@ -1099,6 +1107,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         visible: Boolean = true,
         resetPlayback: Boolean = true,
     ) {
+        val playbackAtStart = playbackRequests
         playerReady.await()
         cleanupFailure?.let { throw it }
         val origin = "$host:$port"
@@ -1115,11 +1124,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // (first connect after an app restart) the persisted last-browsed
         // path takes its place.
         val previousDirectoryPath = shown?.path ?: persistedLibraryPath
+        // The player belongs to whichever started last. An open that began
+        // while this connect waited is waiting on it in turn, and gets this
+        // connection when it is done; clearing its file would drop the open.
+        val clearPlayer = resetPlayback && playbackRequests == playbackAtStart
+        if (resetPlayback && !clearPlayer) AppLog.i(TAG, "connect leaves the newer open's player in place")
         mutableUi.update { state ->
             // A user-initiated connect clears the banner; a quiet retry leaves
             // it, since the message on screen may be one no reconnect answers.
             var next = state.copy(error = if (quiet) state.error else null)
-            if (resetPlayback) {
+            if (clearPlayer) {
                 next = next.copy(
                     endpoint = null,
                     session = null,
@@ -1462,6 +1476,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openLocalDocument(uriValue: String) {
         if (mutableUi.value.busy) return
+        playbackRequests += 1
         openingJob = viewModelScope.launch(actionErrors) {
             mutableUi.update { it.copy(busy = true, error = null) }
             val currentController = connectionForAction()
@@ -1569,6 +1584,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openFile(file: LibraryNode) {
         if (file.type != LibraryNode.Type.FILE || mutableUi.value.busy) return
+        playbackRequests += 1
         openingJob = viewModelScope.launch(actionErrors) {
             mutableUi.value = mutableUi.value.copy(
                 busy = true,
@@ -2553,6 +2569,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         reason: String = "Playing next video",
     ) {
         AppLog.i(TAG, "$reason: '${displayPath.substringAfterLast('/')}'")
+        playbackRequests += 1
         activeOrigin = origin
         mutableUi.update {
             it.copy(
