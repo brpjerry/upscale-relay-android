@@ -223,11 +223,16 @@ private class ExtractorPacketReader(
 /** Convert common four-byte length-prefixed AVC/HEVC samples to Annex B. */
 internal fun normalizeNalUnits(payload: ByteArray, codec: String): ByteArray {
     if ((codec != "h264" && codec != "hevc") || payload.size < 4) return payload
-    if (payload.startsWithStartCode()) return payload
+    // The leading bytes cannot tell the two framings apart: a first NAL of
+    // 256..511 bytes has the length 00 00 01 xx, a three-byte start code. Only
+    // a sample that parses end to end as length-prefixed units with valid NAL
+    // headers is converted; genuine Annex B fails that parse and passes as is.
+    val minimumUnit = if (codec == "hevc") 2 else 1
     var offset = 0
     while (offset + 4 <= payload.size) {
         val length = payload.nalLengthAt(offset)
-        if (length <= 0 || length > payload.size - offset - 4) return payload
+        if (length < minimumUnit || length > payload.size - offset - 4) return payload
+        if (!payload.isNalHeaderAt(offset + 4, codec)) return payload
         offset += 4 + length
     }
     if (offset != payload.size) return payload
@@ -252,10 +257,14 @@ private fun ByteArray.nalLengthAt(offset: Int): Int =
         ((this[offset + 2].toInt() and 0xff) shl 8) or
         (this[offset + 3].toInt() and 0xff)
 
-private fun ByteArray.startsWithStartCode(): Boolean =
-    (size >= 3 && this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
-        (size >= 4 && this[0] == 0.toByte() && this[1] == 0.toByte() &&
-            this[2] == 0.toByte() && this[3] == 1.toByte())
+/**
+ * forbidden_zero_bit is clear in every NAL header, and an HEVC header's
+ * nuh_temporal_id_plus1 is never zero.
+ */
+private fun ByteArray.isNalHeaderAt(offset: Int, codec: String): Boolean {
+    if (this[offset].toInt() and 0x80 != 0) return false
+    return codec != "hevc" || this[offset + 1].toInt() and 0x07 != 0
+}
 
 private fun MediaFormat.intOrNull(key: String): Int? =
     if (containsKey(key)) getInteger(key) else null
