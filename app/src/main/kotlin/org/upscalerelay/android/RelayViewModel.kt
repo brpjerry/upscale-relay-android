@@ -1246,14 +1246,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openDirectory(directory: LibraryNode) {
         if (directory.type != LibraryNode.Type.DIRECTORY) return
-        if (mutableUi.value.currentDirectory == null) return
+        // Up stays usable while the child loads. If the user has gone
+        // elsewhere by the time it arrives, the late listing must not carry
+        // them back down (or record the wrong parent).
+        val from = mutableUi.value.currentDirectory?.path ?: return
         libraryAction("Could not load ${directory.name}") { active ->
             val page = active.fetchLibraryPage(directory.path, sort = serverSortParam())
             if (active !== controller) return@libraryAction
             // Read here, not before the request: a connect that finished
-            // first has replaced the listing this was tapped in.
+            // first has replaced the listing this was tapped in with a fresh
+            // one of the same directory.
             val state = mutableUi.value
-            val current = state.currentDirectory ?: return@libraryAction
+            val current = state.currentDirectory?.takeIf { it.path == from } ?: return@libraryAction
             mutableUi.value = state.copy(
                 currentDirectory = page.directory,
                 directoryStack = state.directoryStack + current,

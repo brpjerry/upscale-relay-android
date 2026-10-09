@@ -1,6 +1,8 @@
 package org.upscalerelay.android
 
+import android.net.Uri
 import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
 import java.io.OutputStream
@@ -12,24 +14,37 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
+/** One child in a [FakeRelay] library directory. */
+data class FakeEntry(val name: String, val directory: Boolean = false, val mtime: Long = 0)
+
 /**
- * A relay control endpoint on 127.0.0.1 that speaks just enough WebSocket for
- * the client: it answers hello with capabilities, rejects every open_session
- * the way the server rejects one, and acknowledges teardown. It serves no
- * library and no media, so a local open fails after its document bridge is up.
+ * A relay on 127.0.0.1 that speaks just enough of the protocol for the client.
+ *
+ * The control WebSocket answers hello with capabilities, rejects every
+ * open_session the way the server rejects one, and acknowledges teardown, so
+ * a local open fails after its document bridge is up. With a [library] it
+ * also serves GET /library the way the server does: directories first, then
+ * name or newest-first order, and a cursor that is a bare offset into that
+ * order. [libraryDelayMillis] holds a directory's response back.
  */
-class RejectingRelay : AutoCloseable {
-    private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
+class FakeRelay(
+    private val library: Map<String, List<FakeEntry>> = emptyMap(),
+    private val libraryDelayMillis: (path: String) -> Long = { 0 },
+) : AutoCloseable {
+    private val server = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
     private val connections = CopyOnWriteArrayList<Socket>()
     val openRequests = AtomicInteger()
+
+    /** "path|cursor|sort" for every library request, in arrival order. */
+    val libraryRequests = CopyOnWriteArrayList<String>()
     val port: Int get() = server.localPort
 
     init {
-        thread(name = "rejecting-relay", isDaemon = true) {
+        thread(name = "fake-relay", isDaemon = true) {
             while (!server.isClosed) {
                 val socket = runCatching { server.accept() }.getOrNull() ?: break
                 connections += socket
-                thread(name = "rejecting-relay-connection", isDaemon = true) {
+                thread(name = "fake-relay-connection", isDaemon = true) {
                     runCatching { socket.use(::serve) }
                 }
             }
@@ -39,6 +54,7 @@ class RejectingRelay : AutoCloseable {
     private fun serve(socket: Socket) {
         val input = socket.getInputStream().buffered()
         val output = socket.getOutputStream()
+        val target = input.readHeaderLine().split(' ').getOrElse(1) { "/" }
         var key = ""
         while (true) {
             val line = input.readHeaderLine()
@@ -46,6 +62,10 @@ class RejectingRelay : AutoCloseable {
             if (line.startsWith("Sec-WebSocket-Key:", ignoreCase = true)) {
                 key = line.substringAfter(':').trim()
             }
+        }
+        if (target.startsWith("/library")) {
+            serveLibrary(output, Uri.parse("http://relay$target"))
+            return
         }
         val accept = Base64.encodeToString(
             MessageDigest.getInstance("SHA-1").digest((key + WEBSOCKET_GUID).toByteArray()),
@@ -85,9 +105,63 @@ class RejectingRelay : AutoCloseable {
         }
     }
 
+    private fun serveLibrary(output: OutputStream, request: Uri) {
+        val path = request.getQueryParameter("path").orEmpty()
+        val cursor = request.getQueryParameter("cursor")
+        val sort = request.getQueryParameter("sort")
+        libraryRequests += "$path|${cursor.orEmpty()}|${sort.orEmpty()}"
+        Thread.sleep(libraryDelayMillis(path))
+        val entries = library[path]
+        if (entries == null) {
+            output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+            output.flush()
+            return
+        }
+        val ordered = order(entries, sort)
+        val offset = cursor?.toInt() ?: 0
+        val limit = request.getQueryParameter("limit")?.toInt() ?: 100
+        val children = JSONArray()
+        ordered.drop(offset).take(limit).forEach { entry ->
+            children.put(
+                JSONObject()
+                    .put("type", if (entry.directory) "directory" else "file")
+                    .put("name", entry.name)
+                    .put("path", if (path.isEmpty()) entry.name else "$path/${entry.name}"),
+            )
+        }
+        val body = JSONObject()
+            .put(
+                "tree",
+                JSONObject()
+                    .put("type", "directory")
+                    .put("name", path.substringAfterLast('/'))
+                    .put("path", path)
+                    .put("children", children),
+            )
+            .put("next_cursor", if (offset + limit < ordered.size) "${offset + limit}" else JSONObject.NULL)
+            .toString()
+            .toByteArray()
+        output.write(
+            ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray(),
+        )
+        output.write(body)
+        output.flush()
+    }
+
+    /** The order the server lists a directory in for a sort key. */
+    fun order(entries: List<FakeEntry>, sort: String?): List<FakeEntry> = when (sort) {
+        "mtime" -> entries.sortedWith(
+            compareByDescending<FakeEntry> { it.directory }
+                .thenByDescending { it.mtime }
+                .thenBy { it.name.lowercase() },
+        )
+        else -> entries.sortedWith(compareByDescending<FakeEntry> { it.directory }.thenBy { it.name.lowercase() })
+    }
+
     private fun respond(output: OutputStream, type: String) {
         val reply = when (type) {
-            "hello" -> CAPABILITIES
+            "hello" -> capabilities()
             "open_session" -> {
                 openRequests.incrementAndGet()
                 """{"type":"error","code":"decode_error","message":"rejected by the audit test","fatal":false}"""
@@ -96,6 +170,18 @@ class RejectingRelay : AutoCloseable {
             else -> return
         }
         frame(output, OPCODE_TEXT, reply.toByteArray())
+    }
+
+    private fun capabilities(): String {
+        val library = if (library.isEmpty()) {
+            """"library":false"""
+        } else {
+            """"library":true,"library_sort":["name","mtime"]"""
+        }
+        return """{"type":"capabilities","protocol_version":1,"server_name":"audit-fake-relay",""" +
+            """"models":[{"name":"passthrough","scale_factor":1}],""" +
+            """"quality_tiers":["lossless-hevc","hevc-qp2","hevc-qp4","hevc-qp6",""" +
+            """"hevc-qp10","hevc-qp14","hevc-qp18"],$library}"""
     }
 
     private fun frame(output: OutputStream, opcode: Int, payload: ByteArray) = synchronized(output) {
@@ -125,7 +211,7 @@ class RejectingRelay : AutoCloseable {
         val line = StringBuilder()
         while (true) {
             val next = read()
-            check(next >= 0) { "connection closed during the upgrade" }
+            check(next >= 0) { "connection closed during the request head" }
             if (next == '\n'.code) return line.toString().trimEnd('\r')
             line.append(next.toChar())
         }
@@ -148,10 +234,5 @@ class RejectingRelay : AutoCloseable {
         const val OPCODE_CLOSE = 0x8
         const val OPCODE_PING = 0x9
         const val OPCODE_PONG = 0xA
-        const val CAPABILITIES =
-            """{"type":"capabilities","protocol_version":1,"server_name":"audit-rejecting-relay",""" +
-                """"models":[{"name":"passthrough","scale_factor":1}],""" +
-                """"quality_tiers":["lossless-hevc","hevc-qp2","hevc-qp4","hevc-qp6",""" +
-                """"hevc-qp10","hevc-qp14","hevc-qp18"],"library":false}"""
     }
 }
