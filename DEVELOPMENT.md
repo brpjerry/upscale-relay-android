@@ -94,6 +94,12 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   display sizes, and Matroska that leaves the aspect to the bitstream.
   `tools/make_anamorphic_clips.py <dir>` writes all three; push them the
   same way.
+- `ServerE2EDeviceTest` needs a real relay with the October 2026 server
+  fixes: `-e e2eHost <host> -e e2ePort <port>`. It checks server_id-scoped
+  history and that the anamorphic clips come back 4:3. Add
+  `-e e2eBitstreamAspect true` for the bitstream-only Matroska clip. Add
+  `-e e2eColour true`, with `tools/make_colour_clip.py`'s untagged 720x576
+  clip pushed, to compare relayed against direct colours.
 - `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
   fails without it.
 

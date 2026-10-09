@@ -1,7 +1,9 @@
 package org.upscalerelay.android
 
+import android.graphics.Color
 import android.net.Uri
 import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -72,6 +74,69 @@ class ServerE2EDeviceTest {
         }
     }
 
+    /**
+     * An untagged SD source relayed at an HD size must keep its colours: the
+     * server tags the output as the SD guess mpv makes for the original, so
+     * relayed and direct playback of a flat, saturated clip render the same.
+     * Untagged HD output would be read as BT.709 and shift hue.
+     * Needs tools/make_colour_clip.py's clip; `-e e2eColour true` enables it.
+     */
+    @Test
+    fun untaggedSdColoursMatchDirectPlayback() {
+        assumeTrue("pass -e e2eColour true", arguments.getString("e2eColour") == "true")
+        val file = File(context.filesDir, "audit-colour-sd.mp4")
+        assumeTrue("push audit-colour-sd.mp4 (tools/make_colour_clip.py)", file.isFile)
+        withServer { model ->
+            onMain { model.openLocalDocument(Uri.fromFile(file).toString()) }
+            await("relayed playback", model, 90_000) {
+                check(it.error == null) { "relay: ${it.error}" }
+                it.playerState == MpvPlaybackState.PLAYING && !it.busy && it.mpvMetrics.positionSeconds > 1.0
+            }
+            val relayed = settledColour()
+            onMain { model.playLocalFallback() }
+            await("direct playback", model, 30_000) {
+                it.directLocalFallback && it.playerState == MpvPlaybackState.PLAYING
+            }
+            val direct = settledColour()
+            onMain { model.closePlayback() }
+            await("close", model, 60_000) { it.playingPath == null && !it.busy }
+            val worst = (0 until 3).maxOf { abs(relayed[it] - direct[it]) }
+            Log.i(TAG, "colour relayed=${relayed.toList()} direct=${direct.toList()} source=[200, 60, 90]")
+            assertTrue(
+                "relayed ${relayed.toList()} differs from direct ${direct.toList()} by $worst",
+                worst <= COLOUR_TOLERANCE,
+            )
+        }
+    }
+
+    /**
+     * The average colour of a 21x21 patch left of centre, sampled after the
+     * player controls have hidden (they cover the centre and the edges).
+     */
+    private fun settledColour(): IntArray {
+        SystemClock.sleep(6_000)
+        instrumentation.waitForIdleSync()
+        val shot = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        try {
+            val cx = shot.width / 4
+            val cy = shot.height / 2
+            val sums = IntArray(3)
+            var count = 0
+            for (x in cx - 10..cx + 10) {
+                for (y in cy - 10..cy + 10) {
+                    val pixel = shot.getPixel(x, y)
+                    sums[0] += Color.red(pixel)
+                    sums[1] += Color.green(pixel)
+                    sums[2] += Color.blue(pixel)
+                    count += 1
+                }
+            }
+            return IntArray(3) { sums[it] / count }
+        } finally {
+            shot.recycle()
+        }
+    }
+
     private fun withServer(body: (RelayViewModel) -> Unit) {
         check(context.packageName.endsWith(".debug")) {
             "Build with -PcoinstallDebug=true before running the audit tests"
@@ -113,6 +178,13 @@ class ServerE2EDeviceTest {
     }
 
     private fun onMain(action: () -> Unit) = instrumentation.runOnMainSync(action)
+
+    private companion object {
+        const val TAG = "ServerE2E"
+
+        /** 8-bit rounding through two conversions; a BT.601/709 mix-up is ~10-20. */
+        const val COLOUR_TOLERANCE = 4
+    }
 
     private fun await(
         label: String,
