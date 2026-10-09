@@ -26,13 +26,15 @@ data class UplinkVideoInfo(
     val sampleAspectDenominator: Int? = null,
 ) {
     /**
-     * The ratio worth sending: reduced, positive, and not square. Square or
-     * unknown pixels are omitted, which the server reads as 1:1.
+     * The ratio worth sending: reduced, positive, not square, and within the
+     * 1/10..10 that PROTOCOL.md calls plausible (the server reads anything
+     * else as square, so it is not sent). Omitted means square pixels.
      */
     fun anamorphicSampleAspect(): Pair<Int, Int>? {
         val numerator = sampleAspectNumerator?.takeIf { it > 0 } ?: return null
         val denominator = sampleAspectDenominator?.takeIf { it > 0 } ?: return null
         if (numerator == denominator) return null
+        if (numerator.toLong() > denominator * 10L || denominator.toLong() > numerator * 10L) return null
         val divisor = gcd(numerator, denominator)
         return numerator / divisor to denominator / divisor
     }

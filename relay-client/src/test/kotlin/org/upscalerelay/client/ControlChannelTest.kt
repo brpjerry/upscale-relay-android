@@ -178,6 +178,10 @@ class ControlChannelTest {
         assertNull(sentVideo(null, null).sar())
         assertNull(sentVideo(16, 0).sar())
         assertNull(sentVideo(-16, 15).sar())
+        // PROTOCOL.md reads ratios outside 1/10..10 as square pixels.
+        assertEquals(listOf(10, 1), sentVideo(10, 1).sar())
+        assertNull(sentVideo(11, 1).sar())
+        assertNull(sentVideo(1, 11).sar())
     }
 
     private suspend fun open(control: ControlChannel) {
