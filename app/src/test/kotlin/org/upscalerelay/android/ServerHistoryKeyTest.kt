@@ -14,8 +14,6 @@ class ServerHistoryKeyTest {
             serverHistoryScope("relay-1", "192.168.0.10", 8590),
             serverHistoryScope("relay-1", "tower.local", 9000),
         )
-        // Percent-encoded, so no id can forge another key's structure.
-        assertEquals("id:a%5D%3Ab+c", serverHistoryScope("a]:b c", "h", 1))
     }
 
     @Test

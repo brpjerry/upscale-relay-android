@@ -64,17 +64,25 @@ class MessagesTest {
     }
 
     @Test
-    fun `server id is optional and ignored when blank or oversized`() {
+    fun `server id is read only within its guarantee`() {
         fun parse(extra: String) = Capabilities.fromJson(
             Json.parseToJsonElement(
                 """{"protocol_version":1,"server_name":"s","models":[],"quality_tiers":[]$extra}""",
             ).jsonObject,
         ).serverId
-        assertEquals("4f1c2b7e-9a1d-4c55-8e0e-3b2f6a7d9c10", parse(""","server_id":"4f1c2b7e-9a1d-4c55-8e0e-3b2f6a7d9c10""""))
+        // Today's form: uuid4().hex.
+        assertEquals("4f1c2b7e9a1d4c558e0e3b2f6a7d9c10", parse(""","server_id":"4f1c2b7e9a1d4c558e0e3b2f6a7d9c10""""))
+        assertEquals("A_b-9", parse(""","server_id":"A_b-9""""))
+        assertEquals("x".repeat(64), parse(""","server_id":"${"x".repeat(64)}""""))
+        // Absent, empty, too long, another charset, or not a string.
         assertEquals(null, parse(""))
         assertEquals(null, parse(""","server_id":null"""))
-        assertEquals(null, parse(""","server_id":"  """"))
-        assertEquals(null, parse(""","server_id":"${"x".repeat(MAX_SERVER_ID_CHARS + 1)}""""))
+        assertEquals(null, parse(""","server_id":"""""))
+        assertEquals(null, parse(""","server_id":"${"x".repeat(65)}""""))
+        assertEquals(null, parse(""","server_id":"a.b""""))
+        assertEquals(null, parse(""","server_id":"a b""""))
+        assertEquals(null, parse(""","server_id":12345"""))
+        assertEquals(null, parse(""","server_id":["a"]"""))
     }
 
     @Test

@@ -3,6 +3,7 @@ package org.upscalerelay.protocol
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
@@ -45,8 +46,11 @@ data class QualityOption(
     val p95Mbps: Int?,
 )
 
-/** Longer server_id values are ignored, as if absent. */
-const val MAX_SERVER_ID_CHARS = 256
+/**
+ * What PROTOCOL.md guarantees of capabilities.server_id. Anything else —
+ * empty, too long, another charset, not a string — counts as absent.
+ */
+private val SERVER_ID = Regex("[A-Za-z0-9_-]{1,64}")
 
 data class Capabilities(
     val protocolVersion: Int,
@@ -120,8 +124,8 @@ data class Capabilities(
                 muxedAuxTracks = value["muxed_aux_tracks"]?.jsonPrimitive?.booleanOrNull ?: false,
                 attachmentCacheVersion = value["attachment_cache"]?.jsonPrimitive?.intOrNull
                     ?.coerceAtLeast(0) ?: 0,
-                serverId = value["server_id"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
-                    ?.takeIf { it.isNotBlank() && it.length <= MAX_SERVER_ID_CHARS },
+                serverId = (value["server_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?.takeIf(SERVER_ID::matches),
             )
         }
     }

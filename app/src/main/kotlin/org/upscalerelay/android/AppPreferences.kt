@@ -9,7 +9,6 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
-import java.net.URLEncoder
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -340,11 +339,9 @@ internal fun validHistoryKey(key: String): Boolean =
  * across address changes; a server without one is known by its address.
  */
 internal fun serverHistoryScope(serverId: String?, host: String, port: Int): String =
-    if (serverId != null) {
-        "id:" + URLEncoder.encode(serverId, Charsets.UTF_8.name())
-    } else {
-        "addr:${normalizedHost(host)}:$port"
-    }
+    // Capabilities only carries an id within its [A-Za-z0-9_-]{1,64} guarantee,
+    // so it cannot collide with the key's own punctuation.
+    if (serverId != null) "id:$serverId" else "addr:${normalizedHost(host)}:$port"
 
 /** Lower-case, without IPv6 brackets or a DNS root dot, so one address has one spelling. */
 internal fun normalizedHost(host: String): String =
