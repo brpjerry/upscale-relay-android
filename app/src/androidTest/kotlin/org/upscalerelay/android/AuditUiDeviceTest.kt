@@ -5,6 +5,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.TouchInjectionScope
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasClickAction
@@ -38,8 +39,9 @@ import java.io.File
 import java.net.ServerSocket
 
 /**
- * UI regressions for the October 2026 audit, driven through Compose on the
- * debug app. Saved host, port, destination and auto-play are put back.
+ * UI regressions driven through Compose on the debug app: the October 2026
+ * audit's, and the player controls'. Saved host, port, destination and
+ * auto-play are put back.
  */
 @RunWith(AndroidJUnit4::class)
 class AuditUiDeviceTest {
@@ -138,11 +140,109 @@ class AuditUiDeviceTest {
 
     /**
      * A scrub held past the auto-hide timeout keeps the controls up, and
-     * releasing or cancelling it lets them hide again. Plays the generated
-     * clip through the original-file fallback, so no relay server is needed.
+     * releasing or cancelling it lets them hide again.
      */
     @Test
-    fun seekBarDragOutlastsTheControlsTimeout() {
+    fun seekBarDragOutlastsTheControlsTimeout() = withClipPlaying {
+        for (release in listOf("up", "cancel")) {
+            compose.mainClock.autoAdvance = false
+            showControls()
+            val bar = compose.onNodeWithContentDescription("Playback position")
+            // Pointer handling needs the clock running; the timeout
+            // below is then stepped by hand.
+            compose.mainClock.autoAdvance = true
+            bar.performTouchInput {
+                down(Offset(width * 0.2f, centerY))
+                repeat(4) { moveBy(Offset(viewConfiguration.touchSlop, 0f)) }
+            }
+            compose.waitForIdle()
+            compose.mainClock.autoAdvance = false
+            check(model().ui.value.seekPreviewSeconds != null) { "the drag was not taken as a scrub" }
+            compose.mainClock.advanceTimeBy(15_000)
+            // Still scrubbing well past the timeout: the bar is there.
+            compose.onNodeWithContentDescription("Playback position").assertExists()
+            bar.performTouchInput {
+                moveBy(Offset(40f, 0f))
+                if (release == "up") up() else cancel()
+            }
+            compose.mainClock.advanceTimeBy(15_000)
+            compose.onNodeWithContentDescription("Playback position").assertDoesNotExist()
+        }
+    }
+
+    /**
+     * The lock takes one press, in both directions, wherever on it the press
+     * lands. An icon button is hit only inside its 40dp circle when something
+     * else lies under the rest of it, and the picture's tap handler did: a
+     * press on the lock's edge hid the controls instead (locked, it hid the
+     * unlock button), and the lock then took two more presses.
+     */
+    @Test
+    fun lockTakesOnePressWhereverOnItThePressLands() = withClipPlaying {
+        compose.mainClock.autoAdvance = false
+        val edges: List<TouchInjectionScope.() -> Offset> = listOf(
+            { Offset(3f, 3f) },
+            { Offset(width - 3f, 3f) },
+            { Offset(3f, height - 3f) },
+            { Offset(width - 3f, height - 3f) },
+            { center },
+        )
+        for (edge in edges) {
+            showControls()
+            compose.onNodeWithContentDescription(LOCK).performTouchInput { click(edge()) }
+            settle()
+            compose.onNodeWithContentDescription(UNLOCK).assertExists()
+            compose.onNodeWithContentDescription("Playback position").assertDoesNotExist()
+            compose.onNodeWithContentDescription(UNLOCK).performTouchInput { click(edge()) }
+            settle()
+            compose.onNodeWithContentDescription(LOCK).assertExists()
+        }
+    }
+
+    /**
+     * A press that misses the controls does not take them away. On a control
+     * bar it is the bar's, not a tap on the picture underneath. Locked, a
+     * press on the picture only ever brings the unlock button up, for a fresh
+     * timeout each time. And the controls still hide by themselves afterwards.
+     */
+    @Test
+    fun aMissedPressLeavesTheControlsWhereTheyAre() = withClipPlaying {
+        compose.mainClock.autoAdvance = false
+        showControls()
+        compose.onAllNodesWithText("audit-clip-150s.mp4", substring = true).onFirst()
+            .performTouchInput { click() }
+        settle()
+        compose.onNodeWithContentDescription("Playback position").assertExists()
+
+        compose.onNodeWithContentDescription(LOCK).performTouchInput { click() }
+        settle()
+        compose.onNodeWithContentDescription(UNLOCK).assertExists()
+        compose.onRoot().performTouchInput { click(center) }
+        settle()
+        compose.onNodeWithContentDescription(UNLOCK).assertExists()
+        // Most of one timeout, a press, most of another: still up.
+        compose.mainClock.advanceTimeBy(3_000)
+        compose.onRoot().performTouchInput { click(center) }
+        compose.mainClock.advanceTimeBy(3_000)
+        compose.onNodeWithContentDescription(UNLOCK).assertExists()
+        compose.mainClock.advanceTimeBy(15_000)
+        compose.onNodeWithContentDescription(UNLOCK).assertDoesNotExist()
+
+        compose.onRoot().performTouchInput { click(center) }
+        settle()
+        compose.onNodeWithContentDescription(UNLOCK).performTouchInput { click() }
+        settle()
+        compose.onNodeWithContentDescription("Playback position").assertExists()
+        compose.mainClock.advanceTimeBy(15_000)
+        compose.onNodeWithContentDescription("Playback position").assertDoesNotExist()
+    }
+
+    /**
+     * Plays the generated clip through the original-file fallback, so the
+     * player and its controls are up without a relay server, and closes it
+     * afterwards.
+     */
+    private fun withClipPlaying(body: () -> Unit) {
         val file = File(context.filesDir, "audit-clip-150s.mp4")
         assumeTrue("push audit-clip-150s.mp4 into the debug app's files directory", file.isFile)
         val uri = Uri.fromFile(file).toString()
@@ -163,31 +263,7 @@ class AuditUiDeviceTest {
                     it.directLocalFallback && it.playerState == MpvPlaybackState.PLAYING &&
                         it.mpvMetrics.positionSeconds > 1.0
                 }
-
-                for (release in listOf("up", "cancel")) {
-                    compose.mainClock.autoAdvance = false
-                    showControls()
-                    val bar = compose.onNodeWithContentDescription("Playback position")
-                    // Pointer handling needs the clock running; the timeout
-                    // below is then stepped by hand.
-                    compose.mainClock.autoAdvance = true
-                    bar.performTouchInput {
-                        down(Offset(width * 0.2f, centerY))
-                        repeat(4) { moveBy(Offset(viewConfiguration.touchSlop, 0f)) }
-                    }
-                    compose.waitForIdle()
-                    compose.mainClock.autoAdvance = false
-                    check(model().ui.value.seekPreviewSeconds != null) { "the drag was not taken as a scrub" }
-                    compose.mainClock.advanceTimeBy(15_000)
-                    // Still scrubbing well past the timeout: the bar is there.
-                    compose.onNodeWithContentDescription("Playback position").assertExists()
-                    bar.performTouchInput {
-                        moveBy(Offset(40f, 0f))
-                        if (release == "up") up() else cancel()
-                    }
-                    compose.mainClock.advanceTimeBy(15_000)
-                    compose.onNodeWithContentDescription("Playback position").assertDoesNotExist()
-                }
+                body()
             } finally {
                 compose.mainClock.autoAdvance = true
                 onModel { it.closePlayback() }
@@ -196,6 +272,9 @@ class AuditUiDeviceTest {
             }
         }
     }
+
+    /** Lets a press take effect, well inside any timeout. */
+    private fun settle() = compose.mainClock.advanceTimeBy(300)
 
     private fun showControls() {
         repeat(3) {
@@ -260,5 +339,7 @@ class AuditUiDeviceTest {
     private companion object {
         const val HOST = 0
         const val PORT = 1
+        const val LOCK = "Lock player controls"
+        const val UNLOCK = "Unlock player controls"
     }
 }

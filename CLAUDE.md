@@ -240,6 +240,18 @@ release.yml` builds and publishes the signed APK with those notes.
   `MutableInteractionSource` draws one press on every control it was given
   to. Use `rememberPressReporting(shared)`: the control shows its own press
   and forwards it, so the auto-hide timer still sees it.
+- **A press that misses a control must never reach the picture.** The gesture
+  layer under the controls is hit directly everywhere, and a direct hit beats
+  an icon button's 48dp minimum touch target. So a button was hit only inside
+  its 40dp circle (70 px, 6 mm on the tablet), and a press on its edge counted
+  as a tap on the picture: the controls vanished and the button then took two
+  more presses. Reported for the lock on 2026-10-09 and measured with
+  `adb shell input tap`. The control bars take their own presses
+  (`absorbMissedPresses`), which also gives the buttons their minimum target
+  back; keep it on any bar, and keep controls inside a bar that has it. The
+  lock, in both states, is a `LockButton` whose target runs out to the screen
+  corner. Locked, a press on the picture only brings the unlock button up and
+  restarts its timeout; it never takes it away.
 
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player

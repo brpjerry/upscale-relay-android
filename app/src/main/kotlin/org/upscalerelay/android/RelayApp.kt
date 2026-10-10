@@ -20,6 +20,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.FlowRowScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -90,6 +92,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
@@ -120,6 +123,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -137,6 +141,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.liveRegion
@@ -1418,6 +1423,11 @@ private fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsLocked by remember { mutableStateOf(false) }
     var lockedButtonVisible by remember { mutableStateOf(false) }
+    // Counts the presses that asked for the unlock button, so that each one
+    // restarts the time it stays up.
+    var lockedButtonRequests by remember { mutableIntStateOf(0) }
+    val unlockInteractionSource = remember { MutableInteractionSource() }
+    val unlockPressed by unlockInteractionSource.collectIsPressedAsState()
     var trackSheetVisible by remember { mutableStateOf(false) }
     var settingsSheetVisible by remember { mutableStateOf(false) }
     var chapterSheetVisible by remember { mutableStateOf(false) }
@@ -1471,8 +1481,10 @@ private fun PlayerScreen(
             controlsVisible = false
         }
     }
-    LaunchedEffect(lockedButtonVisible, controlsLocked) {
-        if (controlsLocked && lockedButtonVisible) {
+    LaunchedEffect(lockedButtonVisible, controlsLocked, lockedButtonRequests, unlockPressed) {
+        // Not from under a finger: a press held across the timeout would
+        // otherwise lose the button it is on and unlock nothing.
+        if (controlsLocked && lockedButtonVisible && !unlockPressed) {
             delay(
                 accessibilityManager?.calculateRecommendedTimeoutMillis(
                     4_000, containsIcons = true, containsControls = true,
@@ -1505,7 +1517,11 @@ private fun PlayerScreen(
                 enabled = state.gesturesEnabled && !controlsLocked,
                 onToggleControls = {
                     if (controlsLocked) {
-                        lockedButtonVisible = !lockedButtonVisible
+                        // Locked, a press on the picture can only be asking
+                        // for the way out. It used to toggle the button, so a
+                        // press that just missed the button took it away.
+                        lockedButtonVisible = true
+                        lockedButtonRequests += 1
                     } else {
                         controlsVisible = !controlsVisible
                     }
@@ -1534,16 +1550,19 @@ private fun PlayerScreen(
                 )
             }
             if (controlsLocked && lockedButtonVisible) {
-                LockedControlsButton(
-                    onUnlock = {
+                LockButton(
+                    description = "Unlock player controls",
+                    reach = PaddingValues(16.dp),
+                    interactionSource = unlockInteractionSource,
+                    onClick = {
                         controlsLocked = false
                         lockedButtonVisible = false
                         controlsVisible = true
                     },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .windowInsetsPadding(playerControlInsets())
-                        .padding(16.dp),
+                        .windowInsetsPadding(playerControlInsets()),
+                    plate = true,
                 )
             }
             gestureMessage?.let { message ->
@@ -1779,12 +1798,16 @@ private fun PlayerChrome(
     val chapters = state.session?.chapters.orEmpty()
     val currentChapter = chapters.lastOrNull { it.startSeconds <= position }
     val compactActions = windowWidthDp() < 900
+    val barSide = if (compactActions) 8.dp else 24.dp
     Column(Modifier.fillMaxSize().windowInsetsPadding(playerControlInsets())) {
+        // The lock at the end brings the bar's end and vertical padding with
+        // it, as part of its touch target (LockButton).
         Row(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xdd000000), Color.Transparent)))
-                .padding(horizontal = if (compactActions) 8.dp else 24.dp, vertical = 12.dp),
+                .absorbMissedPresses()
+                .padding(start = barSide),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(
@@ -1823,19 +1846,19 @@ private fun PlayerChrome(
                 PlayerAction(Icons.Outlined.AutoAwesome, "Model", compactActions, interactionSource, onModels)
             }
             PlayerAction(Icons.Outlined.Tune, "Playback settings", compactActions, interactionSource, onSettings)
-            IconButton(onClick = onLock, interactionSource = rememberPressReporting(interactionSource)) {
-                Icon(
-                    Icons.Outlined.Lock,
-                    contentDescription = "Lock player controls",
-                    tint = Color.White,
-                )
-            }
+            LockButton(
+                description = "Lock player controls",
+                reach = PaddingValues(end = barSide, top = 12.dp, bottom = 12.dp),
+                interactionSource = rememberPressReporting(interactionSource),
+                onClick = onLock,
+            )
         }
         Spacer(Modifier.weight(1f))
         Column(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xee000000))))
+                .absorbMissedPresses()
                 .padding(horizontal = if (compactActions) 16.dp else 36.dp, vertical = 12.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2163,22 +2186,63 @@ private fun PlayerSeekBar(
     }
 }
 
+/**
+ * Keeps a press on a control bar's own background from reaching the picture
+ * underneath, where it counts as a tap on the picture and hides the controls.
+ *
+ * That is what a press just off a button used to do. An icon button is hit
+ * directly only inside its 40dp circle; the 48dp minimum target around it
+ * loses to anything else that is hit directly, and the full-screen gesture
+ * layer under the controls always was. So a near miss took the whole bar
+ * away and the button then needed two more presses, one to bring the bar
+ * back. With the bar taking the press, the button's minimum target applies,
+ * and a press that misses even that does nothing.
+ */
+private fun Modifier.absorbMissedPresses(): Modifier = pointerInput(Unit) {}
+
+/**
+ * The lock, in either state, with a touch target larger than what it draws:
+ * [reach] is added around the 48dp button and belongs to the target, which
+ * therefore runs out to the corner of the screen the button sits in. A corner
+ * is the easiest place on a tablet to reach and the hardest to press exactly.
+ * [plate] draws the dark backing the button needs when it is alone on the
+ * picture.
+ */
 @Composable
-private fun LockedControlsButton(
-    onUnlock: () -> Unit,
+private fun LockButton(
+    description: String,
+    reach: PaddingValues,
+    interactionSource: MutableInteractionSource,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    plate: Boolean = false,
 ) {
-    Surface(
-        modifier = modifier,
-        color = Color(0xcc111111),
-        shape = MaterialTheme.shapes.large,
-    ) {
-        IconButton(onClick = onUnlock) {
-            Icon(
-                Icons.Outlined.Lock,
-                contentDescription = "Unlock player controls",
-                tint = Color.White,
+    Box(
+        modifier
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
             )
+            .padding(reach),
+    ) {
+        // The ripple belongs to the button that is drawn, not to its reach.
+        // Unbounded ripples start from the centre, wherever the press landed.
+        Box(
+            Modifier
+                .size(48.dp)
+                .then(
+                    if (plate) {
+                        Modifier.clip(MaterialTheme.shapes.large).background(Color(0xcc111111))
+                    } else {
+                        Modifier
+                    },
+                )
+                .indication(interactionSource, ripple(bounded = false, radius = if (plate) 34.dp else 20.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Outlined.Lock, contentDescription = description, tint = Color.White)
         }
     }
 }
