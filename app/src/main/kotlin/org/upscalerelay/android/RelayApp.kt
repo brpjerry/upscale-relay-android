@@ -39,7 +39,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -186,25 +185,10 @@ fun RelayApp(viewModel: RelayViewModel, inPictureInPicture: Boolean = false) {
         else -> phaseThreeLightColors()
     }
     MaterialTheme(colorScheme = colorScheme) {
-        val rootView = LocalView.current
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .onSizeChanged { size ->
-                    // The size negotiated with the server is the area clear
-                    // of any display cutout, which is where the player lays
-                    // the picture out (PlayerScreen). The cutout is read from
-                    // the window itself, at the moment its size changes:
-                    // Compose's inset values trail the new size through the
-                    // rotate-and-go-immersive transition, and subtracting
-                    // them reported a landscape window less the portrait
-                    // cutout (2932x1848 for 2960x1820 on a Tab S9 Ultra).
-                    val cutout = rootView.rootWindowInsets?.displayCutout
-                    viewModel.updateDisplaySize(
-                        size.width - (cutout?.safeInsetLeft ?: 0) - (cutout?.safeInsetRight ?: 0),
-                        size.height - (cutout?.safeInsetTop ?: 0) - (cutout?.safeInsetBottom ?: 0),
-                    )
-                },
+                .onSizeChanged { size -> viewModel.updateDisplaySize(size.width, size.height) },
             color = MaterialTheme.colorScheme.background,
         ) {
             when {
@@ -1500,19 +1484,7 @@ private fun PlayerScreen(
         }
     }
 
-    // The player keeps clear of the display cutout: the picture and the
-    // controls are laid out beside it, with black behind, instead of a notch
-    // biting into the picture and the title bar hanging below a strip of it.
-    // Android offers no way to ask for this any more (an app targeting SDK 35+
-    // is always laid out into the cutout, and LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
-    // is ignored; verified on Android 16), and Samsung's per-app "camera
-    // cutout" switch is the user's, so the player does it itself.
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .windowInsetsPadding(WindowInsets.displayCutout),
-    ) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { context -> MpvSurfaceView(context).apply { engine = viewModel.playerEngine } },
             update = { it.engine = viewModel.playerEngine },
