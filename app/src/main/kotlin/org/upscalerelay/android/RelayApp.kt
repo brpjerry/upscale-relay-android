@@ -1767,7 +1767,10 @@ private fun PlayerChrome(
                 .padding(horizontal = if (compactActions) 8.dp else 24.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = viewModel::closePlayback, interactionSource = interactionSource) {
+            IconButton(
+                onClick = viewModel::closePlayback,
+                interactionSource = rememberPressReporting(interactionSource),
+            ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back to library",
@@ -1800,7 +1803,7 @@ private fun PlayerChrome(
                 PlayerAction(Icons.Outlined.AutoAwesome, "Model", compactActions, interactionSource, onModels)
             }
             PlayerAction(Icons.Outlined.Tune, "Playback settings", compactActions, interactionSource, onSettings)
-            IconButton(onClick = onLock, interactionSource = interactionSource) {
+            IconButton(onClick = onLock, interactionSource = rememberPressReporting(interactionSource)) {
                 Icon(
                     Icons.Outlined.Lock,
                     contentDescription = "Lock player controls",
@@ -1879,7 +1882,7 @@ private fun PlayerChrome(
                     FilledIconButton(
                         onClick = viewModel::togglePaused,
                         enabled = state.error == null,
-                        interactionSource = interactionSource,
+                        interactionSource = rememberPressReporting(interactionSource),
                         modifier = Modifier.size(64.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = Color.White,
@@ -1927,14 +1930,32 @@ private fun PlayerChrome(
     }
 }
 
+/**
+ * A control's own interaction source that also reports into [shared].
+ *
+ * The auto-hide timer has to know while any player control is pressed, and
+ * the controls used to share one source for that. But a source also drives
+ * the pressed look of everything it is given to, so touching one button lit
+ * all of them. Each control now shows only its own press and forwards it.
+ */
+@Composable
+private fun rememberPressReporting(shared: MutableInteractionSource): MutableInteractionSource {
+    val own = remember { MutableInteractionSource() }
+    LaunchedEffect(own, shared) {
+        own.interactions.collect { shared.emit(it) }
+    }
+    return own
+}
+
 @Composable
 private fun PlayerAction(
     icon: ImageVector,
     label: String,
     compact: Boolean,
-    interactionSource: MutableInteractionSource,
+    pressReports: MutableInteractionSource,
     onClick: () -> Unit,
 ) {
+    val interactionSource = rememberPressReporting(pressReports)
     if (compact) {
         IconButton(onClick = onClick, interactionSource = interactionSource) {
             Icon(icon, contentDescription = label, tint = Color.White)
@@ -1952,12 +1973,12 @@ private fun PlayerAction(
 private fun PlayerRoundButton(
     icon: ImageVector,
     description: String,
-    interactionSource: MutableInteractionSource,
+    pressReports: MutableInteractionSource,
     onClick: () -> Unit,
 ) {
     FilledTonalIconButton(
         onClick = onClick,
-        interactionSource = interactionSource,
+        interactionSource = rememberPressReporting(pressReports),
         modifier = Modifier.size(48.dp),
         colors = IconButtonDefaults.filledTonalIconButtonColors(
             containerColor = Color.White.copy(alpha = 0.14f),
