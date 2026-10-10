@@ -64,19 +64,42 @@ release.yml` builds and publishes the signed APK with those notes.
   bypass that file, do not point the manifest's `android:icon` at a different
   drawable for debug, and when the release icon changes, redraw the debug
   variant alongside it rather than letting the two converge. This holds for
-  co-installed (`-PcoinstallDebug=true`) and temporary-suffix builds too.
-- Debug and release share an `applicationId`, so installing a debug build
-  normally means uninstalling the release one and losing the user's DataStore
-  (settings, watch history). Build with `-PcoinstallDebug=true` instead: it
-  adds the `.debug` suffix so the two sit side by side.
+  co-installed (`-PcoinstallDebug=true`) builds too.
+- **One debug build on the device, ever. Always overwrite the one that is
+  there; never install a second.** The debug build's home is
+  `org.upscalerelay.android.debug`: build device installs with
+  `-PcoinstallDebug=true` (the device tests refuse any other id) and install
+  with `adb install -r`, which replaces the debug build already there. Before
+  any install, look at what is on the device:
+  `adb shell pm list packages org.upscalerelay`, then
+  `adb shell dumpsys package <id> | grep pkgFlags` for each app package. An
+  app is a debug build when its flags include `DEBUGGABLE`, whatever its
+  application id; never infer "release" from the id alone. A debug build
+  found under any other id (the base id, a leftover suffix) is uninstalled,
+  not kept alongside, and a temporary `applicationIdSuffix` is never
+  invented to get around an install problem. If `install -r` is refused
+  (signature mismatch), uninstall the old debug build and install again. The
+  instrumentation APK (`<applicationId>.test`) follows the same rule: one,
+  matching the installed debug build, with any stale one uninstalled. On
+  2026-10-09 the tablet carried two amber icons because a debug build at
+  `org.upscalerelay.android` had been taken for the release app and a second
+  debug build was installed beside it as `.debug`.
+- Debug and release share an `applicationId`, so a debug build cannot go
+  over a signed release. `-PcoinstallDebug=true` adds the `.debug` suffix so
+  the one debug build can sit beside a signed release and leave its data
+  alone. That is all the flag is for; it never licenses a second debug
+  build.
 - **Data in a debug build is disposable.** Settings, watch history, the
   library cache and anything else a debug install holds (the amber icon is
   how you know it is one) can always be cleared, overwritten or lost to an
   uninstall for the sake of a test — `pm clear`, reinstalling, marking files
   watched, changing the host — without asking and without preserving it
-  first. There is no need to build a second throwaway copy just to protect a
-  debug install's data. This never extends to the signed release app: its
-  data is the user's and is not touched.
+  first. **Never back up, copy aside, export or otherwise try to preserve a
+  debug build's data**, not before overwriting it and not before
+  uninstalling it, and never choose one approach over another because it
+  keeps that data. There is no need to build a second throwaway copy just to
+  protect a debug install's data. This never extends to the signed release
+  app: its data is the user's and is not touched.
 - `files/phase4-latest.json` is written every second and is the fastest read
   on drops, A/V error, buffer, and transport rates:
   `adb shell run-as <applicationId> cat files/phase4-latest.json`.
