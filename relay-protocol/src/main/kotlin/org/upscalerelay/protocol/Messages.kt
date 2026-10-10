@@ -3,6 +3,7 @@ package org.upscalerelay.protocol
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
@@ -45,6 +46,12 @@ data class QualityOption(
     val p95Mbps: Int?,
 )
 
+/**
+ * What PROTOCOL.md guarantees of capabilities.server_id. Anything else —
+ * empty, too long, another charset, not a string — counts as absent.
+ */
+private val SERVER_ID = Regex("[A-Za-z0-9_-]{1,64}")
+
 data class Capabilities(
     val protocolVersion: Int,
     val serverName: String,
@@ -60,6 +67,12 @@ data class Capabilities(
     val muxedAuxTracks: Boolean = false,
     /** Content-addressed subtitle attachment protocol version; zero means absent. */
     val attachmentCacheVersion: Int = 0,
+    /**
+     * The server's stable identity, unchanged across restarts and address
+     * changes; null from servers that predate it. Per-server client state
+     * (watch history, recents) is scoped by it.
+     */
+    val serverId: String? = null,
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -111,8 +124,35 @@ data class Capabilities(
                 muxedAuxTracks = value["muxed_aux_tracks"]?.jsonPrimitive?.booleanOrNull ?: false,
                 attachmentCacheVersion = value["attachment_cache"]?.jsonPrimitive?.intOrNull
                     ?.coerceAtLeast(0) ?: 0,
+                serverId = (value["server_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?.takeIf(SERVER_ID::matches),
             )
         }
+    }
+}
+
+/**
+ * What GET /status says about sessions the server holds. A client that could
+ * not get a `closed` acknowledgement, because the control connection was
+ * already gone, reads it on its next connection: the server releases a
+ * session by itself when its connection drops, and this is how that went.
+ */
+data class ServerStatus(
+    /** Sessions still held, by `session_id`. */
+    val sessionIds: Set<String>,
+    /** A native teardown failed; the server refuses new sessions until restarted. */
+    val restartRequired: Boolean,
+    /** The session whose teardown failed, when one did. */
+    val failedTeardownSessionId: String?,
+) {
+    companion object {
+        fun fromJson(value: JsonObject): ServerStatus = ServerStatus(
+            sessionIds = value.requiredArray("sessions")
+                .map { it.jsonObject.requiredString("id") }.toSet(),
+            restartRequired = value["restart_required"]?.jsonPrimitive?.booleanOrNull ?: false,
+            failedTeardownSessionId = (value["native_teardown_error"] as? JsonObject)
+                ?.get("session_id")?.jsonPrimitive?.contentOrNull,
+        )
     }
 }
 

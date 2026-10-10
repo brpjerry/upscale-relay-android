@@ -8,6 +8,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -135,6 +136,7 @@ private data class EpochRoute(val epoch: Int, val queue: BoundedMediaQueue)
 
 internal class LoopbackMediaServer(
     private val queue: BoundedMediaQueue,
+    private val playerConnectTimeoutMillis: Long = RelaySessionController.PLAYER_CONNECT_TIMEOUT_MILLIS,
     private val onFailure: (Throwable) -> Unit,
 ) : Closeable {
     private val stopped = AtomicBoolean(false)
@@ -148,10 +150,18 @@ internal class LoopbackMediaServer(
         // ::1 from getLoopbackAddress(), which leaves 127.0.0.1 refusing the
         // connection even though this socket appears to be listening.
         bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
-        soTimeout = 30_000
+        // A short poll, not the deadline: the deadline is armed separately.
+        soTimeout = ACCEPT_POLL_MILLIS
     }
     @Volatile private var client: Socket? = null
     @Volatile private var worker: Thread? = null
+
+    // The socket is bound as soon as the session needs a URL, but the player
+    // cannot connect until preparation (a downlink handshake, an uplink
+    // connect, a seek acknowledgement) has handed that URL out. Its connect
+    // window starts then, not at bind time; before that, close() or the
+    // preparation's own deadlines end the wait.
+    @Volatile private var connectDeadlineNanos: Long? = null
 
     val url: String = "tcp://127.0.0.1:${server.localPort}"
 
@@ -160,7 +170,7 @@ internal class LoopbackMediaServer(
         started = true
         worker = thread(name = "relay-android-loopback", isDaemon = true) {
             try {
-                val accepted = server.accept()
+                val accepted = acceptPlayer()
                 synchronized(lifecycleLock) {
                     if (stopped.get()) {
                         accepted.closeQuietly()
@@ -191,6 +201,28 @@ internal class LoopbackMediaServer(
         }
     }
 
+    /** Starts the player's connect window; the URL is about to reach mpv. */
+    fun armPlayerConnectDeadline() {
+        if (connectDeadlineNanos == null) {
+            connectDeadlineNanos = System.nanoTime() + playerConnectTimeoutMillis * 1_000_000
+        }
+    }
+
+    private fun acceptPlayer(): Socket {
+        while (true) {
+            try {
+                return server.accept()
+            } catch (poll: SocketTimeoutException) {
+                val deadline = connectDeadlineNanos ?: continue
+                if (System.nanoTime() - deadline >= 0) {
+                    throw SocketTimeoutException(
+                        "player did not connect within ${playerConnectTimeoutMillis} ms",
+                    )
+                }
+            }
+        }
+    }
+
     fun totalBytesSent(): Long = bytesSent.get()
 
     /** The next client-side socket close is the intentional mpv reload. */
@@ -204,6 +236,10 @@ internal class LoopbackMediaServer(
         synchronized(lifecycleLock) { client?.closeQuietly() }
         server.closeQuietly()
         worker?.takeUnless { it === Thread.currentThread() }?.join(2_000)
+    }
+
+    private companion object {
+        const val ACCEPT_POLL_MILLIS = 250
     }
 }
 

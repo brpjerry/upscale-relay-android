@@ -1,5 +1,37 @@
 # Android device validation notes
 
+## Palm rejection on the player's top bar — 2026-10-09
+
+Galaxy Tab S9 Ultra `SM-X910`, Android 16/API 36, build `X910XXS6EZI2`,
+landscape with the notch at the top. Reported as "the lock icon sometimes
+takes multiple presses": the button highlights and nothing happens.
+
+A debug build logging every `MotionEvent` at `Activity.dispatchTouchEvent`,
+together with `adb shell getevent -lt /dev/input/event10` (`sec_touchscreen`),
+recorded 44 presses by hand on the lock and unlock buttons:
+
+- 22 were delivered whole and every one of them clicked.
+- 22 were cancelled by the system. The touch controller raised its palm flag
+  (`EV_KEY 0118`, Samsung's `BTN_PALM`; logcat `InputReader: Btn_palm(4):
+  value=1`, `PalmMotion: [PALM_TOUCH] DOWN`) 68-136 ms after the finger went
+  down, on the last sample before it lifted, with the contact size reported
+  as 4/4 or 5/4 (major/minor); no delivered press in that corner reached a
+  minor of 4. The app
+  received `ACTION_CANCEL` with `FLAG_CANCELED` (0x20) and then `ACTION_UP`
+  14-17 ms later. None had moved more than 10 px.
+- Every cancelled press was at y <= 85 px. None of the seven at y >= 91 px
+  was cancelled. Distance from the right edge made no difference: cancelled
+  presses were 55-82 px from it, delivered ones 43-93 px. The strip is about
+  9 mm deep along the top (long) edge.
+- A hand resting on the screen edge looks different: flagged 200 ms in, then
+  an `ACTION_CANCEL` for every sample of the second it stayed, then the up.
+
+The top bar's buttons are centred 63 px from the top since the bar was moved
+up to the edge for the notch (they were about 28 px lower before, just
+outside the strip). `PalmCancelRescue` now delivers a cancelled press of the first kind;
+see CLAUDE.md. `adb shell input tap`, Compose tests and UiAutomation bypass
+the touch controller and cannot reproduce any of this.
+
 ## Android audit checks — 2026-09-22
 
 Audit baseline `694efb2` plus `fix/android-audit-2026-09-22` working-tree fixes;

@@ -8,6 +8,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Protocol
@@ -149,6 +150,39 @@ class ControlChannelTest {
         ControlChannel("127.0.0.1", 8590, {}, socket, timeout).also {
             it.connect(DisplaySize(1920, 1080))
         }
+
+    @Test
+    fun `uplink open sends a reduced sample aspect ratio only for anamorphic sources`() = runBlocking {
+        suspend fun sentVideo(numerator: Int?, denominator: Int?): JsonObject {
+            val socket = FakeSocket()
+            val control = connected(socket)
+            control.openUplinkSession(
+                UplinkVideoInfo(
+                    name = "dvd.mkv", codec = "mpeg2video", extradata = null,
+                    width = 720, height = 576,
+                    timeBaseNumerator = 1, timeBaseDenominator = 1_000_000,
+                    averageRateNumerator = 25, averageRateDenominator = 1,
+                    durationSeconds = 60.0,
+                    sampleAspectNumerator = numerator, sampleAspectDenominator = denominator,
+                ),
+                "passthrough", DisplaySize(1920, 1080), "lossless-hevc", "fit", null,
+            )
+            control.close()
+            return socket.sent.last { it["type"]?.jsonPrimitive?.content == "open_session" }
+                .getValue("video").jsonObject
+        }
+        fun JsonObject.sar() = this["sample_aspect_ratio"]?.jsonArray?.map { it.jsonPrimitive.content.toInt() }
+        assertEquals(listOf(16, 15), sentVideo(64, 60).sar())
+        assertEquals(listOf(64, 45), sentVideo(64, 45).sar())
+        assertNull(sentVideo(1, 1).sar())
+        assertNull(sentVideo(null, null).sar())
+        assertNull(sentVideo(16, 0).sar())
+        assertNull(sentVideo(-16, 15).sar())
+        // PROTOCOL.md reads ratios outside 1/10..10 as square pixels.
+        assertEquals(listOf(10, 1), sentVideo(10, 1).sar())
+        assertNull(sentVideo(11, 1).sar())
+        assertNull(sentVideo(1, 11).sar())
+    }
 
     private suspend fun open(control: ControlChannel) {
         control.openSession("clip.mkv", "passthrough", DisplaySize(1920, 1080),

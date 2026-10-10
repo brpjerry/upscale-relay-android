@@ -35,8 +35,8 @@ android {
         applicationId = "org.upscalerelay.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.22.0"
+        versionCode = 26
+        versionName = "0.24.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -106,5 +106,7 @@ dependencies {
     debugImplementation(libs.compose.ui.test.manifest)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.junit)
 }

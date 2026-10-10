@@ -64,19 +64,42 @@ release.yml` builds and publishes the signed APK with those notes.
   bypass that file, do not point the manifest's `android:icon` at a different
   drawable for debug, and when the release icon changes, redraw the debug
   variant alongside it rather than letting the two converge. This holds for
-  co-installed (`-PcoinstallDebug=true`) and temporary-suffix builds too.
-- Debug and release share an `applicationId`, so installing a debug build
-  normally means uninstalling the release one and losing the user's DataStore
-  (settings, watch history). Build with `-PcoinstallDebug=true` instead: it
-  adds the `.debug` suffix so the two sit side by side.
+  co-installed (`-PcoinstallDebug=true`) builds too.
+- **One debug build on the device, ever. Always overwrite the one that is
+  there; never install a second.** The debug build's home is
+  `org.upscalerelay.android.debug`: build device installs with
+  `-PcoinstallDebug=true` (the device tests refuse any other id) and install
+  with `adb install -r`, which replaces the debug build already there. Before
+  any install, look at what is on the device:
+  `adb shell pm list packages org.upscalerelay`, then
+  `adb shell dumpsys package <id> | grep pkgFlags` for each app package. An
+  app is a debug build when its flags include `DEBUGGABLE`, whatever its
+  application id; never infer "release" from the id alone. A debug build
+  found under any other id (the base id, a leftover suffix) is uninstalled,
+  not kept alongside, and a temporary `applicationIdSuffix` is never
+  invented to get around an install problem. If `install -r` is refused
+  (signature mismatch), uninstall the old debug build and install again. The
+  instrumentation APK (`<applicationId>.test`) follows the same rule: one,
+  matching the installed debug build, with any stale one uninstalled. On
+  2026-10-09 the tablet carried two amber icons because a debug build at
+  `org.upscalerelay.android` had been taken for the release app and a second
+  debug build was installed beside it as `.debug`.
+- Debug and release share an `applicationId`, so a debug build cannot go
+  over a signed release. `-PcoinstallDebug=true` adds the `.debug` suffix so
+  the one debug build can sit beside a signed release and leave its data
+  alone. That is all the flag is for; it never licenses a second debug
+  build.
 - **Data in a debug build is disposable.** Settings, watch history, the
   library cache and anything else a debug install holds (the amber icon is
   how you know it is one) can always be cleared, overwritten or lost to an
   uninstall for the sake of a test — `pm clear`, reinstalling, marking files
   watched, changing the host — without asking and without preserving it
-  first. There is no need to build a second throwaway copy just to protect a
-  debug install's data. This never extends to the signed release app: its
-  data is the user's and is not touched.
+  first. **Never back up, copy aside, export or otherwise try to preserve a
+  debug build's data**, not before overwriting it and not before
+  uninstalling it, and never choose one approach over another because it
+  keeps that data. There is no need to build a second throwaway copy just to
+  protect a debug install's data. This never extends to the signed release
+  app: its data is the user's and is not touched.
 - `files/phase4-latest.json` is written every second and is the fastest read
   on drops, A/V error, buffer, and transport rates:
   `adb shell run-as <applicationId> cat files/phase4-latest.json`.
@@ -112,16 +135,21 @@ release.yml` builds and publishes the signed APK with those notes.
   Authorization header and must never enter URLs, DataStore, telemetry,
   ordinary logs, or exception text. Cancellation must close and join the
   response writer before deleting its temp/view or tearing down the session.
-- `--start=<target>` does not fix that and was tried on the device: the
+- `--start=<target>` on the load does not fix the first rule's problem (the
+  external demuxers left at zero) and was tried on the device: the
   loopback stream is a live one-shot socket, so mpv rejects the seek
   (`Cached seek not possible` / `Cannot seek in this stream`). A back buffer
   and `demuxer-seekable-cache=yes` do not help either — the epoch carries one
   keyframe, so there is no cached range to seek within.
-- **The epoch loads `pause=yes`.** Without it the picture runs on alone for
-  the second the attach takes, and mpv reconciles that drift against a
-  freshly started audio track: an A/V desynchronisation warning and tens of
-  dropped frames on *every* stream start. `attachExternalMedia` lifts the hold
-  and applies the caller's real pause intent when the tracks are in place.
+- **The epoch loads `pause=yes`** (`relayLoadOptions`). Without it the picture
+  runs on alone for the second the attach takes, and mpv reconciles that drift
+  against a freshly started audio track: an A/V desynchronisation warning and
+  tens of dropped frames on *every* stream start. The hold is lifted, with the
+  caller's real pause intent, on the first `PLAYBACK_RESTART`: by
+  `attachExternalMedia` once the added tracks are in place, and by
+  `completeMuxedRestart` for a muxed epoch or a source with no auxiliary
+  tracks, after it has re-applied the track choices. A load path that reaches
+  neither leaves playback on its first frame.
 - Adding a track mid-playback needs the `select` flag; `auto` only marks the
   file as a candidate and leaves it unselected (verified — it produced no
   audio at all). Explicit user track choices are remembered in the engine and
@@ -148,22 +176,109 @@ release.yml` builds and publishes the signed APK with those notes.
   epoch every cooldown, forever. mpv applies the delay and reports the
   residual error, which stays microscopic either way (verified on device:
   4.0 s delay ⇒ `avsync` 0.0000 s).
-- Relay loads disable mpv's network read timeout for the loopback stream only;
-  an intentional pause can leave it silent indefinitely. The external HTTP
-  demuxers keep the ordinary timeout, which a 90-second pause survives.
+- Relay loads set `network-timeout=0` (`relayLoadOptions`): an intentional
+  pause can leave the loopback stream silent indefinitely, and the ordinary
+  10 s would end the file. The option is per file, not per stream. While a
+  relay file plays mpv's `network-timeout` is 0 for everything (measured on
+  the device 2026-10-09: 10 idle, 0 during the relay file, 10 after close),
+  so the external demuxer that `audio-add` / `sub-add` opens during that file
+  is opened under 0 as well. Nothing gives it "the ordinary timeout", as this
+  rule used to say: do not count on mpv to time out a stalled `/media` or
+  local-bridge read. (A 90-second pause and resume did keep external audio
+  alive on the device.)
 - Never pass `start=` to place relay playback. `rebase-start-time=no` means
   the stream's absolute Matroska PTS already position it.
 - Keep the dedicated blocking downlink and loopback threads. No media packet
   may cross the Compose/coroutine UI path.
 - The pre-mpv queue is bounded by bytes (256 MiB), mpv's forward cache by
   bytes (128 MiB). Backpressure must stop producers, never grow memory.
-- Teardown waits for the server's `closed` acknowledgement. A state notification,
-  EOF or timeout is not confirmed native cleanup and must not silently start a
-  replacement session. Stop and await the player's command queue before retiring
-  loopback, external-media or font owners. Native initialize/destroy run off Main
-  and preserve the process-global JNI ownership barrier.
+- **No replacement session until the server has confirmed the previous one
+  released.** Teardown waits for the server's `closed` acknowledgement; a
+  state notification, EOF or timeout is not confirmed native cleanup. When the
+  control connection is already dead (a tablet that slept, Wi-Fi that dropped)
+  that acknowledgement cannot come, and treating its absence as the hard stop
+  ended playback with "Server did not confirm resource release" on every
+  wake from a long sleep. `disposeController` now records the session
+  (`unconfirmedRelease`) and every session open first runs
+  `confirmPriorRelease` on the new connection: `GET /status` has to stop
+  listing that `session_id` with `restart_required` false
+  (`RelaySessionController.awaitReleased`, bounded at 60 s: the server may
+  need 30 s to notice the dead connection and 15 s more to close). The server
+  delists a session only after its native close has returned and sets
+  `restart_required` when that close failed, which is what makes this a
+  confirmation and not an assumption; on the device the wait is real, 16 s
+  until the server's heartbeat noticed the dead socket. Still listed at the
+  deadline, `restart_required`, a `/status` that cannot be read, and a lost
+  connection whose session id was never learned all remain the hard stop
+  (`cleanupFailure`). An unreachable server settles nothing and the question
+  stays open for the next connection. Any new place that opens a session must
+  call `confirmPriorRelease` first.
+- Stop and await the player's command queue before retiring loopback,
+  external-media or font owners. Native initialize/destroy run off Main and
+  preserve the process-global JNI ownership barrier.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
+
+- **Read where the user is with `RelayUiState.userPositionSeconds()`**, never
+  `mpvMetrics.positionSeconds`, for anything that moves relative to it or
+  resumes from it (skips, chapter steps, reconnect, settings restart, the
+  hand-over to the original). Every seek reloads the stream, and from the
+  reload until the new epoch plays mpv's reported position is the stale old
+  one and then zero. Reading it turned a second "back 1:25" into a jump to
+  0:00. Only end-of-file checks want mpv's real position.
+- **The picture always runs full size under a display cutout.** Never shrink
+  the player, pad the picture, or reduce the size negotiated with the server
+  for one: on the tablet that costs 28 rows, and the owner rejected it
+  outright (2026-10-09). Only the controls mind a cutout, and the top bar
+  does not avoid one in the top edge (`playerControlInsets()`): its title and
+  buttons sit at the two ends, and padding the whole bar down by the cutout's
+  height left it hanging below a strip of bare picture. The sides and the
+  centred bottom controls still keep clear of one. Android would not keep an
+  app out of the cutout anyway: `LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER` is
+  ignored for an app targeting SDK 35+ on Android 15+ (verified on Android
+  16).
+- **Each player control owns its interaction source.** A shared
+  `MutableInteractionSource` draws one press on every control it was given
+  to. Use `rememberPressReporting(shared)`: the control shows its own press
+  and forwards it, so the auto-hide timer still sees it.
+- **A press that misses a control must never reach the picture.** The gesture
+  layer under the controls is hit directly everywhere, and a direct hit beats
+  an icon button's 48dp minimum touch target. So a button was hit only inside
+  its 40dp circle (70 px, 6 mm on the tablet), and a press on its edge counted
+  as a tap on the picture: the controls vanished and the button then took two
+  more presses. Found on 2026-10-09 with `adb shell input tap` while chasing
+  the lock report below, which it did not explain. The control bars take
+  their own presses (`absorbMissedPresses`), which also gives the buttons
+  their minimum target back; keep it on any bar, and keep controls inside a
+  bar that has it. The lock, in both states, is a `LockButton` whose target
+  runs out to the screen corner. Locked, a press on the picture only brings
+  the unlock button up and restarts its timeout; it never takes it away.
+- **The tablet cancels ordinary presses on the player's top bar as palms, and
+  `PalmCancelRescue` gives them back.** In landscape the Tab S9 Ultra's touch
+  controller raises its palm flag on fingertip presses in the top 9 mm of the
+  screen: 22 of 44 presses on the lock (2026-10-09), all at y <= 85 px, none
+  of the seven at y >= 91 px. The system then delivers `ACTION_CANCEL` with
+  `FLAG_CANCELED` and, 14-17 ms later, the `ACTION_UP`; the button lights up
+  and nothing happens ("the lock takes several presses"). The top bar's
+  buttons sit in that strip because the bar starts at the top edge, under
+  the notch, and the owner chose to keep it there and accept those presses
+  rather than move the controls down. `MainActivity.dispatchTouchEvent` holds
+  such a cancel and delivers the up in its place, only in the player, only in
+  the top 64dp, only for one stationary pointer whose up follows within
+  50 ms. Do not widen any of those: a palm that really rests there keeps
+  producing cancels and is still rejected. Scripted input cannot show this
+  bug (`input tap`, Compose tests and UiAutomation never pass through the
+  touch controller), so "works with injected taps" proves nothing about
+  presses near a screen edge. Diagnose with real fingers:
+  `adb shell getevent -lt /dev/input/event<N>` shows `EV_KEY 0118` (Samsung's
+  BTN_PALM) and logcat shows `InputReader: Btn_palm` when it happens.
+- **Whatever opens a window over the player hides the system bars in that
+  window too.** A bottom sheet, dialog or menu is a window of its own, and
+  the status and navigation bars follow whichever window has focus, so a
+  plain `ModalBottomSheet` brought both back over the picture for as long as
+  it was open. The player's sheets go through `PlayerSheet`, which asks for
+  the bars hidden on the sheet's own window (`dialogWindow()`). Anything new
+  that opens over the player does the same.
 
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player
@@ -209,3 +324,16 @@ release.yml` builds and publishes the signed APK with those notes.
 - PGS/VobSub bitmap subtitle rendering is still unverified — the test library
   has only SSA samples.
 - S Pen and Samsung DeX interactive smoke tests remain hands-on.
+- A local source that fails mid-read ends playback early with no error.
+  MediaExtractor reports a read error the same way as end of file
+  (`sampleTime < 0`), so `ExtractorPacketReader` returns null and the uplink
+  sends EOS. A provider that drops out (network storage, a cloud document)
+  looks like a short file. Telling the two apart would need a heuristic, such
+  as an end far short of the declared duration, which risks false errors on
+  files with wrong duration headers, so it is deliberately unhandled
+  (decided 2026-10-09).
+- Pixel aspect for local uplinks comes from the container: MediaExtractor for
+  MP4, `MatroskaVideoAspect` for Matroska display sizes. An aspect carried
+  only in the video bitstream (Matroska `DisplayUnit` 4) is left to the
+  server, which reads it from the uplink's codec parameter sets when
+  `open_session.video.sample_aspect_ratio` is absent.

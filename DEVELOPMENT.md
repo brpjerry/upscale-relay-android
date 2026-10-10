@@ -59,6 +59,64 @@ Ultra:
 4. Interrupt the relay session and choose **Play original**. Direct local
    playback resumes near the current position without another picker.
 
+## Device regression tests
+
+The instrumentation tests drive the co-installed debug app (build with
+`-PcoinstallDebug=true`); its data is disposable and the release app is never
+touched. Install both APKs and run them with `am instrument` rather than
+`connectedDebugAndroidTest`, which uninstalls the app afterwards:
+
+```text
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaPath '<library file>' org.upscalerelay.android.debug.test/androidx.test.runner.AndroidJUnitRunner"
+```
+
+- `AuditFixesDeviceTest` and `AuditUiDeviceTest` (Compose) hold the
+  regressions for the October 2026 audit fixes. Most run against
+  `FakeRelay`, an in-process endpoint on 127.0.0.1: it answers hello,
+  rejects open_session, acknowledges teardown, and serves a sortable,
+  pageable, optionally delayed `/library`. They need no relay server.
+- `AuditUiDeviceTest` also holds the player-control regressions: a scrub
+  that outlasts the controls' timeout, the lock taking one press wherever on
+  it the press lands, a missed press leaving the controls up, a press the
+  tablet cancels as a palm still landing, and a sheet leaving the system
+  bars hidden. They play the 150 s clip (below) through the original-file
+  fallback and need no relay.
+- `openWhileTheLaunchConnectWaitsForTheNetworkKeepsThePlayer` uses the real
+  relay (`-e auditHost`/`-e auditPort`, default 192.168.0.115:8590). It
+  switches the tablet's Wi-Fi off for a few seconds so the launch connect
+  waits for the network, and always switches it back on.
+- `ConnectionLossDeviceTest` also uses the real relay and `-e auditMediaPath`.
+  It switches Wi-Fi off under a playing session until the app notices the
+  dead control connection, switches it back on, and expects playback to
+  resume near the same position on a new session, once the server has
+  confirmed the old one released.
+- The local-file tests need a 150 s clip in the debug app's files directory;
+  without it they are skipped:
+
+  ```text
+  python tools/make_test_clip.py audit-clip-150s.mp4 150
+  adb push audit-clip-150s.mp4 /data/local/tmp/
+  adb shell run-as org.upscalerelay.android.debug cp /data/local/tmp/audit-clip-150s.mp4 files/
+  ```
+
+- The pixel-aspect test needs three 720x576, 16:15 clips: MP4, Matroska with
+  display sizes, and Matroska that leaves the aspect to the bitstream.
+  `tools/make_anamorphic_clips.py <dir>` writes all three; push them the
+  same way.
+- `ServerE2EDeviceTest` needs a real relay with the October 2026 server
+  fixes: `-e e2eHost <host> -e e2ePort <port>`. It checks server_id-scoped
+  history and that the anamorphic clips come back 4:3. Add
+  `-e e2eBitstreamAspect true` for the bitstream-only Matroska clip. Add
+  `-e e2eColour true`, with `tools/make_colour_clip.py`'s untagged 720x576
+  clip pushed, to compare relayed against direct colours.
+- `PlayerSeekDeviceTest` needs the real relay and `-e auditMediaPath` with a
+  file of 20 minutes or more. It presses the skip buttons back to back and
+  checks where playback lands.
+- `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
+  fails without it.
+
 ## Telemetry and logging
 
 - A machine-readable snapshot is written every second to the app-private
@@ -116,8 +174,13 @@ Ultra:
   one post-restart `audio-add`, wait for valid `audio-pts`, then restore the
   caller's pause intent. See CLAUDE.md.
 - Stop awaits the player's ordered native command queue before retiring media
-  owners. Server teardown waits for `closed`; missing acknowledgement blocks
-  automatic replacement and surfaces an explicit cleanup failure.
+  owners. Server teardown waits for `closed`. When the control connection is
+  already dead the acknowledgement cannot come; the session is remembered and
+  the next connection polls `GET /status` (up to 60 s) until the server no
+  longer lists it, and only then opens a replacement, which is how playback
+  resumes after the tablet slept. A session still listed at the deadline, a
+  server reporting `restart_required`, or one whose `/status` cannot be read
+  blocks the replacement and surfaces an explicit cleanup failure.
 - Initial playback and seeks use a 60-second inactivity deadline. Strictly
   advancing subtitle-index coverage for the current epoch extends it; stale
   or repeated progress ticks do not. `seek_ready` is only a flush acknowledgement.

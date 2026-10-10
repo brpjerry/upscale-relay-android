@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.WebSocket
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryNode
@@ -26,6 +27,7 @@ import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.SeekProgress
 import java.io.Closeable
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,11 +35,16 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToLong
 
-class RelaySessionController(
+class RelaySessionController internal constructor(
     val host: String,
-    val port: Int = 8590,
-    private val attachmentCacheRoot: Path? = null,
+    val port: Int,
+    private val attachmentCacheRoot: Path?,
+    private val webSocketFactory: WebSocket.Factory?,
+    private val playerConnectTimeoutMillis: Long,
 ) : Closeable {
+    constructor(host: String, port: Int = 8590, attachmentCacheRoot: Path? = null) :
+        this(host, port, attachmentCacheRoot, null, PLAYER_CONNECT_TIMEOUT_MILLIS)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateMachine = SessionStateMachine()
     val state: StateFlow<SessionState> = stateMachine.state
@@ -74,6 +81,9 @@ class RelaySessionController(
     private var seekWatchdog: Job? = null
     private var capabilities: Capabilities? = null
     private var activeSession: SessionInfo? = null
+
+    @Volatile
+    private var openedSessionId: String? = null
     private var activeModel: String? = null
     private var activeQualityTier: String? = null
     private var activeFitMode: String? = null
@@ -90,7 +100,7 @@ class RelaySessionController(
         teardownResult.set(null)
         stateMachine.transition(SessionState.CONNECTING)
         return try {
-            val channel = ControlChannel(host, port, ::fail)
+            val channel = ControlChannel(host, port, ::fail, webSocketFactory)
             channel.onOpeningProgress = { text -> mutableOpeningProgress.value = text }
             channel.onSeekProgress = { progress ->
                 synchronized(seekProgressTracker) {
@@ -121,6 +131,61 @@ class RelaySessionController(
         } catch (error: Throwable) {
             fail(error)
             throw error
+        }
+    }
+
+    /**
+     * The id of the session this controller opened, from the moment the
+     * server announced it, kept after teardown: a later connection asks about
+     * it when this one could not get its release acknowledged.
+     */
+    val sessionId: String? get() = openedSessionId
+
+    /**
+     * Waits until the server no longer holds [sessionId], a session whose
+     * teardown it never acknowledged because that session's control
+     * connection had already died. The server releases a session by itself
+     * when its connection drops (within its heartbeat, about 30 s), and
+     * /status reports the result, so this is a positive confirmation, not an
+     * assumption.
+     *
+     * Returns once the session is gone. Throws [RelayServerException]
+     * (`server_restart_required`) if a native teardown failed, and
+     * [TeardownUnconfirmedException] if the session is still held after
+     * [timeoutMillis] or the server cannot say; both mean no replacement
+     * session may be opened. A transport failure is thrown as it is: the
+     * question is still open and can be asked again on the next connection.
+     */
+    suspend fun awaitReleased(
+        sessionId: String,
+        timeoutMillis: Long = RELEASE_CONFIRM_TIMEOUT_MILLIS,
+        pollMillis: Long = RELEASE_CONFIRM_POLL_MILLIS,
+    ) {
+        val channel = requireNotNull(control) { "not connected" }
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (true) {
+            val status = try {
+                channel.fetchStatus()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (unavailable: RelayHttpStatusException) {
+                throw TeardownUnconfirmedException(unavailable)
+            } catch (malformed: RuntimeException) {
+                throw TeardownUnconfirmedException(malformed)
+            }
+            if (status.restartRequired) {
+                throw RelayServerException(
+                    "server_restart_required",
+                    "Server native cleanup failed; restart the server",
+                )
+            }
+            if (sessionId !in status.sessionIds) return
+            if (System.nanoTime() >= deadline) {
+                throw TeardownUnconfirmedException(
+                    IOException("the server still holds session $sessionId after $timeoutMillis ms"),
+                )
+            }
+            delay(pollMillis)
         }
     }
 
@@ -168,6 +233,7 @@ class RelaySessionController(
                     requestCachedAttachments = requestCachedAttachments,
                 ),
             )
+            openedSessionId = session.sessionId
             require(session.uplinkToken == null) { "server_file unexpectedly requires an uplink" }
             require(session.downlinkContainer == "matroska") {
                 "Android requires a Matroska downlink, got ${session.downlinkContainer}"
@@ -216,7 +282,7 @@ class RelaySessionController(
 
             val mediaQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             queue = mediaQueue
-            val localServer = LoopbackMediaServer(mediaQueue, ::fail)
+            val localServer = LoopbackMediaServer(mediaQueue, playerConnectTimeoutMillis, ::fail)
             loopback = localServer
             localServer.start()
             val downlink = DownlinkReceiver(
@@ -243,6 +309,7 @@ class RelaySessionController(
             }
             startReporter()
             stateMachine.transition(SessionState.BUFFERING)
+            localServer.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = localServer.url,
                 originalMediaUrl = originalMediaUrl,
@@ -298,6 +365,7 @@ class RelaySessionController(
                 sourceHasAudio = source.videoInfo.sourceHasAudio,
                 sourceHasAuxiliary = source.videoInfo.sourceHasAuxiliary,
             )
+            openedSessionId = session.sessionId
             val token = requireNotNull(session.uplinkToken) { "uplink session did not return a token" }
             require(session.downlinkContainer == "matroska") {
                 "Android requires a Matroska downlink, got ${session.downlinkContainer}"
@@ -309,7 +377,7 @@ class RelaySessionController(
 
             val mediaQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
             queue = mediaQueue
-            val localServer = LoopbackMediaServer(mediaQueue, ::fail)
+            val localServer = LoopbackMediaServer(mediaQueue, playerConnectTimeoutMillis, ::fail)
             loopback = localServer
             localServer.start()
             val downlink = DownlinkReceiver(
@@ -342,6 +410,7 @@ class RelaySessionController(
             currentEpoch.set(session.epoch)
             startReporter()
             stateMachine.transition(SessionState.BUFFERING)
+            localServer.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = localServer.url,
                 originalMediaUrl = this.originalMediaUrl,
@@ -418,7 +487,7 @@ class RelaySessionController(
             }
             startSeekWatchdog(epoch)
             val nextQueue = BoundedMediaQueue(MEDIA_QUEUE_BYTES)
-            val nextLoopback = LoopbackMediaServer(nextQueue, ::fail).also { it.start() }
+            val nextLoopback = LoopbackMediaServer(nextQueue, playerConnectTimeoutMillis, ::fail).also { it.start() }
             val previousLoopback = loopback
 
             try {
@@ -443,6 +512,7 @@ class RelaySessionController(
                     if (desiredPaused.get()) SessionState.PAUSED else SessionState.BUFFERING,
                 )
             }
+            nextLoopback.armPlayerConnectDeadline()
             PlaybackEndpoint(
                 localUrl = nextLoopback.url,
                 originalMediaUrl = originalMediaUrl,
@@ -641,6 +711,20 @@ class RelaySessionController(
     companion object {
         const val TEARDOWN_TIMEOUT_MILLIS = 30_000L
         const val SEEK_PROGRESS_TIMEOUT_MILLIS = 60_000L
+
+        /** How long mpv has to connect once an endpoint has been handed out. */
+        const val PLAYER_CONNECT_TIMEOUT_MILLIS = 30_000L
+
+        /**
+         * How long a lost session may stay listed before it counts as stuck.
+         * The server can take 30 s to notice a dead control connection (a
+         * 20 s heartbeat plus a 10 s pong wait) and bounds its native close
+         * at 15 s, and the session is listed for all of that: 45 s when
+         * everything goes as slowly as it may. Giving up exactly then would
+         * turn a release that was about to be reported into a hard stop.
+         */
+        const val RELEASE_CONFIRM_TIMEOUT_MILLIS = 60_000L
+        const val RELEASE_CONFIRM_POLL_MILLIS = 1_000L
         const val MEDIA_QUEUE_BYTES = 256L * 1024 * 1024
         val ANDROID_HEVC_TIERS = setOf(
             "lossless-hevc", "hevc-qp2", "hevc-qp4", "hevc-qp6",

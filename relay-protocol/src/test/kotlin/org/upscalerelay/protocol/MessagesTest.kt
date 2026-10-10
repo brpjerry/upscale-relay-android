@@ -64,6 +64,28 @@ class MessagesTest {
     }
 
     @Test
+    fun `server id is read only within its guarantee`() {
+        fun parse(extra: String) = Capabilities.fromJson(
+            Json.parseToJsonElement(
+                """{"protocol_version":1,"server_name":"s","models":[],"quality_tiers":[]$extra}""",
+            ).jsonObject,
+        ).serverId
+        // Today's form: uuid4().hex.
+        assertEquals("4f1c2b7e9a1d4c558e0e3b2f6a7d9c10", parse(""","server_id":"4f1c2b7e9a1d4c558e0e3b2f6a7d9c10""""))
+        assertEquals("A_b-9", parse(""","server_id":"A_b-9""""))
+        assertEquals("x".repeat(64), parse(""","server_id":"${"x".repeat(64)}""""))
+        // Absent, empty, too long, another charset, or not a string.
+        assertEquals(null, parse(""))
+        assertEquals(null, parse(""","server_id":null"""))
+        assertEquals(null, parse(""","server_id":"""""))
+        assertEquals(null, parse(""","server_id":"${"x".repeat(65)}""""))
+        assertEquals(null, parse(""","server_id":"a.b""""))
+        assertEquals(null, parse(""","server_id":"a b""""))
+        assertEquals(null, parse(""","server_id":12345"""))
+        assertEquals(null, parse(""","server_id":["a"]"""))
+    }
+
+    @Test
     fun `capabilities choose a real model before passthrough`() {
         val value = Json.parseToJsonElement(
             """{"protocol_version":1,"server_name":"relay","models":[{"name":"passthrough","scale_factor":1},{"name":"anime-x2","scale_factor":2}],"quality_tiers":["lossless-hevc"],"library":true}""",
@@ -181,6 +203,35 @@ class MessagesTest {
         assertEquals("unsafe_font.ttf", session.attachmentManifest.single().name)
         assertEquals(3L, session.attachmentManifest.single().size)
         assertTrue(session.attachmentToken?.isNotBlank() == true)
+    }
+
+    @Test
+    fun `server status lists held sessions and a failed teardown`() {
+        fun status(text: String) = ServerStatus.fromJson(Json.parseToJsonElement(text).jsonObject)
+        // What a healthy relay answers, with a session playing.
+        val busy = status(
+            """{"server":"upscale-relay","protocol_version":1,"restart_required":false,""" +
+                """"native_teardown_error":null,"models":["passthrough"],"sessions":[""" +
+                """{"id":"a1","state":"playing","epoch":2,"uplink_attached":false,"pipeline":{"fps":23.9}},""" +
+                """{"id":"b2","state":"paused","epoch":0,"pipeline":null}]}""",
+        )
+        assertEquals(setOf("a1", "b2"), busy.sessionIds)
+        assertEquals(false, busy.restartRequired)
+        assertNull(busy.failedTeardownSessionId)
+
+        val broken = status(
+            """{"restart_required":true,"native_teardown_error":{"session_id":"a1",""" +
+                """"error":"RuntimeError('nvenc')","restart_required":true},"sessions":[]}""",
+        )
+        assertTrue(broken.sessionIds.isEmpty())
+        assertEquals(true, broken.restartRequired)
+        assertEquals("a1", broken.failedTeardownSessionId)
+
+        // A relay too old to report cleanup still lists what it holds.
+        assertEquals(false, status("""{"sessions":[]}""").restartRequired)
+        // Without the list there is no answer to act on.
+        assertThrows(RuntimeException::class.java) { status("""{"restart_required":false}""") }
+        assertThrows(RuntimeException::class.java) { status("""{"sessions":[{"state":"playing"}]}""") }
     }
 
     @Test

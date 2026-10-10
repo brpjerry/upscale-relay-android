@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
+import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
@@ -37,7 +38,13 @@ data class AppPreferences(
     val librarySort: String = "NAME",
     val lastDestination: String = "",
     val lastLibraryPath: String = "",
-    val recentPaths: List<String> = emptyList(),
+    // The history scope last seen for the server at this "host:port", so the
+    // cached listing shows its watch state before the connect confirms it.
+    val historyScopeOrigin: String = "",
+    val historyScope: String = "",
+    // Server recents as history keys (serverHistoryKey), newest first, every
+    // server's together; the UI shows the current server's.
+    val recentServerKeys: List<String> = emptyList(),
     val recentLocalUris: List<String> = emptyList(),
     val recentLocalRootUris: List<String> = emptyList(),
     val playbackPositions: Map<String, PlaybackProgress> = emptyMap(),
@@ -125,7 +132,8 @@ class AppPreferencesStore(context: Context) {
                 value.playbackHistoryLimit.coerceIn(1, MAX_POSITIONS_LIMIT)
             preferences[Keys.SKIP_SECONDS] =
                 value.skipSeconds.coerceIn(1, MAX_SKIP_SECONDS)
-            preferences[Keys.RECENTS] = value.recentPaths.take(MAX_RECENTS).joinToString("\n")
+            preferences[Keys.RECENTS] =
+                value.recentServerKeys.filter(::isServerHistoryKey).take(MAX_RECENTS).joinToString("\n")
             preferences[Keys.LOCAL_RECENTS] =
                 value.recentLocalUris.take(MAX_RECENTS).joinToString("\n")
             preferences[Keys.LOCAL_ROOT_RECENTS] =
@@ -134,10 +142,12 @@ class AppPreferencesStore(context: Context) {
         }
     }
 
-    suspend fun addRecent(path: String) {
+    /** [key] is a [serverHistoryKey]. */
+    suspend fun addRecent(key: String) {
+        if (!isServerHistoryKey(key)) return
         dataStore.edit { preferences ->
-            val current = decodeRecents(preferences[Keys.RECENTS].orEmpty())
-            preferences[Keys.RECENTS] = updateRecentPaths(current, path).joinToString("\n")
+            val current = decodeServerRecents(preferences[Keys.RECENTS].orEmpty())
+            preferences[Keys.RECENTS] = updateRecentPaths(current, key).joinToString("\n")
         }
     }
 
@@ -155,8 +165,24 @@ class AppPreferencesStore(context: Context) {
         }
     }
 
-    suspend fun clearRecents() {
-        dataStore.edit { it.remove(Keys.RECENTS) }
+    /** Forgets the recents of the server [scope] names; other servers keep theirs. */
+    suspend fun clearRecents(scope: String) {
+        dataStore.edit { preferences ->
+            val kept = decodeServerRecents(preferences[Keys.RECENTS].orEmpty())
+                .filter { serverHistoryPath(it, scope) == null }
+            if (kept.isEmpty()) {
+                preferences.remove(Keys.RECENTS)
+            } else {
+                preferences[Keys.RECENTS] = kept.joinToString("\n")
+            }
+        }
+    }
+
+    suspend fun setHistoryScope(origin: String, scope: String) {
+        dataStore.edit { preferences ->
+            preferences[Keys.HISTORY_SCOPE_ORIGIN] = origin
+            preferences[Keys.HISTORY_SCOPE] = scope
+        }
     }
 
     /** Stores the resume point for a file; most recent first, bounded. */
@@ -217,7 +243,9 @@ class AppPreferencesStore(context: Context) {
         librarySort = preferences[Keys.LIBRARY_SORT] ?: "NAME",
         lastDestination = preferences[Keys.LAST_DESTINATION].orEmpty(),
         lastLibraryPath = preferences[Keys.LAST_LIBRARY_PATH].orEmpty(),
-        recentPaths = decodeRecents(preferences[Keys.RECENTS].orEmpty()),
+        historyScopeOrigin = preferences[Keys.HISTORY_SCOPE_ORIGIN].orEmpty(),
+        historyScope = preferences[Keys.HISTORY_SCOPE].orEmpty(),
+        recentServerKeys = decodeServerRecents(preferences[Keys.RECENTS].orEmpty()),
         recentLocalUris = decodeRecents(preferences[Keys.LOCAL_RECENTS].orEmpty()),
         recentLocalRootUris = decodeRecents(preferences[Keys.LOCAL_ROOT_RECENTS].orEmpty()),
         playbackPositions = decodePositions(
@@ -250,6 +278,8 @@ class AppPreferencesStore(context: Context) {
         val LIBRARY_SORT = stringPreferencesKey("library_sort")
         val LAST_DESTINATION = stringPreferencesKey("last_destination")
         val LAST_LIBRARY_PATH = stringPreferencesKey("last_library_path")
+        val HISTORY_SCOPE_ORIGIN = stringPreferencesKey("history_scope_origin")
+        val HISTORY_SCOPE = stringPreferencesKey("history_scope")
         val RECENTS = stringPreferencesKey("recent_paths")
         val LOCAL_RECENTS = stringPreferencesKey("recent_local_uris")
         val LOCAL_ROOT_RECENTS = stringPreferencesKey("recent_local_root_uris")
@@ -261,6 +291,10 @@ class AppPreferencesStore(context: Context) {
 
 internal fun decodeRecents(value: String): List<String> =
     value.lineSequence().map(String::trim).filter(String::isNotEmpty).distinct().take(MAX_RECENTS).toList()
+
+/** Server recents; bare paths saved before recents were scoped by server are dropped. */
+internal fun decodeServerRecents(value: String): List<String> =
+    decodeRecents(value).filter(::isServerHistoryKey)
 
 internal fun updateRecentPaths(current: List<String>, path: String): List<String> =
     (listOf(path) + current.filterNot { it == path })
@@ -278,6 +312,9 @@ internal fun decodePositions(
     value.lineSequence().forEach { line ->
         val parts = line.split('\u001F')
         if (parts.size < 2 || parts[0].isEmpty()) return@forEach
+        // Server history from before it was scoped by server could belong
+        // to any server; it is not carried over.
+        if (isUnscopedServerKey(parts[0])) return@forEach
         val seconds = parts[1].toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
             ?: return@forEach
         val duration = parts.getOrNull(2)?.toDoubleOrNull()
@@ -294,6 +331,35 @@ internal fun encodePositions(value: Map<String, PlaybackProgress>) =
 
 internal fun validHistoryKey(key: String): Boolean =
     key.isNotEmpty() && key.none { it == '\r' || it == '\n' || it == '\u001F' }
+
+/**
+ * Which server's library a history entry belongs to. Two servers can hold
+ * different media at the same path, so a path alone does not identify a
+ * file. The server's own stable server_id is preferred, so history follows it
+ * across address changes; a server without one is known by its address.
+ */
+internal fun serverHistoryScope(serverId: String?, host: String, port: Int): String =
+    // Capabilities only carries an id within its [A-Za-z0-9_-]{1,64} guarantee,
+    // so it cannot collide with the key's own punctuation.
+    if (serverId != null) "id:$serverId" else "addr:${normalizedHost(host)}:$port"
+
+/** Lower-case, without IPv6 brackets or a DNS root dot, so one address has one spelling. */
+internal fun normalizedHost(host: String): String =
+    host.trim().removePrefix("[").removeSuffix("]").trimEnd('.').lowercase(Locale.ROOT)
+
+/** The history and recents key of [path] in the library [scope] names. */
+internal fun serverHistoryKey(scope: String, path: String): String = "server[$scope]:$path"
+
+/** The library path [key] names under [scope], or null when it is another server's or not a server key. */
+internal fun serverHistoryPath(key: String, scope: String): String? {
+    val prefix = "server[$scope]:"
+    return if (key.startsWith(prefix)) key.substring(prefix.length) else null
+}
+
+internal fun isServerHistoryKey(key: String): Boolean = key.startsWith("server[") && validHistoryKey(key)
+
+/** "server:<path>", from before history was scoped by server. */
+internal fun isUnscopedServerKey(key: String): Boolean = key.startsWith("server:")
 
 internal const val MAX_RECENTS = 20
 

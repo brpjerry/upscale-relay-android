@@ -8,6 +8,8 @@ import android.os.Build
 import android.media.AudioManager
 import android.content.Intent
 import android.text.format.DateUtils
+import android.view.View
+import android.view.Window
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +22,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -28,9 +31,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.FlowRowScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,9 +43,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -86,6 +94,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
@@ -93,6 +102,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -116,6 +126,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -131,9 +142,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
@@ -145,6 +159,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -721,11 +736,11 @@ private fun LibraryList(viewModel: RelayViewModel, state: RelayUiState, modifier
             items(directory.children, key = { it.path }) { node ->
                 LibraryItem(
                     node = node,
-                    progress = state.playbackProgress["server:${node.path}"],
+                    progress = state.playbackProgress[serverHistoryKey(state.historyScope, node.path)],
                     selected = state.selectedLibraryNode?.path == node.path,
                     enabled = !state.busy && !state.libraryLoading,
                     onMarkWatched = if (node.type == LibraryNode.Type.FILE) {
-                        { viewModel.markWatched("server:${node.path}") }
+                        { viewModel.markWatched(serverHistoryKey(state.historyScope, node.path)) }
                     } else null,
                 ) {
                     if (node.type == LibraryNode.Type.DIRECTORY) viewModel.openDirectory(node)
@@ -791,22 +806,7 @@ private fun ConnectPanel(viewModel: RelayViewModel, state: RelayUiState) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(
-                        value = state.host,
-                        onValueChange = viewModel::setHost,
-                        label = { Text("Server host") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = state.port,
-                        onValueChange = viewModel::setPort,
-                        label = { Text("Port") },
-                        singleLine = true,
-                        modifier = Modifier.width(150.dp),
-                    )
-                }
+                ServerAddressFields(viewModel, state)
                 state.error?.let {
                     Spacer(Modifier.height(16.dp))
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -868,10 +868,56 @@ private fun DestinationHeader(
     }
 }
 
+/**
+ * The server address fields shared by the connect panel and Settings. A value
+ * that cannot be connected to is marked on its own field as it is typed, so a
+ * Connect that will fail says why where it was pressed.
+ */
+@Composable
+private fun ServerAddressFields(
+    viewModel: RelayViewModel,
+    state: RelayUiState,
+    trailing: @Composable () -> Unit = {},
+) {
+    val hostMissing = state.host.isBlank()
+    val portInvalid = state.port.toIntOrNull()?.takeIf { it in 1..65535 } == null
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+            value = state.host,
+            onValueChange = viewModel::setHost,
+            label = { Text("Server host") },
+            singleLine = true,
+            isError = hostMissing,
+            supportingText = if (hostMissing) {
+                { Text("Enter the server's address") }
+            } else {
+                null
+            },
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = state.port,
+            onValueChange = viewModel::setPort,
+            label = { Text("Port") },
+            singleLine = true,
+            isError = portInvalid,
+            supportingText = if (portInvalid) {
+                { Text("1 to 65535") }
+            } else {
+                null
+            },
+            modifier = Modifier.width(150.dp),
+        )
+        trailing()
+    }
+}
+
 @Composable
 private fun InlineError(message: String, onDismiss: () -> Unit) {
     Card(
-        Modifier.fillMaxWidth().padding(top = 12.dp),
+        // Announced when it appears: it is usually the answer to something
+        // the user just pressed.
+        Modifier.fillMaxWidth().padding(top = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -978,13 +1024,13 @@ private fun RecentDestination(viewModel: RelayViewModel, state: RelayUiState) {
                     Card(
                         Modifier.fillMaxWidth().fileCardClicks(
                             enabled = true,
-                            onLongClick = { viewModel.markWatched("server:$path") },
+                            onLongClick = { viewModel.markWatched(serverHistoryKey(state.historyScope, path)) },
                         ) { viewModel.openRecent(path) },
                     ) {
                         Column(Modifier.padding(18.dp)) {
                             Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium)
                             Text(path, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            PlaybackHistoryText(state.playbackProgress["server:$path"])
+                            PlaybackHistoryText(state.playbackProgress[serverHistoryKey(state.historyScope, path)])
                         }
                     }
                 }
@@ -1004,25 +1050,15 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
     }
     Column(Modifier.fillMaxSize().padding(contentPadding()).imePadding()) {
         DestinationHeader("Settings", "Tablet and relay preferences")
+        // Settings has its own Connect button, so what that connect (or
+        // anything else here) ran into belongs on this screen too, above the
+        // list so it stays in view wherever the list is scrolled.
+        state.error?.let { InlineError(it, viewModel::dismissError) }
         Spacer(Modifier.height(20.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
             item {
                 SettingsSection("Connection") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = state.host,
-                            onValueChange = viewModel::setHost,
-                            label = { Text("Server host") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedTextField(
-                            value = state.port,
-                            onValueChange = viewModel::setPort,
-                            label = { Text("Port") },
-                            singleLine = true,
-                            modifier = Modifier.width(150.dp),
-                        )
+                    ServerAddressFields(viewModel, state) {
                         Button(onClick = viewModel::connect, enabled = !state.busy) { Text("Connect") }
                     }
                     if (state.discoveredServers.isNotEmpty()) {
@@ -1391,11 +1427,20 @@ private fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsLocked by remember { mutableStateOf(false) }
     var lockedButtonVisible by remember { mutableStateOf(false) }
+    // Counts the presses that asked for the unlock button, so that each one
+    // restarts the time it stays up.
+    var lockedButtonRequests by remember { mutableIntStateOf(0) }
+    val unlockInteractionSource = remember { MutableInteractionSource() }
+    val unlockPressed by unlockInteractionSource.collectIsPressedAsState()
     var trackSheetVisible by remember { mutableStateOf(false) }
     var settingsSheetVisible by remember { mutableStateOf(false) }
     var chapterSheetVisible by remember { mutableStateOf(false) }
     var modelSheetVisible by remember { mutableStateOf(false) }
     var gestureMessage by remember { mutableStateOf<String?>(null) }
+    // A drag on the seek bar in progress. Pressed buttons report through
+    // chromeInteractionSource; a scrub can outlast the timeout and must not
+    // have the bar it is dragging removed from under it.
+    var scrubbing by remember { mutableStateOf(false) }
     val accessibilityManager = LocalAccessibilityManager.current
     val chromeInteractionSource = remember { MutableInteractionSource() }
     val chromePressed by chromeInteractionSource.collectIsPressedAsState()
@@ -1426,10 +1471,11 @@ private fun PlayerScreen(
         state.seeking,
         sheetOpen,
         chromePressed,
+        scrubbing,
     ) {
         if (
             controlsVisible && !controlsLocked && !state.paused && !state.seeking &&
-            !sheetOpen && !chromePressed
+            !sheetOpen && !chromePressed && !scrubbing
         ) {
             delay(
                 accessibilityManager?.calculateRecommendedTimeoutMillis(
@@ -1439,8 +1485,10 @@ private fun PlayerScreen(
             controlsVisible = false
         }
     }
-    LaunchedEffect(lockedButtonVisible, controlsLocked) {
-        if (controlsLocked && lockedButtonVisible) {
+    LaunchedEffect(lockedButtonVisible, controlsLocked, lockedButtonRequests, unlockPressed) {
+        // Not from under a finger: a press held across the timeout would
+        // otherwise lose the button it is on and unlock nothing.
+        if (controlsLocked && lockedButtonVisible && !unlockPressed) {
             delay(
                 accessibilityManager?.calculateRecommendedTimeoutMillis(
                     4_000, containsIcons = true, containsControls = true,
@@ -1473,7 +1521,11 @@ private fun PlayerScreen(
                 enabled = state.gesturesEnabled && !controlsLocked,
                 onToggleControls = {
                     if (controlsLocked) {
-                        lockedButtonVisible = !lockedButtonVisible
+                        // Locked, a press on the picture can only be asking
+                        // for the way out. It used to toggle the button, so a
+                        // press that just missed the button took it away.
+                        lockedButtonVisible = true
+                        lockedButtonRequests += 1
                     } else {
                         controlsVisible = !controlsVisible
                     }
@@ -1492,6 +1544,7 @@ private fun PlayerScreen(
                     onChapters = { chapterSheetVisible = true },
                     onModels = { modelSheetVisible = true },
                     interactionSource = chromeInteractionSource,
+                    onScrubbingChange = { scrubbing = it },
                     onLock = {
                         controlsLocked = true
                         controlsVisible = false
@@ -1501,16 +1554,19 @@ private fun PlayerScreen(
                 )
             }
             if (controlsLocked && lockedButtonVisible) {
-                LockedControlsButton(
-                    onUnlock = {
+                LockButton(
+                    description = "Unlock player controls",
+                    reach = PaddingValues(16.dp),
+                    interactionSource = unlockInteractionSource,
+                    onClick = {
                         controlsLocked = false
                         lockedButtonVisible = false
                         controlsVisible = true
                     },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                        .padding(16.dp),
+                        .windowInsetsPadding(playerControlInsets()),
+                    plate = true,
                 )
             }
             gestureMessage?.let { message ->
@@ -1713,6 +1769,22 @@ private fun PlayerTouchLayer(
     )
 }
 
+/**
+ * Insets for the player's controls.
+ *
+ * The picture runs full size under a display cutout, and so does the top
+ * bar: its title and buttons sit at the two ends, and padding the whole bar
+ * down by the cutout's height left it hanging below a strip of bare picture.
+ * So a cutout in the top edge is not avoided. Neither the picture nor the
+ * size negotiated with the server is ever reduced for one. A cutout in the
+ * bottom edge still is avoided, since the transport controls are centred
+ * where it would sit, and so are the sides.
+ */
+@Composable
+private fun playerControlInsets(): WindowInsets =
+    WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+        .union(WindowInsets.systemBars.only(WindowInsetsSides.Top))
+
 @Composable
 private fun PlayerChrome(
     viewModel: RelayViewModel,
@@ -1724,20 +1796,28 @@ private fun PlayerChrome(
     onChapters: () -> Unit,
     onModels: () -> Unit,
     interactionSource: MutableInteractionSource,
+    onScrubbingChange: (Boolean) -> Unit,
     onLock: () -> Unit,
 ) {
     val chapters = state.session?.chapters.orEmpty()
     val currentChapter = chapters.lastOrNull { it.startSeconds <= position }
     val compactActions = windowWidthDp() < 900
-    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+    val barSide = if (compactActions) 8.dp else 24.dp
+    Column(Modifier.fillMaxSize().windowInsetsPadding(playerControlInsets())) {
+        // The lock at the end brings the bar's end and vertical padding with
+        // it, as part of its touch target (LockButton).
         Row(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color(0xdd000000), Color.Transparent)))
-                .padding(horizontal = if (compactActions) 8.dp else 24.dp, vertical = 12.dp),
+                .absorbMissedPresses()
+                .padding(start = barSide),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = viewModel::closePlayback, interactionSource = interactionSource) {
+            IconButton(
+                onClick = viewModel::closePlayback,
+                interactionSource = rememberPressReporting(interactionSource),
+            ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back to library",
@@ -1770,19 +1850,19 @@ private fun PlayerChrome(
                 PlayerAction(Icons.Outlined.AutoAwesome, "Model", compactActions, interactionSource, onModels)
             }
             PlayerAction(Icons.Outlined.Tune, "Playback settings", compactActions, interactionSource, onSettings)
-            IconButton(onClick = onLock, interactionSource = interactionSource) {
-                Icon(
-                    Icons.Outlined.Lock,
-                    contentDescription = "Lock player controls",
-                    tint = Color.White,
-                )
-            }
+            LockButton(
+                description = "Lock player controls",
+                reach = PaddingValues(end = barSide, top = 12.dp, bottom = 12.dp),
+                interactionSource = rememberPressReporting(interactionSource),
+                onClick = onLock,
+            )
         }
         Spacer(Modifier.weight(1f))
         Column(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xee000000))))
+                .absorbMissedPresses()
                 .padding(horizontal = if (compactActions) 16.dp else 36.dp, vertical = 12.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1795,6 +1875,7 @@ private fun PlayerChrome(
                     onScrub = { viewModel.previewSeek(it) },
                     onScrubFinished = viewModel::commitSeek,
                     onScrubCancelled = viewModel::cancelSeekPreview,
+                    onScrubbingChange = onScrubbingChange,
                     modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
                 )
                 Text(formatTime(duration), color = Color.White, style = MaterialTheme.typography.labelLarge)
@@ -1848,7 +1929,7 @@ private fun PlayerChrome(
                     FilledIconButton(
                         onClick = viewModel::togglePaused,
                         enabled = state.error == null,
-                        interactionSource = interactionSource,
+                        interactionSource = rememberPressReporting(interactionSource),
                         modifier = Modifier.size(64.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = Color.White,
@@ -1896,14 +1977,32 @@ private fun PlayerChrome(
     }
 }
 
+/**
+ * A control's own interaction source that also reports into [shared].
+ *
+ * The auto-hide timer has to know while any player control is pressed, and
+ * the controls used to share one source for that. But a source also drives
+ * the pressed look of everything it is given to, so touching one button lit
+ * all of them. Each control now shows only its own press and forwards it.
+ */
+@Composable
+private fun rememberPressReporting(shared: MutableInteractionSource): MutableInteractionSource {
+    val own = remember { MutableInteractionSource() }
+    LaunchedEffect(own, shared) {
+        own.interactions.collect { shared.emit(it) }
+    }
+    return own
+}
+
 @Composable
 private fun PlayerAction(
     icon: ImageVector,
     label: String,
     compact: Boolean,
-    interactionSource: MutableInteractionSource,
+    pressReports: MutableInteractionSource,
     onClick: () -> Unit,
 ) {
+    val interactionSource = rememberPressReporting(pressReports)
     if (compact) {
         IconButton(onClick = onClick, interactionSource = interactionSource) {
             Icon(icon, contentDescription = label, tint = Color.White)
@@ -1921,12 +2020,12 @@ private fun PlayerAction(
 private fun PlayerRoundButton(
     icon: ImageVector,
     description: String,
-    interactionSource: MutableInteractionSource,
+    pressReports: MutableInteractionSource,
     onClick: () -> Unit,
 ) {
     FilledTonalIconButton(
         onClick = onClick,
-        interactionSource = interactionSource,
+        interactionSource = rememberPressReporting(pressReports),
         modifier = Modifier.size(48.dp),
         colors = IconButtonDefaults.filledTonalIconButtonColors(
             containerColor = Color.White.copy(alpha = 0.14f),
@@ -1952,9 +2051,16 @@ private fun PlayerSeekBar(
     onScrub: (Double) -> Unit,
     onScrubFinished: () -> Unit,
     onScrubCancelled: () -> Unit,
+    onScrubbingChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var dragging by remember { mutableStateOf(false) }
+    val scrubbingChanged by rememberUpdatedState(onScrubbingChange)
+    // A bar removed mid-drag (Picture-in-Picture) gets no end or cancel
+    // callback; without this the controls would never hide again.
+    DisposableEffect(Unit) {
+        onDispose { if (dragging) scrubbingChanged(false) }
+    }
     var scrubStart by remember { mutableDoubleStateOf(0.0) }
     var barWidthPx by remember { mutableIntStateOf(0) }
     var bubbleWidthPx by remember { mutableIntStateOf(0) }
@@ -2002,6 +2108,7 @@ private fun PlayerSeekBar(
                     onDragStart = { offset ->
                         scrubStart = latestPosition
                         dragging = true
+                        scrubbingChanged(true)
                         onScrub(secondsAt(offset.x))
                     },
                     onHorizontalDrag = { change, _ ->
@@ -2010,10 +2117,12 @@ private fun PlayerSeekBar(
                     },
                     onDragEnd = {
                         dragging = false
+                        scrubbingChanged(false)
                         onScrubFinished()
                     },
                     onDragCancel = {
                         dragging = false
+                        scrubbingChanged(false)
                         onScrubCancelled()
                     },
                 )
@@ -2081,30 +2190,109 @@ private fun PlayerSeekBar(
     }
 }
 
+/**
+ * Keeps a press on a control bar's own background from reaching the picture
+ * underneath, where it counts as a tap on the picture and hides the controls.
+ *
+ * That is what a press just off a button used to do. An icon button is hit
+ * directly only inside its 40dp circle; the 48dp minimum target around it
+ * loses to anything else that is hit directly, and the full-screen gesture
+ * layer under the controls always was. So a near miss took the whole bar
+ * away and the button then needed two more presses, one to bring the bar
+ * back. With the bar taking the press, the button's minimum target applies,
+ * and a press that misses even that does nothing.
+ */
+private fun Modifier.absorbMissedPresses(): Modifier = pointerInput(Unit) {}
+
+/**
+ * The lock, in either state, with a touch target larger than what it draws:
+ * [reach] is added around the 48dp button and belongs to the target, which
+ * therefore runs out to the corner of the screen the button sits in. A corner
+ * is the easiest place on a tablet to reach and the hardest to press exactly.
+ * [plate] draws the dark backing the button needs when it is alone on the
+ * picture.
+ */
 @Composable
-private fun LockedControlsButton(
-    onUnlock: () -> Unit,
+private fun LockButton(
+    description: String,
+    reach: PaddingValues,
+    interactionSource: MutableInteractionSource,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    plate: Boolean = false,
 ) {
-    Surface(
-        modifier = modifier,
-        color = Color(0xcc111111),
-        shape = MaterialTheme.shapes.large,
-    ) {
-        IconButton(onClick = onUnlock) {
-            Icon(
-                Icons.Outlined.Lock,
-                contentDescription = "Unlock player controls",
-                tint = Color.White,
+    Box(
+        modifier
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
             )
+            .padding(reach),
+    ) {
+        // The ripple belongs to the button that is drawn, not to its reach.
+        // Unbounded ripples start from the centre, wherever the press landed.
+        Box(
+            Modifier
+                .size(48.dp)
+                .then(
+                    if (plate) {
+                        Modifier.clip(MaterialTheme.shapes.large).background(Color(0xcc111111))
+                    } else {
+                        Modifier
+                    },
+                )
+                .indication(interactionSource, ripple(bounded = false, radius = if (plate) 34.dp else 20.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Outlined.Lock, contentDescription = description, tint = Color.White)
         }
     }
+}
+
+/**
+ * A bottom sheet over the player. A sheet is a window of its own, and the
+ * system bars follow whichever window has focus, so a plain one brought the
+ * status and navigation bars back over the picture for as long as it was
+ * open. This one asks for them hidden in its own window too.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerSheet(
+    onDismiss: () -> Unit,
+    sheetState: SheetState = rememberModalBottomSheetState(),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        val view = LocalView.current
+        DisposableEffect(view) {
+            view.dialogWindow()?.let { window ->
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose { }
+        }
+        content()
+    }
+}
+
+/** The window of the dialog this view is in, when it is in one. */
+private fun View.dialogWindow(): Window? {
+    var current: Any? = this
+    while (current != null) {
+        if (current is DialogWindowProvider) return current.window
+        current = (current as? View)?.parent
+    }
+    return null
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrackSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2139,7 +2327,7 @@ private fun ChapterSheet(viewModel: RelayViewModel, state: RelayUiState, onDismi
     val chapters = state.session?.chapters.orEmpty()
     val position = state.seekPreviewSeconds ?: state.mpvMetrics.positionSeconds
     val currentIndex = chapters.indexOfLast { it.startSeconds <= position }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2205,10 +2393,7 @@ private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
         val index = models.indexOfFirst { it.name == state.selectedModel }
         if (index > 0) listState.scrollToItem(index)
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
+    PlayerSheet(onDismiss, rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2251,7 +2436,7 @@ private fun DelayControl(label: String, value: Double, adjust: (Double) -> Unit)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()

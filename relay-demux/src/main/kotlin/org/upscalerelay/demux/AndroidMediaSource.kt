@@ -77,6 +77,11 @@ class AndroidMediaSource private constructor(
                         format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
                     val chapters = readChapters(resolver, uri)
+                    // MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT (API 30)
+                    // arrive for MP4; Matroska's sit in its Video element.
+                    val sampleAspect = format.intOrNull("sar-width")?.let { width ->
+                        format.intOrNull("sar-height")?.let { height -> width to height }
+                    } ?: readMatroskaSampleAspect(resolver, uri)
                     val hasAudio = (0 until extractor.trackCount).any { index ->
                         extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
                             ?.startsWith("audio/") == true
@@ -102,6 +107,8 @@ class AndroidMediaSource private constructor(
                             // the original has no audio or subtitle tracks.
                             sourceHasAudio = if (hasAudio) true else null,
                             sourceHasAuxiliary = if (hasAudio) true else null,
+                            sampleAspectNumerator = sampleAspect?.first,
+                            sampleAspectDenominator = sampleAspect?.second,
                         ),
                     )
                 } finally {
@@ -123,6 +130,16 @@ class AndroidMediaSource private constructor(
                     }
                 }
             }.getOrNull().orEmpty()
+
+        /** Null for non-Matroska documents and square pixels; best-effort like chapters. */
+        private fun readMatroskaSampleAspect(resolver: ContentResolver, uri: Uri): Pair<Int, Int>? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaVideoAspect.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
 
         private fun codecName(mime: String): String = when (mime) {
             MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"
@@ -223,11 +240,16 @@ private class ExtractorPacketReader(
 /** Convert common four-byte length-prefixed AVC/HEVC samples to Annex B. */
 internal fun normalizeNalUnits(payload: ByteArray, codec: String): ByteArray {
     if ((codec != "h264" && codec != "hevc") || payload.size < 4) return payload
-    if (payload.startsWithStartCode()) return payload
+    // The leading bytes cannot tell the two framings apart: a first NAL of
+    // 256..511 bytes has the length 00 00 01 xx, a three-byte start code. Only
+    // a sample that parses end to end as length-prefixed units with valid NAL
+    // headers is converted; genuine Annex B fails that parse and passes as is.
+    val minimumUnit = if (codec == "hevc") 2 else 1
     var offset = 0
     while (offset + 4 <= payload.size) {
         val length = payload.nalLengthAt(offset)
-        if (length <= 0 || length > payload.size - offset - 4) return payload
+        if (length < minimumUnit || length > payload.size - offset - 4) return payload
+        if (!payload.isNalHeaderAt(offset + 4, codec)) return payload
         offset += 4 + length
     }
     if (offset != payload.size) return payload
@@ -252,10 +274,14 @@ private fun ByteArray.nalLengthAt(offset: Int): Int =
         ((this[offset + 2].toInt() and 0xff) shl 8) or
         (this[offset + 3].toInt() and 0xff)
 
-private fun ByteArray.startsWithStartCode(): Boolean =
-    (size >= 3 && this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
-        (size >= 4 && this[0] == 0.toByte() && this[1] == 0.toByte() &&
-            this[2] == 0.toByte() && this[3] == 1.toByte())
+/**
+ * forbidden_zero_bit is clear in every NAL header, and an HEVC header's
+ * nuh_temporal_id_plus1 is never zero.
+ */
+private fun ByteArray.isNalHeaderAt(offset: Int, codec: String): Boolean {
+    if (this[offset].toInt() and 0x80 != 0) return false
+    return codec != "hevc" || this[offset + 1].toInt() and 0x07 != 0
+}
 
 private fun MediaFormat.intOrNull(key: String): Int? =
     if (containsKey(key)) getInteger(key) else null

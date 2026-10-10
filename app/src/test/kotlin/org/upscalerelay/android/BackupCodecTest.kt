@@ -11,10 +11,10 @@ class BackupCodecTest {
     @Test
     fun `record delimiters in imported paths cannot create phantom history or recents`() {
         val imported = roundTrip(AppPreferences(
-            recentPaths = listOf("good.mkv", "bad\rphantom.mkv", "bad\nphantom.mkv"),
-            playbackPositions = mapOf("server:bad\rphantom.mkv" to PlaybackProgress(12.0)),
+            recentServerKeys = listOf("server[id:a]:good.mkv", "server[id:a]:bad\rphantom.mkv", "server[id:a]:bad\nphantom.mkv"),
+            playbackPositions = mapOf("server[id:a]:bad\rphantom.mkv" to PlaybackProgress(12.0)),
         ))
-        assertEquals(listOf("good.mkv"), imported.recentPaths)
+        assertEquals(listOf("server[id:a]:good.mkv"), imported.recentServerKeys)
         assertTrue(imported.playbackPositions.isEmpty())
         assertEquals(emptyMap<String, PlaybackProgress>(), decodePositions(encodePositions(
             mapOf("bad\rkey" to PlaybackProgress(30.0)),
@@ -42,11 +42,11 @@ class BackupCodecTest {
         librarySort = "DATE",
         lastDestination = "LOCAL",
         lastLibraryPath = "Shows/Season 1",
-        recentPaths = listOf("Shows/a.mkv", "Shows/b.mkv"),
+        recentServerKeys = listOf("server[id:relay-1]:Shows/a.mkv", "server[addr:10.0.0.5:9001]:Shows/b.mkv"),
         recentLocalUris = listOf("content://tree/doc/a.mkv"),
         recentLocalRootUris = listOf("content://tree/primary%3AMovies"),
         playbackPositions = linkedMapOf(
-            "server:Shows/a, b [x].mkv" to PlaybackProgress(123.45, 1430.0, 1_721_000_000_000L),
+            "server[id:relay-1]:Shows/a, b [x].mkv" to PlaybackProgress(123.45, 1430.0, 1_721_000_000_000L),
             "local:content://provider/doc/a b.mkv" to PlaybackProgress(6.0),
         ),
         playbackHistoryLimit = 250,
@@ -59,6 +59,25 @@ class BackupCodecTest {
     @Test
     fun `every persisted field survives a round trip`() {
         assertEquals(populated, roundTrip(populated))
+    }
+
+    @Test
+    fun `history and recents from before server scoping are not imported`() {
+        val legacy = BackupCodec.encode(
+            AppPreferences(
+                playbackPositions = linkedMapOf(
+                    "server:Shows/a.mkv" to PlaybackProgress(50.0, 100.0),
+                    "local:content://doc/a.mkv" to PlaybackProgress(6.0),
+                ),
+            ),
+            "0.22.0",
+            Instant.EPOCH,
+        ).replace("\"recentServerKeys\"", "\"recentServerPaths\"")
+            .replace("\"recentServerPaths\": []", "\"recentServerPaths\": [\"Shows/a.mkv\"]")
+        assertTrue(legacy.contains("\"recentServerPaths\": [\"Shows/a.mkv\"]"))
+        val imported = BackupCodec.decode(legacy, AppPreferences())
+        assertEquals(setOf("local:content://doc/a.mkv"), imported.playbackPositions.keys)
+        assertEquals(emptyList<String>(), imported.recentServerKeys)
     }
 
     @Test
@@ -122,18 +141,18 @@ class BackupCodecTest {
               "format": "${BackupCodec.FORMAT}",
               "version": 1,
               "watchHistory": [
-                { "key": "server:good.mkv", "positionSeconds": 12.5, "durationSeconds": 60.0 },
-                { "key": "server:sep\u001Fbad.mkv", "positionSeconds": 1.0 },
-                { "key": "server:newline\nbad.mkv", "positionSeconds": 1.0 },
+                { "key": "server[id:a]:good.mkv", "positionSeconds": 12.5, "durationSeconds": 60.0 },
+                { "key": "server[id:a]:sep\u001Fbad.mkv", "positionSeconds": 1.0 },
+                { "key": "server[id:a]:newline\nbad.mkv", "positionSeconds": 1.0 },
                 { "key": "", "positionSeconds": 1.0 },
-                { "key": "server:no-position.mkv" },
-                { "key": "server:negative.mkv", "positionSeconds": -5.0 }
+                { "key": "server[id:a]:no-position.mkv" },
+                { "key": "server[id:a]:negative.mkv", "positionSeconds": -5.0 }
               ]
             }
         """.trimIndent()
         val result = BackupCodec.decode(history, AppPreferences())
         assertEquals(
-            mapOf("server:good.mkv" to PlaybackProgress(12.5, 60.0, 0L)),
+            mapOf("server[id:a]:good.mkv" to PlaybackProgress(12.5, 60.0, 0L)),
             result.playbackPositions,
         )
     }
