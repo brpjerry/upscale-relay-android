@@ -373,9 +373,10 @@ the Tab S9 Ultra against a 23:40 file:
 Verified on the device: an eight-action seek storm stayed in `PLAYING` with
 A/V error of 10–25 µs, zero decoder drops, ~4 output drops per epoch, a full
 10 s buffer, correct subtitles, and a non-default audio track that survived
-subsequent seeks. A 90-second pause and resume kept external audio alive even
-though the external demuxers now use the ordinary `network-timeout` rather
-than the relay stream's per-load `network-timeout=0`.
+subsequent seeks. A 90-second pause and resume kept external audio alive.
+(This note used to credit the external demuxers with the ordinary
+`network-timeout`. They do not have it: the per-load `network-timeout=0`
+holds for everything opened while the relay file plays, measured 2026-10-09.)
 
 ### Negotiated muxed auxiliary tracks and cached fonts (2026-08-19)
 

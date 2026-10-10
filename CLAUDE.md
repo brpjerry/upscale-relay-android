@@ -135,16 +135,21 @@ release.yml` builds and publishes the signed APK with those notes.
   Authorization header and must never enter URLs, DataStore, telemetry,
   ordinary logs, or exception text. Cancellation must close and join the
   response writer before deleting its temp/view or tearing down the session.
-- `--start=<target>` does not fix that and was tried on the device: the
+- `--start=<target>` on the load does not fix the first rule's problem (the
+  external demuxers left at zero) and was tried on the device: the
   loopback stream is a live one-shot socket, so mpv rejects the seek
   (`Cached seek not possible` / `Cannot seek in this stream`). A back buffer
   and `demuxer-seekable-cache=yes` do not help either — the epoch carries one
   keyframe, so there is no cached range to seek within.
-- **The epoch loads `pause=yes`.** Without it the picture runs on alone for
-  the second the attach takes, and mpv reconciles that drift against a
-  freshly started audio track: an A/V desynchronisation warning and tens of
-  dropped frames on *every* stream start. `attachExternalMedia` lifts the hold
-  and applies the caller's real pause intent when the tracks are in place.
+- **The epoch loads `pause=yes`** (`relayLoadOptions`). Without it the picture
+  runs on alone for the second the attach takes, and mpv reconciles that drift
+  against a freshly started audio track: an A/V desynchronisation warning and
+  tens of dropped frames on *every* stream start. The hold is lifted, with the
+  caller's real pause intent, on the first `PLAYBACK_RESTART`: by
+  `attachExternalMedia` once the added tracks are in place, and by
+  `completeMuxedRestart` for a muxed epoch or a source with no auxiliary
+  tracks, after it has re-applied the track choices. A load path that reaches
+  neither leaves playback on its first frame.
 - Adding a track mid-playback needs the `select` flag; `auto` only marks the
   file as a candidate and leaves it unselected (verified — it produced no
   audio at all). Explicit user track choices are remembered in the engine and
@@ -171,20 +176,45 @@ release.yml` builds and publishes the signed APK with those notes.
   epoch every cooldown, forever. mpv applies the delay and reports the
   residual error, which stays microscopic either way (verified on device:
   4.0 s delay ⇒ `avsync` 0.0000 s).
-- Relay loads disable mpv's network read timeout for the loopback stream only;
-  an intentional pause can leave it silent indefinitely. The external HTTP
-  demuxers keep the ordinary timeout, which a 90-second pause survives.
+- Relay loads set `network-timeout=0` (`relayLoadOptions`): an intentional
+  pause can leave the loopback stream silent indefinitely, and the ordinary
+  10 s would end the file. The option is per file, not per stream. While a
+  relay file plays mpv's `network-timeout` is 0 for everything (measured on
+  the device 2026-10-09: 10 idle, 0 during the relay file, 10 after close),
+  so the external demuxer that `audio-add` / `sub-add` opens during that file
+  is opened under 0 as well. Nothing gives it "the ordinary timeout", as this
+  rule used to say: do not count on mpv to time out a stalled `/media` or
+  local-bridge read. (A 90-second pause and resume did keep external audio
+  alive on the device.)
 - Never pass `start=` to place relay playback. `rebase-start-time=no` means
   the stream's absolute Matroska PTS already position it.
 - Keep the dedicated blocking downlink and loopback threads. No media packet
   may cross the Compose/coroutine UI path.
 - The pre-mpv queue is bounded by bytes (256 MiB), mpv's forward cache by
   bytes (128 MiB). Backpressure must stop producers, never grow memory.
-- Teardown waits for the server's `closed` acknowledgement. A state notification,
-  EOF or timeout is not confirmed native cleanup and must not silently start a
-  replacement session. Stop and await the player's command queue before retiring
-  loopback, external-media or font owners. Native initialize/destroy run off Main
-  and preserve the process-global JNI ownership barrier.
+- **No replacement session until the server has confirmed the previous one
+  released.** Teardown waits for the server's `closed` acknowledgement; a
+  state notification, EOF or timeout is not confirmed native cleanup. When the
+  control connection is already dead (a tablet that slept, Wi-Fi that dropped)
+  that acknowledgement cannot come, and treating its absence as the hard stop
+  ended playback with "Server did not confirm resource release" on every
+  wake from a long sleep. `disposeController` now records the session
+  (`unconfirmedRelease`) and every session open first runs
+  `confirmPriorRelease` on the new connection: `GET /status` has to stop
+  listing that `session_id` with `restart_required` false
+  (`RelaySessionController.awaitReleased`, bounded at 45 s). The server
+  delists a session only after its native close has returned and sets
+  `restart_required` when that close failed, which is what makes this a
+  confirmation and not an assumption; on the device the wait is real, 16 s
+  until the server's heartbeat noticed the dead socket. Still listed at the
+  deadline, `restart_required`, a `/status` that cannot be read, and a lost
+  connection whose session id was never learned all remain the hard stop
+  (`cleanupFailure`). An unreachable server settles nothing and the question
+  stays open for the next connection. Any new place that opens a session must
+  call `confirmPriorRelease` first.
+- Stop and await the player's command queue before retiring loopback,
+  external-media or font owners. Native initialize/destroy run off Main and
+  preserve the process-global JNI ownership barrier.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
