@@ -14,8 +14,11 @@ import android.graphics.drawable.Icon
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import android.view.KeyEvent
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -38,6 +41,72 @@ class MainActivity : ComponentActivity() {
                 PlaybackBridge.controls?.togglePlayPause()
             }
         }
+    }
+
+    // A press on the player's top bar that the tablet cancels as a palm while
+    // the finger lifts is handed on as the press it was (PalmCancelRescue).
+    private val palmRescue by lazy {
+        val density = resources.displayMetrics.density
+        PalmCancelRescue(stripPx = PALM_STRIP_DP * density, driftPx = PALM_DRIFT_DP * density)
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var heldCancel: MotionEvent? = null
+    private val deliverHeldCancel = Runnable {
+        heldCancel?.let { held ->
+            heldCancel = null
+            palmRescue.flushed()
+            deliverTouch(held)
+            held.recycle()
+        }
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val kind = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> PalmCancelRescue.Kind.DOWN
+            MotionEvent.ACTION_MOVE -> PalmCancelRescue.Kind.MOVE
+            MotionEvent.ACTION_UP -> PalmCancelRescue.Kind.UP
+            MotionEvent.ACTION_CANCEL -> PalmCancelRescue.Kind.CANCEL
+            else -> PalmCancelRescue.Kind.OTHER
+        }
+        val verdict = palmRescue.onEvent(
+            kind = kind,
+            eventTime = event.eventTime,
+            x = event.x,
+            y = event.y,
+            pointerCount = event.pointerCount,
+            systemCanceled = event.flags and FLAG_CANCELED != 0,
+            armed = viewModel.ui.value.playingPath != null && !inPictureInPicture,
+        )
+        return when (verdict) {
+            PalmCancelRescue.Verdict.PASS -> super.dispatchTouchEvent(event)
+            PalmCancelRescue.Verdict.HOLD -> {
+                heldCancel = MotionEvent.obtain(event)
+                // In wall time and generous: the up is judged by its own
+                // event time, and a busy main thread may deliver it late.
+                mainHandler.postDelayed(deliverHeldCancel, PalmCancelRescue.LIFT_WINDOW_MILLIS * 2)
+                true
+            }
+            PalmCancelRescue.Verdict.RESCUE -> {
+                AppLog.d(TAG, "delivered a press the system cancelled as a palm, at y=${event.y.toInt()}")
+                mainHandler.removeCallbacks(deliverHeldCancel)
+                heldCancel?.recycle()
+                heldCancel = null
+                super.dispatchTouchEvent(event)
+            }
+            PalmCancelRescue.Verdict.FLUSH -> {
+                mainHandler.removeCallbacks(deliverHeldCancel)
+                heldCancel?.let { held ->
+                    heldCancel = null
+                    super.dispatchTouchEvent(held)
+                    held.recycle()
+                }
+                super.dispatchTouchEvent(event)
+            }
+        }
+    }
+
+    private fun deliverTouch(event: MotionEvent) {
+        super.dispatchTouchEvent(event)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,6 +133,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(deliverHeldCancel)
+        heldCancel?.recycle()
+        heldCancel = null
         runCatching { unregisterReceiver(pipActionReceiver) }
         super.onDestroy()
     }
@@ -154,6 +226,16 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val TAG = "RelayAndroid"
         private const val ACTION_PIP_PLAY_PAUSE = "org.upscalerelay.android.action.PIP_PLAY_PAUSE"
+
+        /** MotionEvent.FLAG_CANCELED, which is public only from API 33. */
+        private const val FLAG_CANCELED = 0x20
+
+        // The tablet flagged presses down to 49dp from the top edge and none
+        // from 52dp on; the top bar's buttons end at 60dp. The presses it
+        // flagged had moved 10 px at most.
+        private const val PALM_STRIP_DP = 64
+        private const val PALM_DRIFT_DP = 24
     }
 }

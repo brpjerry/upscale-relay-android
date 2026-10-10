@@ -245,13 +245,32 @@ release.yml` builds and publishes the signed APK with those notes.
   an icon button's 48dp minimum touch target. So a button was hit only inside
   its 40dp circle (70 px, 6 mm on the tablet), and a press on its edge counted
   as a tap on the picture: the controls vanished and the button then took two
-  more presses. Reported for the lock on 2026-10-09 and measured with
-  `adb shell input tap`. The control bars take their own presses
-  (`absorbMissedPresses`), which also gives the buttons their minimum target
-  back; keep it on any bar, and keep controls inside a bar that has it. The
-  lock, in both states, is a `LockButton` whose target runs out to the screen
-  corner. Locked, a press on the picture only brings the unlock button up and
-  restarts its timeout; it never takes it away.
+  more presses. Found on 2026-10-09 with `adb shell input tap` while chasing
+  the lock report below, which it did not explain. The control bars take
+  their own presses (`absorbMissedPresses`), which also gives the buttons
+  their minimum target back; keep it on any bar, and keep controls inside a
+  bar that has it. The lock, in both states, is a `LockButton` whose target
+  runs out to the screen corner. Locked, a press on the picture only brings
+  the unlock button up and restarts its timeout; it never takes it away.
+- **The tablet cancels ordinary presses on the player's top bar as palms, and
+  `PalmCancelRescue` gives them back.** In landscape the Tab S9 Ultra's touch
+  controller raises its palm flag on fingertip presses in the top 9 mm of the
+  screen: 22 of 44 presses on the lock (2026-10-09), all at y <= 85 px, none
+  of the seven at y >= 91 px. The system then delivers `ACTION_CANCEL` with
+  `FLAG_CANCELED` and, 14-17 ms later, the `ACTION_UP`; the button lights up
+  and nothing happens ("the lock takes several presses"). The top bar's
+  buttons sit in that strip because the bar starts at the top edge, under
+  the notch, and the owner chose to keep it there and accept those presses
+  rather than move the controls down. `MainActivity.dispatchTouchEvent` holds
+  such a cancel and delivers the up in its place, only in the player, only in
+  the top 64dp, only for one stationary pointer whose up follows within
+  50 ms. Do not widen any of those: a palm that really rests there keeps
+  producing cancels and is still rejected. Scripted input cannot show this
+  bug (`input tap`, Compose tests and UiAutomation never pass through the
+  touch controller), so "works with injected taps" proves nothing about
+  presses near a screen edge. Diagnose with real fingers:
+  `adb shell getevent -lt /dev/input/event<N>` shows `EV_KEY 0118` (Samsung's
+  BTN_PALM) and logcat shows `InputReader: Btn_palm` when it happens.
 
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player

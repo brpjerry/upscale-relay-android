@@ -1,6 +1,9 @@
 package org.upscalerelay.android
 
 import android.net.Uri
+import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -238,6 +241,78 @@ class AuditUiDeviceTest {
     }
 
     /**
+     * What the tablet does to about half of all presses on the top bar. Its
+     * touch controller calls the press a palm as the finger lifts, and the
+     * system delivers a cancel marked FLAG_CANCELED and, a frame or two
+     * later, the up. The button lit up and nothing happened. The player takes
+     * that for the press it was, in both directions. The timings are the ones
+     * recorded from the tablet.
+     */
+    @Test
+    fun aPressTheTabletCancelsAsAPalmStillLocks() = withClipPlaying {
+        compose.mainClock.autoAdvance = false
+        showControls()
+        palmCancelledPress(centreInWindow(LOCK), cancels = listOf(90L), upAfter = 105L)
+        settle()
+        compose.onNodeWithContentDescription(UNLOCK).assertExists()
+        palmCancelledPress(centreInWindow(UNLOCK), cancels = listOf(92L), upAfter = 108L)
+        settle()
+        compose.onNodeWithContentDescription(LOCK).assertExists()
+    }
+
+    /**
+     * A palm is still a palm. One that stays down goes on being cancelled,
+     * sample after sample, and presses nothing. And below the top strip the
+     * tablet's verdict stands even for a press that lifts at once: on the
+     * picture that would otherwise be a tap, and hide the controls.
+     */
+    @Test
+    fun aRealPalmIsStillIgnored() = withClipPlaying {
+        compose.mainClock.autoAdvance = false
+        showControls()
+        palmCancelledPress(centreInWindow(LOCK), cancels = listOf(197L, 205L, 222L, 230L, 247L), upAfter = 1_255L)
+        settle()
+        compose.onNodeWithContentDescription(UNLOCK).assertDoesNotExist()
+        compose.onNodeWithContentDescription(LOCK).assertExists()
+
+        val picture = compose.onRoot().fetchSemanticsNode().boundsInWindow.center
+        palmCancelledPress(picture, cancels = listOf(90L), upAfter = 105L)
+        settle()
+        compose.onNodeWithContentDescription("Playback position").assertExists()
+    }
+
+    private fun centreInWindow(description: String): Offset =
+        compose.onNodeWithContentDescription(description).fetchSemanticsNode().boundsInWindow.center
+
+    /**
+     * Hands the Activity what the system hands it for a touch the controller
+     * flagged as a palm: down, a cancel marked FLAG_CANCELED for each sample
+     * from the flag on, then the up. Times are milliseconds after the down.
+     */
+    private fun palmCancelledPress(at: Offset, cancels: List<Long>, upAfter: Long) {
+        val down = SystemClock.uptimeMillis()
+        fun send(action: Int, after: Long, flags: Int = 0) {
+            val properties = arrayOf(
+                MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER },
+            )
+            val coordinates = arrayOf(
+                MotionEvent.PointerCoords().apply { x = at.x; y = at.y; pressure = 1f; size = 1f },
+            )
+            val event = MotionEvent.obtain(
+                down, down + after, action, 1, properties, coordinates, 0, 0, 1f, 1f, 0, 0,
+                InputDevice.SOURCE_TOUCHSCREEN, flags,
+            )
+            compose.runOnUiThread { compose.activity.dispatchTouchEvent(event) }
+            event.recycle()
+        }
+        send(MotionEvent.ACTION_DOWN, 0)
+        cancels.forEach { send(MotionEvent.ACTION_CANCEL, it, FLAG_CANCELED) }
+        send(MotionEvent.ACTION_UP, upAfter)
+        // Past the wait for an up that a held cancel is given.
+        SystemClock.sleep(250)
+    }
+
+    /**
      * Plays the generated clip through the original-file fallback, so the
      * player and its controls are up without a relay server, and closes it
      * afterwards.
@@ -340,6 +415,9 @@ class AuditUiDeviceTest {
         const val HOST = 0
         const val PORT = 1
         const val LOCK = "Lock player controls"
+
+        /** MotionEvent.FLAG_CANCELED, public from API 33. */
+        const val FLAG_CANCELED = 0x20
         const val UNLOCK = "Unlock player controls"
     }
 }
