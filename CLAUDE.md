@@ -188,6 +188,26 @@ release.yml` builds and publishes the signed APK with those notes.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
+- **Read where the user is with `RelayUiState.userPositionSeconds()`**, never
+  `mpvMetrics.positionSeconds`, for anything that moves relative to it or
+  resumes from it (skips, chapter steps, reconnect, settings restart, the
+  hand-over to the original). Every seek reloads the stream, and from the
+  reload until the new epoch plays mpv's reported position is the stale old
+  one and then zero. Reading it turned a second "back 1:25" into a jump to
+  0:00. Only end-of-file checks want mpv's real position.
+- **The player lays out clear of the display cutout**, black behind, and the
+  size negotiated with the server is the window minus the cutout. That size
+  is read from `rootWindowInsets` when the window size changes, not from
+  Compose's `WindowInsets`, which trail the new size through the
+  rotate-and-go-immersive transition (it asked for 2932x1848 instead of
+  2960x1820). Android will not do this for the app:
+  `LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER` is ignored for an app targeting SDK
+  35+ on Android 15+ (verified on Android 16).
+- **Each player control owns its interaction source.** A shared
+  `MutableInteractionSource` draws one press on every control it was given
+  to. Use `rememberPressReporting(shared)`: the control shows its own press
+  and forwards it, so the auto-hide timer still sees it.
+
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player
   (`closingJob`), after a wake with a dead socket, on a cold start behind

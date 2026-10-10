@@ -100,6 +100,9 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   `-e e2eBitstreamAspect true` for the bitstream-only Matroska clip. Add
   `-e e2eColour true`, with `tools/make_colour_clip.py`'s untagged 720x576
   clip pushed, to compare relayed against direct colours.
+- `PlayerSeekDeviceTest` needs the real relay and `-e auditMediaPath` with a
+  file of 20 minutes or more. It presses the skip buttons back to back and
+  checks where playback lands.
 - `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
   fails without it.
 
