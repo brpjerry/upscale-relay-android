@@ -271,6 +271,13 @@ release.yml` builds and publishes the signed APK with those notes.
   presses near a screen edge. Diagnose with real fingers:
   `adb shell getevent -lt /dev/input/event<N>` shows `EV_KEY 0118` (Samsung's
   BTN_PALM) and logcat shows `InputReader: Btn_palm` when it happens.
+- **Whatever opens a window over the player hides the system bars in that
+  window too.** A bottom sheet, dialog or menu is a window of its own, and
+  the status and navigation bars follow whichever window has focus, so a
+  plain `ModalBottomSheet` brought both back over the picture for as long as
+  it was open. The player's sheets go through `PlayerSheet`, which asks for
+  the bars hidden on the sheet's own window (`dialogWindow()`). Anything new
+  that opens over the player does the same.
 
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player

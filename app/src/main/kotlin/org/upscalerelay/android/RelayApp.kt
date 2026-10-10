@@ -8,6 +8,8 @@ import android.os.Build
 import android.media.AudioManager
 import android.content.Intent
 import android.text.format.DateUtils
+import android.view.View
+import android.view.Window
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -100,6 +102,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -156,6 +159,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -2247,10 +2251,48 @@ private fun LockButton(
     }
 }
 
+/**
+ * A bottom sheet over the player. A sheet is a window of its own, and the
+ * system bars follow whichever window has focus, so a plain one brought the
+ * status and navigation bars back over the picture for as long as it was
+ * open. This one asks for them hidden in its own window too.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerSheet(
+    onDismiss: () -> Unit,
+    sheetState: SheetState = rememberModalBottomSheetState(),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        val view = LocalView.current
+        DisposableEffect(view) {
+            view.dialogWindow()?.let { window ->
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            onDispose { }
+        }
+        content()
+    }
+}
+
+/** The window of the dialog this view is in, when it is in one. */
+private fun View.dialogWindow(): Window? {
+    var current: Any? = this
+    while (current != null) {
+        if (current is DialogWindowProvider) return current.window
+        current = (current as? View)?.parent
+    }
+    return null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrackSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2285,7 +2327,7 @@ private fun ChapterSheet(viewModel: RelayViewModel, state: RelayUiState, onDismi
     val chapters = state.session?.chapters.orEmpty()
     val position = state.seekPreviewSeconds ?: state.mpvMetrics.positionSeconds
     val currentIndex = chapters.indexOfLast { it.startSeconds <= position }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2351,10 +2393,7 @@ private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
         val index = models.indexOfFirst { it.name == state.selectedModel }
         if (index > 0) listState.scrollToItem(index)
     }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
+    PlayerSheet(onDismiss, rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -2397,7 +2436,7 @@ private fun DelayControl(label: String, value: Double, adjust: (Double) -> Unit)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    PlayerSheet(onDismiss) {
         Column(
             Modifier
                 .fillMaxWidth()

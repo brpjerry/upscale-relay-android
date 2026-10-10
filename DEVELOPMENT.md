@@ -79,9 +79,10 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   pageable, optionally delayed `/library`. They need no relay server.
 - `AuditUiDeviceTest` also holds the player-control regressions: a scrub
   that outlasts the controls' timeout, the lock taking one press wherever on
-  it the press lands, and a missed press leaving the controls up. They play
-  the 150 s clip (below) through the original-file fallback and need no
-  relay.
+  it the press lands, a missed press leaving the controls up, a press the
+  tablet cancels as a palm still landing, and a sheet leaving the system
+  bars hidden. They play the 150 s clip (below) through the original-file
+  fallback and need no relay.
 - `openWhileTheLaunchConnectWaitsForTheNetworkKeepsThePlayer` uses the real
   relay (`-e auditHost`/`-e auditPort`, default 192.168.0.115:8590). It
   switches the tablet's Wi-Fi off for a few seconds so the launch connect

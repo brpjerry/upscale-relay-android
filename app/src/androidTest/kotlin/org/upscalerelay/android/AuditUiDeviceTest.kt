@@ -3,8 +3,11 @@ package org.upscalerelay.android
 import android.net.Uri
 import android.os.SystemClock
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.ViewRootForTest
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -25,11 +28,14 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -279,6 +285,56 @@ class AuditUiDeviceTest {
         palmCancelledPress(picture, cancels = listOf(90L), upAfter = 105L)
         settle()
         compose.onNodeWithContentDescription("Playback position").assertExists()
+    }
+
+    /**
+     * A sheet over the player leaves the system bars hidden. A sheet is a
+     * window of its own, and the bars follow the window that has focus: a
+     * plain one brought the status and navigation bars back over the picture
+     * for as long as it was open.
+     */
+    @Test
+    fun aPlayerSheetLeavesTheSystemBarsHidden() = withClipPlaying {
+        // Whether the bars show at any moment of the next second and a half:
+        // they slide in, and the system tells each window as they do. A
+        // flash of them while the sheet opens counts.
+        fun barsShow(view: View): Boolean {
+            val until = SystemClock.uptimeMillis() + 1_500
+            var showed = false
+            while (!showed && SystemClock.uptimeMillis() < until) {
+                compose.runOnUiThread {
+                    val insets = ViewCompat.getRootWindowInsets(view)
+                    showed = insets != null && (
+                        insets.isVisible(WindowInsetsCompat.Type.statusBars()) ||
+                            insets.isVisible(WindowInsetsCompat.Type.navigationBars())
+                        )
+                }
+                SystemClock.sleep(16)
+            }
+            return showed
+        }
+        val player = compose.activity.window.decorView
+        check(!barsShow(player)) { "the player itself is not immersive" }
+        for ((button, inSheet) in listOf(
+            "Playback settings" to "Player preferences apply",
+            "Audio & subtitles" to "Audio delay",
+        )) {
+            compose.mainClock.autoAdvance = false
+            showControls()
+            compose.mainClock.autoAdvance = true
+            compose.onNodeWithText(button).performClick()
+            assertFalse("$button brought the system bars up as it opened", barsShow(player))
+            awaitText(inSheet, substring = true)
+            val sheet = compose.onAllNodesWithText(inSheet, substring = true).onFirst().fetchSemanticsNode()
+            val sheetView = (sheet.root as ViewRootForTest).view
+            check(sheetView.rootView !== player) { "the sheet is not a window of its own" }
+            assertFalse("$button brought the system bars up", barsShow(sheetView))
+            InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            assertFalse("the bars came up when $button closed", barsShow(player))
+            check(compose.onAllNodes(hasText(inSheet, substring = true)).fetchSemanticsNodes().isEmpty()) {
+                "$button did not close"
+            }
+        }
     }
 
     private fun centreInWindow(description: String): Offset =
