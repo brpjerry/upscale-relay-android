@@ -202,7 +202,8 @@ release.yml` builds and publishes the signed APK with those notes.
   (`unconfirmedRelease`) and every session open first runs
   `confirmPriorRelease` on the new connection: `GET /status` has to stop
   listing that `session_id` with `restart_required` false
-  (`RelaySessionController.awaitReleased`, bounded at 45 s). The server
+  (`RelaySessionController.awaitReleased`, bounded at 60 s: the server may
+  need 30 s to notice the dead connection and 15 s more to close). The server
   delists a session only after its native close has returned and sets
   `restart_required` when that close failed, which is what makes this a
   confirmation and not an assumption; on the device the wait is real, 16 s

@@ -717,10 +717,13 @@ class RelaySessionController internal constructor(
 
         /**
          * How long a lost session may stay listed before it counts as stuck.
-         * The server notices a dead control connection within its 20 s
-         * heartbeat plus a 10 s pong wait, then runs a bounded native close.
+         * The server can take 30 s to notice a dead control connection (a
+         * 20 s heartbeat plus a 10 s pong wait) and bounds its native close
+         * at 15 s, and the session is listed for all of that: 45 s when
+         * everything goes as slowly as it may. Giving up exactly then would
+         * turn a release that was about to be reported into a hard stop.
          */
-        const val RELEASE_CONFIRM_TIMEOUT_MILLIS = 45_000L
+        const val RELEASE_CONFIRM_TIMEOUT_MILLIS = 60_000L
         const val RELEASE_CONFIRM_POLL_MILLIS = 1_000L
         const val MEDIA_QUEUE_BYTES = 256L * 1024 * 1024
         val ANDROID_HEVC_TIERS = setOf(

@@ -176,7 +176,7 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - Stop awaits the player's ordered native command queue before retiring media
   owners. Server teardown waits for `closed`. When the control connection is
   already dead the acknowledgement cannot come; the session is remembered and
-  the next connection polls `GET /status` (up to 45 s) until the server no
+  the next connection polls `GET /status` (up to 60 s) until the server no
   longer lists it, and only then opens a replacement, which is how playback
   resumes after the tablet slept. A session still listed at the deadline, a
   server reporting `restart_required`, or one whose `/status` cannot be read
