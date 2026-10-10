@@ -1780,7 +1780,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun seekRelative(seconds: Double) {
-        seekTo((mutableUi.value.mpvMetrics.positionSeconds + seconds).coerceAtLeast(0.0))
+        seekTo((mutableUi.value.userPositionSeconds() + seconds).coerceAtLeast(0.0))
     }
 
     /**
@@ -1795,10 +1795,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.playingPath == null || state.busy || closingJob?.isActive == true) return
         if (autoAdvanceJob?.isActive == true) return
         val now = SystemClock.elapsedRealtime()
-        // Mid-seek mpv reports a transient 0:00; the seek's target is where
-        // the user actually is.
-        val position = state.seekTargetSeconds?.takeIf { state.seeking }
-            ?: state.mpvMetrics.positionSeconds
+        val position = state.userPositionSeconds()
         val step = resolveChapterStep(
             direction = direction,
             chapterStarts = state.session?.chapters.orEmpty().map { it.startSeconds },
@@ -2038,7 +2035,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // history says, as a relay open would have.
         val relayPlayed = activeOrigin != null
         val position = if (relayPlayed) {
-            mutableUi.value.mpvMetrics.positionSeconds
+            mutableUi.value.userPositionSeconds()
         } else {
             val key = progressKey(PlaybackOrigin.LocalDocument(uriValue))
             resumeSeconds(key, playbackPositions[key]?.durationSeconds) ?: 0.0
@@ -2220,7 +2217,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * means that attempt never had a chance.
      */
     private fun beginAutoResume(origin: PlaybackOrigin, failure: FailureDetail) {
-        val position = mutableUi.value.mpvMetrics.positionSeconds
+        val position = mutableUi.value.userPositionSeconds()
         AppLog.w(TAG, "reconnecting playback: ${failure.kind} at %.1fs".format(position))
         reconnectJob = viewModelScope.launch(actionErrors) {
             // Freeze playback so the resume position cannot drift: the local
@@ -2482,7 +2479,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             seekJob = null
             metricsJob?.cancelAndJoin()
             metricsJob = null
-            val position = mutableUi.value.mpvMetrics.positionSeconds
+            val position = mutableUi.value.userPositionSeconds()
             AppLog.i(TAG, "restarting session for changed playback settings at %.1fs".format(position))
             mutableUi.update {
                 it.copy(reconnecting = ReconnectStatus("Applying playback settings"), error = null)
@@ -3326,6 +3323,20 @@ data class RelayUiState(
     val fileLoggingEnabled: Boolean = false,
     val logFileName: String? = null,
 )
+
+/**
+ * Where the user is in the file, for anything that moves relative to it or
+ * resumes from it: skips, chapter steps, a reconnect, a settings restart, the
+ * hand-over to the original file.
+ *
+ * Every seek reloads the stream, and from the reload until the new stream
+ * starts playing mpv's reported position is zero. Reading that would turn a
+ * second "back 1:25" into a jump to the start of the file and resume a
+ * reconnect from 0:00. A committed seek target stands in for the gap, as it
+ * already does on the seek bar.
+ */
+internal fun RelayUiState.userPositionSeconds(): Double =
+    seekTargetSeconds ?: mpvMetrics.positionSeconds
 
 /** What the player is re-establishing its session for, shown while it does. */
 data class ReconnectStatus(val reason: String)
