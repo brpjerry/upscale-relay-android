@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
         heldCancel?.let { held ->
             heldCancel = null
             palmRescue.flushed()
+            AppLog.d(TAG, "left a touch the system cancelled as a palm alone: nothing followed its cancel")
             deliverTouch(held)
             held.recycle()
         }
@@ -77,6 +78,7 @@ class MainActivity : ComponentActivity() {
             systemCanceled = event.flags and FLAG_CANCELED != 0,
             armed = viewModel.ui.value.playingPath != null && !inPictureInPicture,
         )
+        palmRescue.refusal?.let { AppLog.d(TAG, "left a touch the system cancelled as a palm alone: $it") }
         return when (verdict) {
             PalmCancelRescue.Verdict.PASS -> super.dispatchTouchEvent(event)
             PalmCancelRescue.Verdict.HOLD -> {

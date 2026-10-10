@@ -45,11 +45,22 @@ internal class PalmCancelRescue(
         FLUSH,
     }
 
-    private var eligible = false
+    private var armedAtDown = false
+    private var strayed = false
+
+    // One verdict a touch: a palm that stays sends a cancel for every sample.
+    private var decided = false
     private var downTime = 0L
     private var downX = 0f
     private var downY = 0f
     private var heldAt: Long? = null
+
+    /**
+     * Why the event just given to [onEvent] left a touch the system had
+     * cancelled as a palm cancelled, for the log; null when it did not.
+     */
+    var refusal: String? = null
+        private set
 
     /**
      * [armed] is read when the finger goes down: whether the player is what
@@ -64,31 +75,43 @@ internal class PalmCancelRescue(
         systemCanceled: Boolean,
         armed: Boolean,
     ): Verdict {
+        refusal = null
         val held = heldAt
         if (held != null) {
             heldAt = null
             val lifted = kind == Kind.UP && pointerCount == 1 &&
                 eventTime - held <= LIFT_WINDOW_MILLIS && near(x, y)
-            return if (lifted) Verdict.RESCUE else Verdict.FLUSH
+            if (lifted) return Verdict.RESCUE
+            refusal = "no up followed its cancel ($kind after ${eventTime - held} ms)"
+            return Verdict.FLUSH
         }
         when (kind) {
             Kind.DOWN -> {
-                eligible = armed && y < stripPx
+                armedAtDown = armed
+                strayed = false
+                decided = false
                 downTime = eventTime
                 downX = x
                 downY = y
             }
-            Kind.MOVE -> if (pointerCount != 1 || !near(x, y)) eligible = false
-            Kind.CANCEL -> {
-                val press = eligible && systemCanceled && pointerCount == 1 &&
-                    eventTime - downTime <= PRESS_MILLIS && near(x, y)
-                eligible = false
-                if (press) {
+            Kind.MOVE -> if (pointerCount != 1 || !near(x, y)) strayed = true
+            Kind.CANCEL -> if (systemCanceled && !decided) {
+                decided = true
+                val age = eventTime - downTime
+                refusal = when {
+                    !armedAtDown -> "the player is not up"
+                    downY >= stripPx -> "below the top strip, at y=${downY.toInt()}"
+                    strayed || pointerCount != 1 || !near(x, y) -> "it moved or was not alone"
+                    age > PRESS_MILLIS -> "held for $age ms"
+                    else -> null
+                }
+                if (refusal == null) {
                     heldAt = eventTime
                     return Verdict.HOLD
                 }
             }
-            Kind.UP, Kind.OTHER -> eligible = false
+            Kind.UP -> Unit
+            Kind.OTHER -> strayed = true
         }
         return Verdict.PASS
     }

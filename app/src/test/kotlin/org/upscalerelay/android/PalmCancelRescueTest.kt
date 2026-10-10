@@ -95,6 +95,9 @@ class PalmCancelRescueTest {
             Event(UP, 1_105, 1480, 900),
         )
         assertEquals(listOf(PASS, PASS, PASS), verdicts(true, *pressOnThePicture))
+        assertEquals(null, rescue.refusal)
+        verdicts(true, pressOnThePicture[0], pressOnThePicture[1])
+        assertEquals("below the top strip, at y=900", rescue.refusal)
         val pressOnTheBar = arrayOf(
             Event(DOWN, 2_000, 2884, 78),
             Event(CANCEL, 2_090, 2884, 78, canceled = true),
@@ -160,6 +163,7 @@ class PalmCancelRescueTest {
             listOf(PASS, HOLD),
             verdicts(true, Event(DOWN, 0, 2884, 78), Event(CANCEL, 90, 2884, 78, canceled = true)),
         )
+        assertEquals(null, rescue.refusal)
         rescue.flushed()
         assertEquals(
             listOf(PASS, PASS),
