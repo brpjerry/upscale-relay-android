@@ -50,8 +50,10 @@ import org.upscalerelay.client.FailureKind
 import org.upscalerelay.client.MediaStalledException
 import org.upscalerelay.client.PlaybackEndpoint
 import org.upscalerelay.client.PlayerBufferSnapshot
+import org.upscalerelay.client.RelayServerException
 import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
+import org.upscalerelay.client.TeardownUnconfirmedException
 import org.upscalerelay.client.TransportStats
 import org.upscalerelay.client.classifyFailure
 import org.upscalerelay.demux.AndroidMediaSource
@@ -89,6 +91,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var closingJob: Job? = null
     // A failed release barrier must not be bypassed by an automatic retry.
     private var cleanupFailure: Throwable? = null
+
+    // A session the server never acknowledged tearing down, because its
+    // control connection was already dead when the teardown was due (a tablet
+    // that slept, Wi-Fi that dropped). It cannot be asked any more, but the
+    // server releases a session by itself when its connection goes, and says
+    // so in /status. No new session is opened until the next connection has
+    // had that confirmed (confirmPriorRelease).
+    @Volatile
+    private var unconfirmedRelease: UnconfirmedRelease? = null
+
+    private class UnconfirmedRelease(val sessionId: String, val host: String, val port: Int)
     private val disposalMutex = Mutex()
     private val loggingMutex = Mutex()
     private val actionErrors = CoroutineExceptionHandler { _, error ->
@@ -1557,6 +1570,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                             throw error
                         }
                     }
+                    confirmPriorRelease(currentController)
                     val endpoint = currentController.prepareLocalPlayback(
                         source = source,
                         originalMediaUrl = localBridge.url,
@@ -1650,14 +1664,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     ui.first { it.display.width > it.display.height }
                 }
                 checkNotNull(landscape) { "Timed out waiting for the landscape player surface." }
-                suspend fun prepare(active: RelaySessionController) = active.preparePlayback(
-                    path = file.path,
-                    display = landscape.display,
-                    requestedModel = landscape.selectedModel,
-                    qualityTier = landscape.qualityTier,
-                    fitMode = landscape.fitMode,
-                    resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                )
+                suspend fun prepare(active: RelaySessionController): PlaybackEndpoint {
+                    confirmPriorRelease(active)
+                    return active.preparePlayback(
+                        path = file.path,
+                        display = landscape.display,
+                        requestedModel = landscape.selectedModel,
+                        qualityTier = landscape.qualityTier,
+                        fitMode = landscape.fitMode,
+                        resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
+                    )
+                }
                 openRetryPending = true
                 val first = runPlaybackCatching { prepare(currentController) }
                 val endpoint = first.getOrElse { error ->
@@ -2388,6 +2405,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         adoptHistoryScope("$host:$port", serverHistoryScope(connected.capabilities.serverId, host, port))
+        confirmPriorRelease(next)
         val endpoint = when (origin) {
             is PlaybackOrigin.ServerFile -> next.preparePlayback(
                 path = origin.path,
@@ -3150,6 +3168,37 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * The release barrier for a session whose teardown went unacknowledged:
+     * called on a live connection before every new session. Returns at once
+     * when nothing is outstanding. Otherwise it waits, bounded, for the server
+     * to report that session gone. If the server still holds it, or its
+     * cleanup failed, this is the hard stop a missing acknowledgement always
+     * was, and no replacement is opened behind it. A connection that drops
+     * while asking leaves the question open for the next one.
+     */
+    private suspend fun confirmPriorRelease(active: RelaySessionController) {
+        val pending = unconfirmedRelease ?: return
+        val sessionId = pending.sessionId
+        try {
+            active.awaitReleased(sessionId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (error is TeardownUnconfirmedException || error is RelayServerException) {
+                AppLog.e(TAG, "server did not confirm the release of session $sessionId: ${error.message}")
+                cleanupFailure = error
+            }
+            throw error
+        }
+        // Whichever server this is gets asked, since one server can be reached
+        // under two addresses. Only the address the session was opened on
+        // settles it, though: a different server not holding it says nothing.
+        if (active.host != pending.host || active.port != pending.port) return
+        unconfirmedRelease = null
+        AppLog.i(TAG, "server confirmed the release of session $sessionId")
+    }
+
     private suspend fun disposeController() = withContext(NonCancellable + Dispatchers.IO) {
         disposalMutex.withLock {
             // A cancelled collector can still publish one last value until its
@@ -3161,11 +3210,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val current = controller
             controller = null
             if (current != null) {
+                val sessionId = current.sessionId
                 try {
                     current.teardown()
                 } catch (error: Throwable) {
-                    cleanupFailure = error
-                    throw error
+                    if (error is TeardownUnconfirmedException && sessionId != null) {
+                        // Not a failure yet: the next connection asks the
+                        // server whether this session is gone before it opens
+                        // another. Without an id there is nothing to ask about.
+                        AppLog.i(TAG, "session $sessionId closed without the server's acknowledgement (${error.cause?.message}); it will be confirmed before the next session")
+                        unconfirmedRelease = UnconfirmedRelease(sessionId, current.host, current.port)
+                    } else {
+                        cleanupFailure = error
+                        throw error
+                    }
                 } finally {
                     current.close()
                 }

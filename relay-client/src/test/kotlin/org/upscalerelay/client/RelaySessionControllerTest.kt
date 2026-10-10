@@ -99,6 +99,25 @@ class RelaySessionControllerTest {
     }
 
     @Test(timeout = 20_000)
+    fun `the session id is known from the open and outlives the session`() = runBlocking {
+        val media = FakeMedia(ackDelayMillis = 0)
+        val controller = controller(FakeControl(media.port))
+        try {
+            controller.connect(display)
+            assertNull(controller.sessionId)
+            controller.preparePlayback("show.mkv", display)
+            assertEquals("s1", controller.sessionId)
+            // Whoever asks a later connection about this session reads the id
+            // from a controller that is already gone.
+            controller.close()
+            assertEquals("s1", controller.sessionId)
+        } finally {
+            controller.close()
+            media.close()
+        }
+    }
+
+    @Test(timeout = 20_000)
     fun `a player that never connects still fails the session`() = runBlocking {
         val media = FakeMedia(ackDelayMillis = 0)
         val controller = controller(FakeControl(media.port))

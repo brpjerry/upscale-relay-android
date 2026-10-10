@@ -27,6 +27,7 @@ import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.SeekProgress
 import java.io.Closeable
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
@@ -80,6 +81,9 @@ class RelaySessionController internal constructor(
     private var seekWatchdog: Job? = null
     private var capabilities: Capabilities? = null
     private var activeSession: SessionInfo? = null
+
+    @Volatile
+    private var openedSessionId: String? = null
     private var activeModel: String? = null
     private var activeQualityTier: String? = null
     private var activeFitMode: String? = null
@@ -130,6 +134,61 @@ class RelaySessionController internal constructor(
         }
     }
 
+    /**
+     * The id of the session this controller opened, from the moment the
+     * server announced it, kept after teardown: a later connection asks about
+     * it when this one could not get its release acknowledged.
+     */
+    val sessionId: String? get() = openedSessionId
+
+    /**
+     * Waits until the server no longer holds [sessionId], a session whose
+     * teardown it never acknowledged because that session's control
+     * connection had already died. The server releases a session by itself
+     * when its connection drops (within its heartbeat, about 30 s), and
+     * /status reports the result, so this is a positive confirmation, not an
+     * assumption.
+     *
+     * Returns once the session is gone. Throws [RelayServerException]
+     * (`server_restart_required`) if a native teardown failed, and
+     * [TeardownUnconfirmedException] if the session is still held after
+     * [timeoutMillis] or the server cannot say; both mean no replacement
+     * session may be opened. A transport failure is thrown as it is: the
+     * question is still open and can be asked again on the next connection.
+     */
+    suspend fun awaitReleased(
+        sessionId: String,
+        timeoutMillis: Long = RELEASE_CONFIRM_TIMEOUT_MILLIS,
+        pollMillis: Long = RELEASE_CONFIRM_POLL_MILLIS,
+    ) {
+        val channel = requireNotNull(control) { "not connected" }
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (true) {
+            val status = try {
+                channel.fetchStatus()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (unavailable: RelayHttpStatusException) {
+                throw TeardownUnconfirmedException(unavailable)
+            } catch (malformed: RuntimeException) {
+                throw TeardownUnconfirmedException(malformed)
+            }
+            if (status.restartRequired) {
+                throw RelayServerException(
+                    "server_restart_required",
+                    "Server native cleanup failed; restart the server",
+                )
+            }
+            if (sessionId !in status.sessionIds) return
+            if (System.nanoTime() >= deadline) {
+                throw TeardownUnconfirmedException(
+                    IOException("the server still holds session $sessionId after $timeoutMillis ms"),
+                )
+            }
+            delay(pollMillis)
+        }
+    }
+
     suspend fun fetchLibraryPage(
         path: String,
         cursor: String? = null,
@@ -174,6 +233,7 @@ class RelaySessionController internal constructor(
                     requestCachedAttachments = requestCachedAttachments,
                 ),
             )
+            openedSessionId = session.sessionId
             require(session.uplinkToken == null) { "server_file unexpectedly requires an uplink" }
             require(session.downlinkContainer == "matroska") {
                 "Android requires a Matroska downlink, got ${session.downlinkContainer}"
@@ -305,6 +365,7 @@ class RelaySessionController internal constructor(
                 sourceHasAudio = source.videoInfo.sourceHasAudio,
                 sourceHasAuxiliary = source.videoInfo.sourceHasAuxiliary,
             )
+            openedSessionId = session.sessionId
             val token = requireNotNull(session.uplinkToken) { "uplink session did not return a token" }
             require(session.downlinkContainer == "matroska") {
                 "Android requires a Matroska downlink, got ${session.downlinkContainer}"
@@ -653,6 +714,14 @@ class RelaySessionController internal constructor(
 
         /** How long mpv has to connect once an endpoint has been handed out. */
         const val PLAYER_CONNECT_TIMEOUT_MILLIS = 30_000L
+
+        /**
+         * How long a lost session may stay listed before it counts as stuck.
+         * The server notices a dead control connection within its 20 s
+         * heartbeat plus a 10 s pong wait, then runs a bounded native close.
+         */
+        const val RELEASE_CONFIRM_TIMEOUT_MILLIS = 45_000L
+        const val RELEASE_CONFIRM_POLL_MILLIS = 1_000L
         const val MEDIA_QUEUE_BYTES = 256L * 1024 * 1024
         val ANDROID_HEVC_TIERS = setOf(
             "lossless-hevc", "hevc-qp2", "hevc-qp4", "hevc-qp6",

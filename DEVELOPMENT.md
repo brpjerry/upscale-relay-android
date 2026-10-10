@@ -81,6 +81,11 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   relay (`-e auditHost`/`-e auditPort`, default 192.168.0.115:8590). It
   switches the tablet's Wi-Fi off for a few seconds so the launch connect
   waits for the network, and always switches it back on.
+- `ConnectionLossDeviceTest` also uses the real relay and `-e auditMediaPath`.
+  It switches Wi-Fi off under a playing session until the app notices the
+  dead control connection, switches it back on, and expects playback to
+  resume near the same position on a new session, once the server has
+  confirmed the old one released.
 - The local-file tests need a 150 s clip in the debug app's files directory;
   without it they are skipped:
 
@@ -163,8 +168,13 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   one post-restart `audio-add`, wait for valid `audio-pts`, then restore the
   caller's pause intent. See CLAUDE.md.
 - Stop awaits the player's ordered native command queue before retiring media
-  owners. Server teardown waits for `closed`; missing acknowledgement blocks
-  automatic replacement and surfaces an explicit cleanup failure.
+  owners. Server teardown waits for `closed`. When the control connection is
+  already dead the acknowledgement cannot come; the session is remembered and
+  the next connection polls `GET /status` (up to 45 s) until the server no
+  longer lists it, and only then opens a replacement, which is how playback
+  resumes after the tablet slept. A session still listed at the deadline, a
+  server reporting `restart_required`, or one whose `/status` cannot be read
+  blocks the replacement and surfaces an explicit cleanup failure.
 - Initial playback and seeks use a 60-second inactivity deadline. Strictly
   advancing subtitle-index coverage for the current epoch extends it; stale
   or repeated progress ticks do not. `seek_ready` is only a flush acknowledgement.

@@ -28,6 +28,7 @@ import okhttp3.WebSocketListener
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.LibraryPage
+import org.upscalerelay.protocol.ServerStatus
 import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SeekProgress
 import java.io.Closeable
@@ -110,15 +111,24 @@ internal class ControlChannel(
             .apply { if (cursor != null) addQueryParameter("cursor", cursor) }
             .apply { if (sort != null) addQueryParameter("sort", sort) }
             .build()
+        return LibraryPage.fromJson(getJson(url, "GET /library", 30_000))
+    }
+
+    /** Sessions the server still holds and whether a native teardown failed. */
+    suspend fun fetchStatus(): ServerStatus =
+        ServerStatus.fromJson(getJson(httpUrl("status"), "GET /status", 10_000))
+
+    /** One bounded GET, cancelled together with its caller. */
+    private suspend fun getJson(url: HttpUrl, what: String, timeoutMillis: Long): JsonObject {
         val request = Request.Builder().url(url).build()
-        return deadline(30_000, "GET /library") {
+        return deadline(timeoutMillis, what) {
             coroutineScope {
                 val call = client.newCall(request)
-                call.timeout().timeout(30, TimeUnit.SECONDS)
+                call.timeout().timeout(timeoutMillis, TimeUnit.MILLISECONDS)
                 val transfer = async(Dispatchers.IO) {
                     call.execute().use {
-                        if (!it.isSuccessful) throw IOException("GET /library failed with HTTP ${it.code}")
-                        LibraryPage.fromJson(json.parseToJsonElement(it.body.string()).jsonObject)
+                        if (!it.isSuccessful) throw RelayHttpStatusException(what, it.code)
+                        json.parseToJsonElement(it.body.string()).jsonObject
                     }
                 }
                 try {
@@ -503,6 +513,9 @@ private data class PendingReply(
 )
 
 class RelayServerException(val code: String, message: String) : IOException("$code: $message")
+
+/** The server answered a GET, but not with what was asked for. */
+class RelayHttpStatusException(what: String, val status: Int) : IOException("$what failed with HTTP $status")
 
 internal fun serverFileOpenMessage(
     path: String,

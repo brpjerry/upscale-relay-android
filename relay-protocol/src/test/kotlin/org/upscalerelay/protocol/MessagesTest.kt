@@ -206,6 +206,35 @@ class MessagesTest {
     }
 
     @Test
+    fun `server status lists held sessions and a failed teardown`() {
+        fun status(text: String) = ServerStatus.fromJson(Json.parseToJsonElement(text).jsonObject)
+        // What a healthy relay answers, with a session playing.
+        val busy = status(
+            """{"server":"upscale-relay","protocol_version":1,"restart_required":false,""" +
+                """"native_teardown_error":null,"models":["passthrough"],"sessions":[""" +
+                """{"id":"a1","state":"playing","epoch":2,"uplink_attached":false,"pipeline":{"fps":23.9}},""" +
+                """{"id":"b2","state":"paused","epoch":0,"pipeline":null}]}""",
+        )
+        assertEquals(setOf("a1", "b2"), busy.sessionIds)
+        assertEquals(false, busy.restartRequired)
+        assertNull(busy.failedTeardownSessionId)
+
+        val broken = status(
+            """{"restart_required":true,"native_teardown_error":{"session_id":"a1",""" +
+                """"error":"RuntimeError('nvenc')","restart_required":true},"sessions":[]}""",
+        )
+        assertTrue(broken.sessionIds.isEmpty())
+        assertEquals(true, broken.restartRequired)
+        assertEquals("a1", broken.failedTeardownSessionId)
+
+        // A relay too old to report cleanup still lists what it holds.
+        assertEquals(false, status("""{"sessions":[]}""").restartRequired)
+        // Without the list there is no answer to act on.
+        assertThrows(RuntimeException::class.java) { status("""{"restart_required":false}""") }
+        assertThrows(RuntimeException::class.java) { status("""{"sessions":[{"state":"playing"}]}""") }
+    }
+
+    @Test
     fun `cached attachment manifest rejects unsafe metadata before IO`() {
         val prefix = """{"session_id":"s","media_port":8591,"uplink_token":null,"downlink_token":"t","downlink_codec":"hevc","downlink_width":1,"downlink_height":1,"epoch":0,"aux_tracks":"muxed","aux_attachments":"cached""" + '"'
         assertThrows(IllegalArgumentException::class.java) {

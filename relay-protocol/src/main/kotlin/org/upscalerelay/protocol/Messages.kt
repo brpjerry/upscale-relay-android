@@ -131,6 +131,31 @@ data class Capabilities(
     }
 }
 
+/**
+ * What GET /status says about sessions the server holds. A client that could
+ * not get a `closed` acknowledgement, because the control connection was
+ * already gone, reads it on its next connection: the server releases a
+ * session by itself when its connection drops, and this is how that went.
+ */
+data class ServerStatus(
+    /** Sessions still held, by `session_id`. */
+    val sessionIds: Set<String>,
+    /** A native teardown failed; the server refuses new sessions until restarted. */
+    val restartRequired: Boolean,
+    /** The session whose teardown failed, when one did. */
+    val failedTeardownSessionId: String?,
+) {
+    companion object {
+        fun fromJson(value: JsonObject): ServerStatus = ServerStatus(
+            sessionIds = value.requiredArray("sessions")
+                .map { it.jsonObject.requiredString("id") }.toSet(),
+            restartRequired = value["restart_required"]?.jsonPrimitive?.booleanOrNull ?: false,
+            failedTeardownSessionId = (value["native_teardown_error"] as? JsonObject)
+                ?.get("session_id")?.jsonPrimitive?.contentOrNull,
+        )
+    }
+}
+
 data class AttachmentManifestEntry(
     val name: String,
     val mimeType: String,
