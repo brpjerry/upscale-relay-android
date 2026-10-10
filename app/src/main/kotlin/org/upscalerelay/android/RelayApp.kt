@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.FlowRowScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,9 +39,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -1538,7 +1542,7 @@ private fun PlayerScreen(
                     },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .windowInsetsPadding(playerControlInsets())
                         .padding(16.dp),
                 )
             }
@@ -1742,6 +1746,22 @@ private fun PlayerTouchLayer(
     )
 }
 
+/**
+ * Insets for the player's controls.
+ *
+ * The picture runs full size under a display cutout, and so does the top
+ * bar: its title and buttons sit at the two ends, and padding the whole bar
+ * down by the cutout's height left it hanging below a strip of bare picture.
+ * So a cutout in the top edge is not avoided. Neither the picture nor the
+ * size negotiated with the server is ever reduced for one. A cutout in the
+ * bottom edge still is avoided, since the transport controls are centred
+ * where it would sit, and so are the sides.
+ */
+@Composable
+private fun playerControlInsets(): WindowInsets =
+    WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+        .union(WindowInsets.systemBars.only(WindowInsetsSides.Top))
+
 @Composable
 private fun PlayerChrome(
     viewModel: RelayViewModel,
@@ -1759,7 +1779,7 @@ private fun PlayerChrome(
     val chapters = state.session?.chapters.orEmpty()
     val currentChapter = chapters.lastOrNull { it.startSeconds <= position }
     val compactActions = windowWidthDp() < 900
-    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+    Column(Modifier.fillMaxSize().windowInsetsPadding(playerControlInsets())) {
         Row(
             Modifier
                 .fillMaxWidth()

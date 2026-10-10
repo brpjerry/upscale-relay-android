@@ -195,14 +195,17 @@ release.yml` builds and publishes the signed APK with those notes.
   reload until the new epoch plays mpv's reported position is the stale old
   one and then zero. Reading it turned a second "back 1:25" into a jump to
   0:00. Only end-of-file checks want mpv's real position.
-- **The player lays out clear of the display cutout**, black behind, and the
-  size negotiated with the server is the window minus the cutout. That size
-  is read from `rootWindowInsets` when the window size changes, not from
-  Compose's `WindowInsets`, which trail the new size through the
-  rotate-and-go-immersive transition (it asked for 2932x1848 instead of
-  2960x1820). Android will not do this for the app:
-  `LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER` is ignored for an app targeting SDK
-  35+ on Android 15+ (verified on Android 16).
+- **The picture always runs full size under a display cutout.** Never shrink
+  the player, pad the picture, or reduce the size negotiated with the server
+  for one: on the tablet that costs 28 rows, and the owner rejected it
+  outright (2026-10-09). Only the controls mind a cutout, and the top bar
+  does not avoid one in the top edge (`playerControlInsets()`): its title and
+  buttons sit at the two ends, and padding the whole bar down by the cutout's
+  height left it hanging below a strip of bare picture. The sides and the
+  centred bottom controls still keep clear of one. Android would not keep an
+  app out of the cutout anyway: `LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER` is
+  ignored for an app targeting SDK 35+ on Android 15+ (verified on Android
+  16).
 - **Each player control owns its interaction source.** A shared
   `MutableInteractionSource` draws one press on every control it was given
   to. Use `rememberPressReporting(shared)`: the control shows its own press
