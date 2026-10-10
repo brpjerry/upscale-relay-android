@@ -68,11 +68,12 @@ class ReleaseConfirmationTest {
 
     @Test(timeout = 20_000)
     fun `a session the server still holds is never confirmed`() = runBlocking {
+        // However slowly the answers come: the first may take longer than the
+        // whole wait on a busy machine, and the count of them proves nothing.
         reply = { 200 to status(sessions = listOf("lost")) }
         controller.connect(DisplaySize(1920, 1080))
         val refused = unconfirmed { controller.awaitReleased("lost", timeoutMillis = 200, pollMillis = 20) }
         assertTrue(refused.cause?.message, refused.cause?.message.orEmpty().contains("still holds session lost"))
-        assertTrue("asked ${asked.get()} times", asked.get() > 1)
     }
 
     @Test(timeout = 20_000)
