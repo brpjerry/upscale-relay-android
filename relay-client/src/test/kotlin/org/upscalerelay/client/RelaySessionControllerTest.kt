@@ -32,17 +32,23 @@ import kotlin.concurrent.thread
 /**
  * The controller composed with its real downlink, queue and loopback, against
  * a scripted control socket and a local media server. The player's connect
- * window is scaled down to 400 ms, so "preparation slower than the window"
- * takes a second rather than a minute.
+ * window is scaled down to two seconds, so "preparation slower than the
+ * window" takes three seconds rather than a minute, with enough slack that
+ * a busy CI runner cannot miss the window by accident.
  */
 class RelaySessionControllerTest {
     private val display = DisplaySize(1920, 1080)
     private val token = "0123456789abcdef0123456789abcdef01"
 
+    private companion object {
+        const val CONNECT_WINDOW_MILLIS = 2_000L
+        const val SLOWER_THAN_WINDOW_MILLIS = 3_000L
+    }
+
     @Test(timeout = 20_000)
     fun `slow initial preparation leaves the player its whole connect window`() = runBlocking {
         val payload = byteArrayOf(1, 2, 3, 4)
-        val media = FakeMedia(ackDelayMillis = 1_200)
+        val media = FakeMedia(ackDelayMillis = SLOWER_THAN_WINDOW_MILLIS)
         val controller = controller(FakeControl(media.port))
         try {
             controller.connect(display)
@@ -68,7 +74,7 @@ class RelaySessionControllerTest {
     fun `a seek waiting on its acknowledgement does not run down the next loopback`() = runBlocking {
         val payload = byteArrayOf(9, 8, 7)
         val media = FakeMedia(ackDelayMillis = 0)
-        val controller = controller(FakeControl(media.port, seekReplyDelayMillis = 1_200))
+        val controller = controller(FakeControl(media.port, seekReplyDelayMillis = SLOWER_THAN_WINDOW_MILLIS))
         try {
             controller.connect(display)
             val first = controller.preparePlayback("show.mkv", display)
@@ -99,7 +105,7 @@ class RelaySessionControllerTest {
         try {
             controller.connect(display)
             controller.preparePlayback("show.mkv", display)
-            val failure = withTimeout(5_000) {
+            val failure = withTimeout(CONNECT_WINDOW_MILLIS + 8_000) {
                 while (controller.failure.value == null) delay(20)
                 controller.failure.value
             }
@@ -115,7 +121,7 @@ class RelaySessionControllerTest {
         port = 8590,
         attachmentCacheRoot = null,
         webSocketFactory = control,
-        playerConnectTimeoutMillis = 400,
+        playerConnectTimeoutMillis = CONNECT_WINDOW_MILLIS,
     )
 
     private fun connect(endpoint: PlaybackEndpoint): Socket {
