@@ -27,7 +27,7 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-val verifyMpvNative by tasks.registering {
+val verifyMpvNative = tasks.register("verifyMpvNative") {
     val nativeDirectory = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
     inputs.dir(nativeDirectory).optional()
     doLast {
@@ -35,8 +35,8 @@ val verifyMpvNative by tasks.registering {
             .filterNot { nativeDirectory.file(it).asFile.isFile }
         check(missing.isEmpty()) {
             "Missing ${missing.joinToString()} in ${nativeDirectory.asFile}. " +
-                "Run android_client/native/fetch_mpv_native.ps1 (Windows) or " +
-                "android_client/native/fetch_mpv_native.sh first."
+                "Run native/fetch_mpv_native.ps1 (Windows) or " +
+                "native/fetch_mpv_native.sh first."
         }
     }
 }

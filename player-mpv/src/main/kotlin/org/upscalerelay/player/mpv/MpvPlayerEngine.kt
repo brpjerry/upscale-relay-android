@@ -184,7 +184,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * interpolation / tscale. These never touch relay-owned plumbing
      * (vo, rebase-start-time, hwdec, per-epoch reload behavior).
      */
-    fun setVideoSyncPreferences(displayResample: Boolean, interpolation: Boolean, scaler: String) =
+    fun setVideoSyncPreferences(displayResample: Boolean, interpolation: Boolean, scaler: String): Unit =
         synchronized(lock) {
             if (!initialized || closed) return
             MPVLib.setPropertyString("video-sync", if (displayResample) "display-resample" else "audio")
@@ -204,13 +204,13 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         if (initialized && !closed) MPVLib.setPropertyDouble("sub-delay", seconds)
     }
 
-    fun selectAudioTrack(id: Int) = synchronized(lock) {
+    fun selectAudioTrack(id: Int): Unit = synchronized(lock) {
         chosenAudio = rememberTrack(trackSnapshotLocked(), MpvTrack.Type.AUDIO, id) ?: return
         audioChoiceMade = true
         if (initialized && !closed) MPVLib.setPropertyString("aid", id.toString())
     }
 
-    fun selectSubtitleTrack(id: Int?) = synchronized(lock) {
+    fun selectSubtitleTrack(id: Int?): Unit = synchronized(lock) {
         chosenSubtitle = if (id == null) null else {
             rememberTrack(trackSnapshotLocked(), MpvTrack.Type.SUBTITLE, id) ?: return
         }
@@ -562,7 +562,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     override fun eventProperty(property: String) = Unit
 
-    override fun eventProperty(property: String, value: Long) = synchronized(lock) {
+    override fun eventProperty(property: String, value: Long): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "video-params/w" -> metrics.copy(codedWidth = value.toInt())
@@ -574,7 +574,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         }
     }
 
-    override fun eventProperty(property: String, value: Boolean) = synchronized(lock) {
+    override fun eventProperty(property: String, value: Boolean): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "paused-for-cache" -> metrics.copy(pausedForCache = value)
@@ -585,7 +585,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         }
     }
 
-    override fun eventProperty(property: String, value: String) = synchronized(lock) {
+    override fun eventProperty(property: String, value: String): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "hwdec-current" -> metrics.copy(hardwareDecoder = value)
@@ -595,7 +595,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         }
     }
 
-    override fun eventProperty(property: String, value: Double) = synchronized(lock) {
+    override fun eventProperty(property: String, value: Double): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
         metrics = when (property) {
             "estimated-vf-fps" -> metrics.copy(framesPerSecond = value)
