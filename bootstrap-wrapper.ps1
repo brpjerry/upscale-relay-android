@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
-$url = "https://raw.githubusercontent.com/gradle/gradle/v9.7.1/gradle/wrapper/gradle-wrapper.jar"
-$expected = "7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d"
+$url = "https://raw.githubusercontent.com/gradle/gradle/v9.8.2/gradle/wrapper/gradle-wrapper.jar"
+$expected = "3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98"
 $destination = Join-Path $PSScriptRoot "gradle\wrapper\gradle-wrapper.jar"
 $temporary = "$destination.$([Guid]::NewGuid().ToString('N')).tmp"
 try {
@@ -10,8 +10,10 @@ try {
         throw "Gradle wrapper checksum mismatch: expected $expected, got $actual"
     }
     # Keep any working wrapper intact until its replacement has been verified.
+    # [NullString] because a plain $null reaches .NET as "", which Replace
+    # rejects as a backup path.
     if (Test-Path -LiteralPath $destination) {
-        [System.IO.File]::Replace($temporary, $destination, $null)
+        [System.IO.File]::Replace($temporary, $destination, [NullString]::Value)
     } else {
         [System.IO.File]::Move($temporary, $destination)
     }
@@ -20,4 +22,4 @@ try {
         Remove-Item -LiteralPath $temporary -Force
     }
 }
-Write-Host "Installed verified Gradle 9.7.1 wrapper JAR."
+Write-Host "Installed verified Gradle 9.8.2 wrapper JAR."
