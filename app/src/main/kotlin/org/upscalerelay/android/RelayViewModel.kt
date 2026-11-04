@@ -3343,7 +3343,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
          * colours) and HDR10+ by their own metadata; HDR10 and HLG still
          * arrive as HDR, and mpv tone-maps them from 10 bits.
          */
-        private val PLAYER_DISPLAY = DisplayTarget.SDR
+        private val PLAYER_DISPLAY: DisplayTarget
+            get() = org.upscalerelay.player.mpv.SpikeConfig.values["spike.display"]?.split(':')?.let { part ->
+                DisplayTarget(part[0], part.getOrNull(1)?.toDoubleOrNull(), part.getOrNull(2)?.toDoubleOrNull())
+            } ?: DisplayTarget.SDR
     }
 
     private fun persist(block: suspend () -> Unit) {

@@ -274,7 +274,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         attachedSurface = surface
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
         MPVLib.setPropertyString("force-window", "yes")
-        MPVLib.setPropertyString("vo", VIDEO_OUTPUT)
+        MPVLib.setPropertyString("vo", spikeVideoOutput())
         pendingLoad?.let {
             pendingLoad = null
             loadNow(it)
@@ -345,7 +345,15 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         options.forEach { (name, value) ->
             check(MPVLib.setOptionString(name, value) >= 0) { "libmpv rejected --$name=$value" }
         }
+        // SPIKE: prototype-only overrides from files/mpv-spike.conf.
+        SpikeConfig.reload(applicationContext)
+        SpikeConfig.mpvOptions.forEach { (name, value) ->
+            val result = MPVLib.setOptionString(name, value)
+            Log.i("RelaySpike", "--$name=$value -> $result")
+        }
     }
+
+    private fun spikeVideoOutput(): String = SpikeConfig.mpvOptions["vo"] ?: VIDEO_OUTPUT
 
     private fun loadNow(request: MpvLoadRequest) {
         resetStreamMetricsLocked()
