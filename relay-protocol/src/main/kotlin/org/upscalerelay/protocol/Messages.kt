@@ -434,6 +434,14 @@ data class SessionInfo(
     val downlinkMapping: DownlinkMapping? = null,
 ) {
     /**
+     * An HDR source: an HDR downlink, or a mapped one, whose epoch may be SDR
+     * for an SDR display. Either way it streams at 10 bits under "hdr" and
+     * "all" alike.
+     */
+    val hdrSource: Boolean
+        get() = downlinkColor?.isHdr == true || downlinkMapping != null
+
+    /**
      * This session as of the epoch a seek_ready announced. On a mapped
      * session each epoch says what it carries, and an epoch made for another
      * display can switch between PQ and SDR (§3.6); other sessions' epochs

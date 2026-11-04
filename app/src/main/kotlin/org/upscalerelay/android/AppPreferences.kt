@@ -26,6 +26,8 @@ data class AppPreferences(
     val fitMode: String = "fit",
     val resizeAlgorithm: String = "",
     val debandEnabled: Boolean = false,
+    // Every video at 10 bits, not only HDR (PROTOCOL.md §3.5 "all").
+    val tenBitVideo: Boolean = false,
     val subtitlesEnabled: Boolean = true,
     val preferredSubtitle: String = "",
     val diagnosticsVisible: Boolean = false,
@@ -81,6 +83,7 @@ class AppPreferencesStore(context: Context) {
     suspend fun setFitMode(value: String) = set(Keys.FIT_MODE, value)
     suspend fun setResizeAlgorithm(value: String) = set(Keys.RESIZE_ALGORITHM, value)
     suspend fun setDebandEnabled(value: Boolean) = set(Keys.DEBAND_ENABLED, value)
+    suspend fun setTenBitVideo(value: Boolean) = set(Keys.TEN_BIT_VIDEO, value)
     suspend fun setSubtitlesEnabled(value: Boolean) = set(Keys.SUBTITLES_ENABLED, value)
     suspend fun setPreferredSubtitle(value: String) = set(Keys.PREFERRED_SUBTITLE, value)
     suspend fun setDiagnosticsVisible(value: Boolean) = set(Keys.DIAGNOSTICS_VISIBLE, value)
@@ -116,6 +119,7 @@ class AppPreferencesStore(context: Context) {
             preferences[Keys.FIT_MODE] = value.fitMode
             preferences[Keys.RESIZE_ALGORITHM] = value.resizeAlgorithm
             preferences[Keys.DEBAND_ENABLED] = value.debandEnabled
+            preferences[Keys.TEN_BIT_VIDEO] = value.tenBitVideo
             preferences[Keys.SUBTITLES_ENABLED] = value.subtitlesEnabled
             preferences[Keys.PREFERRED_SUBTITLE] = value.preferredSubtitle
             preferences[Keys.DIAGNOSTICS_VISIBLE] = value.diagnosticsVisible
@@ -231,6 +235,7 @@ class AppPreferencesStore(context: Context) {
         fitMode = preferences[Keys.FIT_MODE] ?: "fit",
         resizeAlgorithm = preferences[Keys.RESIZE_ALGORITHM].orEmpty(),
         debandEnabled = preferences[Keys.DEBAND_ENABLED] ?: false,
+        tenBitVideo = preferences[Keys.TEN_BIT_VIDEO] ?: false,
         subtitlesEnabled = preferences[Keys.SUBTITLES_ENABLED] ?: true,
         preferredSubtitle = preferences[Keys.PREFERRED_SUBTITLE].orEmpty(),
         diagnosticsVisible = preferences[Keys.DIAGNOSTICS_VISIBLE] ?: false,
@@ -266,6 +271,7 @@ class AppPreferencesStore(context: Context) {
         val FIT_MODE = stringPreferencesKey("fit_mode")
         val RESIZE_ALGORITHM = stringPreferencesKey("resize_algorithm")
         val DEBAND_ENABLED = booleanPreferencesKey("deband_enabled")
+        val TEN_BIT_VIDEO = booleanPreferencesKey("ten_bit_video")
         val SUBTITLES_ENABLED = booleanPreferencesKey("subtitles_enabled")
         val PREFERRED_SUBTITLE = stringPreferencesKey("preferred_subtitle")
         val DIAGNOSTICS_VISIBLE = booleanPreferencesKey("diagnostics_visible")

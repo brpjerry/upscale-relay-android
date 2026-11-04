@@ -1111,6 +1111,7 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                                 viewModel.setQualityTier(option.id)
                             }
                         }
+                    TenBitVideoToggle(viewModel, state)
                     Text("Framing", style = MaterialTheme.typography.labelLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RelaySessionController.FIT_MODES.forEach { mode ->
@@ -1371,11 +1372,37 @@ private fun SettingsSection(title: String, content: @Composable ColumnScope.() -
 }
 
 @Composable
-private fun SettingToggle(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingToggle(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    supporting: String? = null,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            supporting?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+/** "Use 10 bit video" (PROTOCOL.md §3.5 high_bit_depth "all"), in Settings and the player's sheet. */
+@Composable
+private fun TenBitVideoToggle(viewModel: RelayViewModel, state: RelayUiState) {
+    SettingToggle(
+        "Use 10 bit video",
+        state.tenBitVideo,
+        viewModel::setTenBitVideo,
+        supporting = "Where the server and this device support it, HDR videos stream with 10-bit colour. " +
+            "On, every other video does too: smoother gradients and a smaller stream, for more work on the server.",
+    )
 }
 
 @Composable
@@ -2460,6 +2487,7 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
                             viewModel.setQualityTier(option.id)
                         }
                     }
+                TenBitVideoToggle(viewModel, state)
                 Text("Framing", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RelaySessionController.FIT_MODES.forEach { mode ->

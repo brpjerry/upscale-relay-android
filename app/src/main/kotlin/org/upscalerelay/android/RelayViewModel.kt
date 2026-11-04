@@ -423,6 +423,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         fitMode = value.fitMode,
                         resizeAlgorithm = value.resizeAlgorithm,
                         debandEnabled = value.debandEnabled,
+                        tenBitVideo = value.tenBitVideo,
                         subtitlesEnabled = value.subtitlesEnabled,
                         preferredSubtitle = value.preferredSubtitle,
                         diagnosticsVisible = value.diagnosticsVisible,
@@ -672,6 +673,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutableUi.value = mutableUi.value.copy(debandEnabled = value)
         playerEngine.setDeband(value)
         persist { preferences.setDebandEnabled(value) }
+    }
+
+    /** "Use 10 bit video": every video at 10 bits, not only HDR; restarts only a stream it changes. */
+    fun setTenBitVideo(value: Boolean) {
+        val changed = mutableUi.value.tenBitVideo != value
+        mutableUi.value = mutableUi.value.copy(tenBitVideo = value)
+        persist { preferences.setTenBitVideo(value) }
+        val state = mutableUi.value
+        if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
     }
 
     fun setModel(value: String) {
@@ -1582,7 +1592,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = downlinkDepth(landscape.display),
+                        highBitDepth = downlinkDepth(landscape),
                         displayTarget = PLAYER_DISPLAY,
                     )
                     pendingSource = null // controller now owns the source
@@ -1678,7 +1688,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = downlinkDepth(landscape.display),
+                        highBitDepth = downlinkDepth(landscape),
                         displayTarget = PLAYER_DISPLAY,
                     )
                 }
@@ -2421,7 +2431,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 qualityTier = tier,
                 fitMode = state.fitMode,
                 resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
-                highBitDepth = downlinkDepth(state.display),
+                highBitDepth = downlinkDepth(state),
                 displayTarget = PLAYER_DISPLAY,
             )
             is PlaybackOrigin.LocalDocument -> {
@@ -2449,7 +2459,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = tier,
                         fitMode = state.fitMode,
                         resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = downlinkDepth(state.display),
+                        highBitDepth = downlinkDepth(state),
                         displayTarget = PLAYER_DISPLAY,
                     ).also { pendingSource = null }
                 } finally {
@@ -3162,6 +3172,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("fit_mode", state.fitMode)
                 put("resize_algorithm", state.session?.resizeAlgorithm ?: "server-default")
                 put("deband_enabled", state.debandEnabled)
+                put("ten_bit_video", state.tenBitVideo)
                 put("gestures_enabled", state.gesturesEnabled)
                 put("auto_resume_count", resumeCount)
                 put("auto_play_next_enabled", state.autoPlayNext)
@@ -3320,19 +3331,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val NETWORK_WAIT_MILLIS = 10_000L
         private const val LIBRARY_CACHE_WRITE_DELAY_MILLIS = 500L
 
-        /**
-         * HDR sources stream at 10 bits with their metadata, as they do to
-         * the desktop (PROTOCOL.md §3.5); every other source stays 8-bit.
-         */
-        private val DOWNLINK_DEPTH = HighBitDepth.HDR
-
-        /**
-         * [DOWNLINK_DEPTH] where a hardware decoder takes the 10-bit downlink
-         * at [display]; nothing elsewhere, so the session stays 8-bit and
-         * names no display either (the server maps only deep colour).
-         */
-        private fun downlinkDepth(display: DisplaySize): HighBitDepth? =
-            DOWNLINK_DEPTH.takeIf { decodesHevcMain10(display) }
+        /** The deep colour to ask for at the player's size (downlinkDepthFor). */
+        private fun downlinkDepth(state: RelayUiState): HighBitDepth? =
+            downlinkDepthFor(state.tenBitVideo, decodesHevcMain10(state.display))
 
         /**
          * The display named to a server that maps Dolby Vision and HDR10+
@@ -3380,6 +3381,7 @@ data class RelayUiState(
     val fitMode: String = "fit",
     val resizeAlgorithm: String = "",
     val debandEnabled: Boolean = false,
+    val tenBitVideo: Boolean = false,
     val paused: Boolean = false,
     val seeking: Boolean = false,
     val seekPreviewSeconds: Double? = null,

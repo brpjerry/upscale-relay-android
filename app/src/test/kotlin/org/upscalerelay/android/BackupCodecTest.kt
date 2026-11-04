@@ -30,6 +30,7 @@ class BackupCodecTest {
         fitMode = "cover",
         resizeAlgorithm = "lanczos",
         debandEnabled = true,
+        tenBitVideo = true,
         subtitlesEnabled = false,
         preferredSubtitle = "eng\u001FSigns",
         diagnosticsVisible = true,

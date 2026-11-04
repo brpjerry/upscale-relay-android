@@ -12,6 +12,8 @@ import org.upscalerelay.client.UplinkMediaSource
 import org.upscalerelay.client.UplinkPacketReader
 import org.upscalerelay.client.UplinkVideoInfo
 import org.upscalerelay.protocol.ChapterInfo
+import org.upscalerelay.protocol.DolbyVisionConfig
+import org.upscalerelay.protocol.StaticHdrMetadata
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -64,17 +66,39 @@ class AndroidMediaSource private constructor(
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(pfd.fileDescriptor)
-                    val videoTrack = (0 until extractor.trackCount).firstOrNull { index ->
-                        extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
-                            ?.startsWith("video/") == true
-                    } ?: error("The selected document has no video track")
+                    val videoTracks = (0 until extractor.trackCount).mapNotNull { index ->
+                        val trackFormat = extractor.getTrackFormat(index)
+                        trackFormat.getString(MediaFormat.KEY_MIME)?.takeIf { it.startsWith("video/") }?.let { mime ->
+                            ExtractorVideoTrack(index, mime, trackFormat.intOrNull(MediaFormat.KEY_TRACK_ID))
+                        }
+                    }
+                    if (videoTracks.isEmpty()) error("The selected document has no video track")
+                    // A first video track that is a Dolby Vision view carries
+                    // the configuration record in csd-2 (MP4); a Matroska
+                    // file's sits in its BlockAdditionMapping.
+                    val dolbyVisionFormat = videoTracks.first()
+                        .takeIf { it.mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION }
+                        ?.let { extractor.getTrackFormat(it.index) }
+                    val dolbyVision = dolbyVisionFormat?.byteBufferOrNull("csd-2")?.let(DolbyVisionConfig::fromRecord)
+                        ?: readMatroskaDolbyVision(resolver, uri)
+                    val dolbyVisionBase = dolbyVisionFormat?.let { dvFormat ->
+                        dolbyVision?.let { dolbyVisionBaseCodec(it.profile) }
+                            ?: dolbyVisionBaseCodecOfPlatformProfile(dvFormat.intOrNull(MediaFormat.KEY_PROFILE))
+                    }
+                    val videoTrack = chooseVideoTrack(videoTracks, dolbyVisionBase).read
                     val format = extractor.getTrackFormat(videoTrack)
                     val mime = requireNotNull(format.getString(MediaFormat.KEY_MIME))
-                    val codec = codecName(mime)
+                    val readingDolbyVisionView = mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION
+                    val codec = serverCodecName(mime)
+                        ?: dolbyVisionBase?.takeIf { readingDolbyVisionView }
+                        ?: error("Unsupported local video codec: $mime")
                     val durationUs = format.longOrNull(MediaFormat.KEY_DURATION)
                     val fps = format.intOrNull(MediaFormat.KEY_FRAME_RATE)
                     val extradata = (0..3).mapNotNull { index ->
-                        format.byteBufferOrNull("csd-$index")
+                        // A Dolby Vision view's csd-2 is its configuration
+                        // record, not the base codec's: appended to the
+                        // parameter sets it would corrupt the last of them.
+                        if (readingDolbyVisionView && index == 2) null else format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
                     val chapters = readChapters(resolver, uri)
                     // MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT (API 30)
@@ -109,6 +133,22 @@ class AndroidMediaSource private constructor(
                             sourceHasAuxiliary = if (hasAudio) true else null,
                             sampleAspectNumerator = sampleAspect?.first,
                             sampleAspectDenominator = sampleAspect?.second,
+                            color = platformColor(
+                                standard = format.intOrNull(MediaFormat.KEY_COLOR_STANDARD),
+                                transfer = format.intOrNull(MediaFormat.KEY_COLOR_TRANSFER),
+                                range = format.intOrNull(MediaFormat.KEY_COLOR_RANGE),
+                            ),
+                            bitDepth = sourceBitDepth(
+                                bitsPerSample = format.intOrNull(KEY_BITS_PER_SAMPLE),
+                                codec = codec,
+                                profile = if (readingDolbyVisionView) null
+                                else format.intOrNull(MediaFormat.KEY_PROFILE),
+                            ),
+                            staticHdr = staticHdrFromCta861(
+                                format.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO)
+                                    ?: dolbyVisionFormat?.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO),
+                            ).orElse(readMatroskaHdrStatic(resolver, uri)),
+                            dolbyVision = dolbyVision,
                         ),
                     )
                 } finally {
@@ -131,6 +171,26 @@ class AndroidMediaSource private constructor(
                 }
             }.getOrNull().orEmpty()
 
+        /** Null for non-Matroska documents and tracks without HDR10 metadata; best-effort like chapters. */
+        private fun readMatroskaHdrStatic(resolver: ContentResolver, uri: Uri): StaticHdrMetadata? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaHdrStatic.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
+
+        /** Null for non-Matroska documents and tracks without a Dolby Vision record; best-effort like chapters. */
+        private fun readMatroskaDolbyVision(resolver: ContentResolver, uri: Uri): DolbyVisionConfig? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaDolbyVision.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
+
         /** Null for non-Matroska documents and square pixels; best-effort like chapters. */
         private fun readMatroskaSampleAspect(resolver: ContentResolver, uri: Uri): Pair<Int, Int>? =
             runCatching {
@@ -141,15 +201,8 @@ class AndroidMediaSource private constructor(
                 }
             }.getOrNull()
 
-        private fun codecName(mime: String): String = when (mime) {
-            MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"
-            MediaFormat.MIMETYPE_VIDEO_AVC -> "h264"
-            MediaFormat.MIMETYPE_VIDEO_AV1 -> "av1"
-            MediaFormat.MIMETYPE_VIDEO_VP9 -> "vp9"
-            MediaFormat.MIMETYPE_VIDEO_MPEG2 -> "mpeg2video"
-            MediaFormat.MIMETYPE_VIDEO_MPEG4 -> "mpeg4"
-            else -> error("Unsupported local video codec: $mime")
-        }
+        /** MediaExtractor's depth for HEVC (from the parameter sets); not a public key. */
+        private const val KEY_BITS_PER_SAMPLE = "bits-per-sample"
     }
 }
 
@@ -191,7 +244,11 @@ private class ExtractorPacketReader(
         if (closed.get()) return null
         val extractor = requireNotNull(extractor)
         try {
-            if (extractor.sampleTime < 0) return null
+            // The end is the track index going to -1. A negative sample time
+            // is an ordinary sample before the start an MP4 edit list trims
+            // (an ffmpeg cut starts at -576 ms); reading it as the end ended
+            // such a file before its first frame. The wire PTS is signed.
+            if (extractor.sampleTrackIndex < 0) return null
             val sampleSize = extractor.sampleSize
             if (sampleSize > buffer.capacity()) {
                 require(sampleSize <= MAX_ACCESS_UNIT_BYTES) { "video access unit is too large: $sampleSize" }
