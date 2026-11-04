@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -27,6 +28,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
+import org.upscalerelay.protocol.DisplayTarget
+import org.upscalerelay.protocol.HighBitDepth
 import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.ServerStatus
 import org.upscalerelay.protocol.MediaFraming
@@ -152,6 +155,8 @@ internal class ControlChannel(
         resizeAlgorithm: String?,
         requestMuxedAuxTracks: Boolean,
         requestCachedAttachments: Boolean,
+        highBitDepth: HighBitDepth? = null,
+        displayTarget: DisplayTarget? = null,
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
@@ -165,6 +170,8 @@ internal class ControlChannel(
             resizeAlgorithm = resizeAlgorithm,
             requestMuxedAuxTracks = requestMuxedAuxTracks,
             requestCachedAttachments = requestCachedAttachments,
+            highBitDepth = highBitDepth,
+            displayTarget = displayTarget,
         ),
     )
 
@@ -175,6 +182,8 @@ internal class ControlChannel(
         qualityTier: String,
         fitMode: String,
         resizeAlgorithm: String?,
+        highBitDepth: HighBitDepth? = null,
+        displayTarget: DisplayTarget? = null,
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
@@ -230,6 +239,7 @@ internal class ControlChannel(
             })
             put("fit_mode", fitMode)
             if (!resizeAlgorithm.isNullOrBlank()) put("resize_algorithm", resizeAlgorithm)
+            putColorRequest(highBitDepth, displayTarget)
         },
     )
 
@@ -237,13 +247,15 @@ internal class ControlChannel(
 
     fun pause() = send(buildJsonObject { put("type", "pause") })
 
-    suspend fun seek(targetPts: Long, epoch: Int): JsonObject = request(
+    /** [displayTarget] names the display for this epoch on a session that negotiated one (§3.6). */
+    suspend fun seek(targetPts: Long, epoch: Int, displayTarget: DisplayTarget? = null): JsonObject = request(
         expectedType = "seek_ready",
         timeoutMillis = 60_000,
         message = buildJsonObject {
             put("type", "seek")
             put("target_pts", targetPts)
             put("epoch", epoch)
+            displayTarget?.let { put("display_target", it.toJson()) }
         },
         accept = { message -> message["epoch"]?.jsonPrimitive?.intOrNull == epoch },
     )
@@ -526,6 +538,8 @@ internal fun serverFileOpenMessage(
     resizeAlgorithm: String?,
     requestMuxedAuxTracks: Boolean,
     requestCachedAttachments: Boolean,
+    highBitDepth: HighBitDepth? = null,
+    displayTarget: DisplayTarget? = null,
 ): JsonObject = buildJsonObject {
     require(!requestCachedAttachments || requestMuxedAuxTracks) {
         "cached attachments require muxed auxiliary tracks"
@@ -548,4 +562,16 @@ internal fun serverFileOpenMessage(
         put("aux_tracks", "muxed")
         put("aux_attachments", if (requestCachedAttachments) "cached" else "embedded")
     }
+    putColorRequest(highBitDepth, displayTarget)
+}
+
+/**
+ * open_session's deep-colour request (§3.5) and display (§3.6). The server
+ * maps only for a session that also asked for deep colour, so a display is
+ * never sent alone. The caller has checked what the server advertises.
+ */
+private fun JsonObjectBuilder.putColorRequest(highBitDepth: HighBitDepth?, displayTarget: DisplayTarget?) {
+    if (highBitDepth == null) return
+    put("high_bit_depth", highBitDepth.wire)
+    displayTarget?.let { put("display_target", it.toJson()) }
 }

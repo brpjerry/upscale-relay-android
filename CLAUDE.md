@@ -280,6 +280,18 @@ release.yml` builds and publishes the signed APK with those notes.
   the bars hidden on the sheet's own window (`dialogWindow()`). Anything new
   that opens over the player does the same.
 
+- **Name an SDR display until the player can show HDR.** Every open asks a
+  capable server for `high_bit_depth: "hdr"` and `display_target: sdr`
+  (`DOWNLINK_DEPTH`, `PLAYER_DISPLAY` in `RelayViewModel`; the controller
+  sends only what `capabilities` advertise), on a device whose hardware
+  decoder takes HEVC Main 10 at the display's size (`decodesHevcMain10`);
+  elsewhere it asks for nothing and stays 8-bit. mpv tone-maps everything to SDR
+  here (known issues), and for an SDR display the server tone-maps Dolby
+  Vision and HDR10+ by their own metadata, which mpv's `gpu` renderer would
+  ignore. A `pq` target would stop that and fix nothing. Each epoch's colour
+  and mapping come from its own `seek_ready` (`SessionInfo.describedBy`),
+  which arrives before the endpoint is handed to mpv.
+
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player
   (`closingJob`), after a wake with a dead socket, on a cold start behind
@@ -312,6 +324,14 @@ release.yml` builds and publishes the signed APK with those notes.
   the Surface is gone.
 
 ## Known issues
+
+- HDR plays as SDR even on the tablet's HDR panel (HDR10, HLG, HDR10+,
+  540 nits). The bundled libmpv (mpv-android 2026-04-25) has `gpu-next` but
+  no Android Vulkan context, and its GL context cannot tag the surface as PQ,
+  so mpv tone-maps, and dithers the result to the 8-bit surface
+  (`dither=fruit`, which `profile=fast` would otherwise turn off). Showing
+  HDR needs a spike: a custom build with Vulkan, `vo=mediacodec_embed` (no
+  mpv subtitles or OSD), or the app tagging the Surface itself.
 
 - Seeking while paused reached `SEEKING -> PAUSED`, which `SessionStateMachine`
   rejected, failing the session (fixed 2026-07-26 by allowing it). Any new

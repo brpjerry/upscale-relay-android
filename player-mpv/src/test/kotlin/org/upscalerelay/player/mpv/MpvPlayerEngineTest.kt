@@ -4,6 +4,30 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class MpvPlayerEngineTest {
+    private val hdrPicture = MpvMetrics(
+        hardwareDecoder = "mediacodec",
+        videoPixelFormat = "mediacodec",
+        videoHwPixelFormat = "p010",
+        videoGamma = "pq",
+        videoPrimaries = "bt.2020",
+        videoSignalPeak = 49.26,
+    )
+
+    @Test
+    fun `a video param mpv reports unavailable is cleared alone`() {
+        assertEquals(hdrPicture.copy(videoHwPixelFormat = ""), hdrPicture.withoutVideoParam("video-params/hw-pixelformat"))
+        assertEquals(hdrPicture.copy(videoGamma = ""), hdrPicture.withoutVideoParam("video-params/gamma"))
+        assertEquals(hdrPicture.copy(videoSignalPeak = 0.0), hdrPicture.withoutVideoParam("video-params/sig-peak"))
+        // Other properties keep what they had: only the picture's description is per-frame.
+        assertEquals(hdrPicture, hdrPicture.withoutVideoParam("hwdec-current"))
+        assertEquals(hdrPicture, hdrPicture.withoutVideoParam("video-params/w"))
+    }
+
+    @Test
+    fun `a new stream starts with no picture description but keeps its decoder`() {
+        assertEquals(MpvMetrics(hardwareDecoder = "mediacodec"), hdrPicture.withoutVideoParams())
+    }
+
     @Test
     fun `relay load tolerates an indefinitely silent loopback stream`() {
         assertEquals("network-timeout=0,pause=yes", relayLoadOptions())

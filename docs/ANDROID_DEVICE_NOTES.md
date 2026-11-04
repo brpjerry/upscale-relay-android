@@ -1,5 +1,47 @@
 # Android device validation notes
 
+## 10-bit HDR downlink and SDR display mapping — 2026-11-03
+
+Galaxy Tab S9 Ultra `SM-X910`, Android 16/API 36, build `X910XXS6EZI2`,
+against the relay at 192.168.0.115:8590 (it advertises `high_bit_depth` and
+`display_mapping`, PROTOCOL.md §3.5 and §3.6). All on `passthrough`, 2960x1848
+cover. The panel reports HDR10, HLG and HDR10+ (no Dolby Vision) with a
+540-nit peak, but mpv shows SDR here, so every session asks for `"hdr"` and
+names an SDR display.
+
+| Source | Tier | Downlink | mpv reads | Drops |
+|---|---|---|---|---|
+| `HDR test card - 10000 nits.mkv` (HDR10) | hevc-qp4 | 10-bit PQ BT.2020, mastering 10000 nits, MaxCLL 10000 | `mediacodec`, `pq`, `sig-peak` 49.26 (= 10000/203) | 0/0 |
+| same | lossless-hevc | 10-bit PQ | `mediacodec`, `pq` | 0/0 |
+| Cyberpunk Edgerunners S02E01, 2160p DV 8.1 + HDR10 | hevc-qp4 | 10-bit BT.709 SDR, `applied: ["dolby_vision"]` | `mediacodec`, `bt.1886` | 0/0 |
+| Bad Girl S01E01, 1080p HEVC 10-bit SDR | hevc-qp4 | 8-bit BT.709 (`source_bit_depth` 10) | `mediacodec`, `bt.1886` | 0/0 |
+
+- MediaCodec decodes Main 10 zero-copy (`hwdec=mediacodec`) at 2960x1848,
+  lossless included; nothing fell back to copy-back or software.
+- The mapped Dolby Vision episode looked right (no green/purple cast). The
+  server's mapper ran at 28-30 fps for the 23.976 fps source, so mpv's cache
+  grew by about 0.2 s every second at 70-87 Mbps.
+- A seek to 14:18 in it: `seek_ready` after 25 ms, playing 2.5 s after the
+  seek, and the new epoch still described as mapped 10-bit SDR. A seek in the
+  test card kept 10-bit PQ.
+- The test card takes ~7 s to start, all of it between mpv's `start-file` and
+  `file-loaded`: it streams at 0.67 Mbps, so mpv's first reads take that long
+  to fill. It has no audio, and the audio-ready hold does not run for it. The
+  episodes started in 0.7-2.1 s.
+- The low-bitrate card is no test of lossless bandwidth: a lossless 10-bit
+  episode over Wi-Fi was not tried.
+- Dithering (`dither=fruit`, `dither-depth=auto`; `profile=fast` had it off),
+  rerun the same day. One pixel row across the card's ramp (screencap, levels
+  11-147): undithered it ran in flat steps of 7.3 px on average and up to
+  22 px, visible bands; dithered, 1.9 px and at most 12, with neighbouring
+  pixels alternating between adjacent levels. On the mapped Dolby Vision
+  episode it cost nothing visible: no drops over 56 s of playback or after a
+  seek (3 output drops on the resume load that opened it, none on the seek's
+  load).
+- With the same build: the Main 10 check passes on the tablet (the session
+  asked for `"hdr"`), and mpv's picture fields, cleared at each load, came
+  back on the new epoch after every seek.
+
 ## Palm rejection on the player's top bar — 2026-10-09
 
 Galaxy Tab S9 Ultra `SM-X910`, Android 16/API 36, build `X910XXS6EZI2`,

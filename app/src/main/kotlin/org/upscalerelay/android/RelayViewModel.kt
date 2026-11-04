@@ -43,6 +43,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.upscalerelay.client.FailureDetail
@@ -68,6 +69,8 @@ import org.upscalerelay.player.mpv.RelayAuxMode
 import org.upscalerelay.player.mpv.RelayLoad
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
+import org.upscalerelay.protocol.DisplayTarget
+import org.upscalerelay.protocol.HighBitDepth
 import org.upscalerelay.protocol.LibraryNode
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.SeekProgress
@@ -1579,12 +1582,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
+                        highBitDepth = downlinkDepth(landscape.display),
+                        displayTarget = PLAYER_DISPLAY,
                     )
                     pendingSource = null // controller now owns the source
                     applyResumePoint(currentController, endpoint, "local:$uriValue") to
                         source.videoInfo.name
                 }.onSuccess { (endpoint, displayName) ->
-                    AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
+                    AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     withContext(Dispatchers.IO) { localDocumentServer?.close() }
                     localDocumentServer = bridge
                     bridge = null
@@ -1673,6 +1678,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
+                        highBitDepth = downlinkDepth(landscape.display),
+                        displayTarget = PLAYER_DISPLAY,
                     )
                 }
                 openRetryPending = true
@@ -1700,7 +1707,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 Triple(applyResumePoint(currentController, endpoint, progressKey(origin)), currentController, origin)
             }
                 .onSuccess { (endpoint, currentController, origin) ->
-                    AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} epoch=${endpoint.session.epoch}")
+                    AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     activeOrigin = origin
                     warningDismissed = false
                     reconnectExhausted = false
@@ -2414,6 +2421,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 qualityTier = tier,
                 fitMode = state.fitMode,
                 resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
+                highBitDepth = downlinkDepth(state.display),
+                displayTarget = PLAYER_DISPLAY,
             )
             is PlaybackOrigin.LocalDocument -> {
                 val uri = origin.uriValue.toUri()
@@ -2440,6 +2449,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = tier,
                         fitMode = state.fitMode,
                         resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
+                        highBitDepth = downlinkDepth(state.display),
+                        displayTarget = PLAYER_DISPLAY,
                     ).also { pendingSource = null }
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -3111,6 +3122,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("audio_codec", mpv.audioCodec)
                 put("coded_width", mpv.codedWidth)
                 put("coded_height", mpv.codedHeight)
+                // What the server sent (PROTOCOL.md §3.5, §3.6) and what mpv reads it as.
+                val session = state.relaySession
+                put("downlink_bit_depth", session?.downlinkBitDepth)
+                put("downlink_color", session?.downlinkColor?.toJson() ?: JsonNull)
+                put("downlink_dolby_vision", session?.downlinkDolbyVision)
+                put("downlink_mapping", session?.downlinkMapping?.toJson() ?: JsonNull)
+                put("source_bit_depth", session?.sourceBitDepth)
+                put("video_pixelformat", mpv.videoPixelFormat)
+                put("video_hw_pixelformat", mpv.videoHwPixelFormat)
+                put("video_gamma", mpv.videoGamma)
+                put("video_primaries", mpv.videoPrimaries)
+                put("video_sig_peak", mpv.videoSignalPeak)
                 put("fps", mpv.framesPerSecond)
                 put("bitrate_bps", mpv.bitrateBitsPerSecond)
                 put("mpv_cache_ms", mpv.cacheDurationMillis)
@@ -3296,6 +3319,30 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val RESTORE_MAX_EXTRA_PAGES = 10
         private const val NETWORK_WAIT_MILLIS = 10_000L
         private const val LIBRARY_CACHE_WRITE_DELAY_MILLIS = 500L
+
+        /**
+         * HDR sources stream at 10 bits with their metadata, as they do to
+         * the desktop (PROTOCOL.md §3.5); every other source stays 8-bit.
+         */
+        private val DOWNLINK_DEPTH = HighBitDepth.HDR
+
+        /**
+         * [DOWNLINK_DEPTH] where a hardware decoder takes the 10-bit downlink
+         * at [display]; nothing elsewhere, so the session stays 8-bit and
+         * names no display either (the server maps only deep colour).
+         */
+        private fun downlinkDepth(display: DisplaySize): HighBitDepth? =
+            DOWNLINK_DEPTH.takeIf { decodesHevcMain10(display) }
+
+        /**
+         * The display named to a server that maps Dolby Vision and HDR10+
+         * (§3.6). mpv here shows SDR only, whatever the panel can do: its
+         * Android GL output cannot tag the surface as HDR, so it tone-maps.
+         * For SDR the server tone-maps Dolby Vision (fixing profile 5's
+         * colours) and HDR10+ by their own metadata; HDR10 and HLG still
+         * arrive as HDR, and mpv tone-maps them from 10 bits.
+         */
+        private val PLAYER_DISPLAY = DisplayTarget.SDR
     }
 
     private fun persist(block: suspend () -> Unit) {

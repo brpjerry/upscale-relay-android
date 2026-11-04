@@ -306,6 +306,12 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         val options = mapOf(
             "config" to "no",
             "profile" to "fast",
+            // The fast profile turns dithering off (dither=no, which no
+            // dither-depth overrides). A 10-bit downlink then reaches the
+            // 8-bit surface truncated and its gradients band. mpv's default
+            // algorithm, to the depth the surface reports.
+            "dither" to "fruit",
+            "dither-depth" to "auto",
             "vo" to VIDEO_OUTPUT,
             "gpu-context" to "android",
             "opengl-es" to "yes",
@@ -508,8 +514,11 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * seek that has buffered nothing still reads as several seconds full,
      * and the buffer report hands the server that same stale number.
      *
-     * Only stream-scoped progress is reset. Track/codec identity, cumulative
-     * drop counters, and user-owned delays survive the reload.
+     * Only stream-scoped progress is reset, with the picture's description:
+     * each epoch can carry another colour, and the retired one's "unavailable"
+     * reports arrive while the load is still dropping events. Track/codec
+     * identity, cumulative drop counters, and user-owned delays survive the
+     * reload.
      */
     private fun resetStreamMetricsLocked() {
         metrics = metrics.copy(
@@ -520,11 +529,19 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             positionSeconds = 0.0,
             avSyncSeconds = 0.0,
             audioPtsSeconds = 0.0,
-        )
+        ).withoutVideoParams()
     }
 
     private fun observeMetrics() {
-        val stringProperties = listOf("hwdec-current", "video-codec", "audio-codec")
+        val stringProperties = listOf(
+            "hwdec-current",
+            "video-codec",
+            "audio-codec",
+            "video-params/pixelformat",
+            "video-params/hw-pixelformat",
+            "video-params/gamma",
+            "video-params/primaries",
+        )
         val integerProperties = listOf(
             "video-params/w",
             "video-params/h",
@@ -542,6 +559,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "audio-delay",
             "sub-delay",
             "audio-pts",
+            "video-params/sig-peak",
         )
         stringProperties.forEach { MPVLib.observeProperty(it, MPVLib.MpvFormat.STRING) }
         integerProperties.forEach { MPVLib.observeProperty(it, MPVLib.MpvFormat.INT64) }
@@ -560,7 +578,11 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         attachedSurface = null
     }
 
-    override fun eventProperty(property: String) = Unit
+    /** A property that went unavailable: the picture's description must not outlive its frames. */
+    override fun eventProperty(property: String): Unit = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
+        metrics = metrics.withoutVideoParam(property)
+    }
 
     override fun eventProperty(property: String, value: Long): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
@@ -591,6 +613,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "hwdec-current" -> metrics.copy(hardwareDecoder = value)
             "video-codec" -> metrics.copy(codec = value)
             "audio-codec" -> metrics.copy(audioCodec = value)
+            "video-params/pixelformat" -> metrics.copy(videoPixelFormat = value)
+            "video-params/hw-pixelformat" -> metrics.copy(videoHwPixelFormat = value)
+            "video-params/gamma" -> metrics.copy(videoGamma = value)
+            "video-params/primaries" -> metrics.copy(videoPrimaries = value)
             else -> metrics
         }
     }
@@ -607,6 +633,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "audio-delay" -> metrics.copy(audioDelaySeconds = value)
             "sub-delay" -> metrics.copy(subtitleDelaySeconds = value)
             "audio-pts" -> metrics.copy(audioPtsSeconds = value)
+            "video-params/sig-peak" -> metrics.copy(videoSignalPeak = value)
             else -> metrics
         }
     }
@@ -832,4 +859,34 @@ data class MpvMetrics(
     val cacheBufferingPercent: Int = 0,
     val seeking: Boolean = false,
     val coreIdle: Boolean = true,
+    /**
+     * What mpv decodes: the frame format ("mediacodec" for hardware frames,
+     * whose own format is [videoHwPixelFormat] when mpv knows it), and the
+     * colour it reads them as. [videoSignalPeak] is the peak relative to SDR
+     * white that mpv tone-maps from (1 for SDR).
+     */
+    val videoPixelFormat: String = "",
+    val videoHwPixelFormat: String = "",
+    val videoGamma: String = "",
+    val videoPrimaries: String = "",
+    val videoSignalPeak: Double = 0.0,
 )
+
+/** The picture's description cleared, as before the first frame of a stream. */
+internal fun MpvMetrics.withoutVideoParams(): MpvMetrics = copy(
+    videoPixelFormat = "",
+    videoHwPixelFormat = "",
+    videoGamma = "",
+    videoPrimaries = "",
+    videoSignalPeak = 0.0,
+)
+
+/** One observed video-params property cleared, for mpv reporting it unavailable; anything else is kept. */
+internal fun MpvMetrics.withoutVideoParam(property: String): MpvMetrics = when (property) {
+    "video-params/pixelformat" -> copy(videoPixelFormat = "")
+    "video-params/hw-pixelformat" -> copy(videoHwPixelFormat = "")
+    "video-params/gamma" -> copy(videoGamma = "")
+    "video-params/primaries" -> copy(videoPrimaries = "")
+    "video-params/sig-peak" -> copy(videoSignalPeak = 0.0)
+    else -> this
+}

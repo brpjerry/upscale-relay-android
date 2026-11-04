@@ -19,8 +19,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.upscalerelay.protocol.DisplaySize
+import org.upscalerelay.protocol.DisplayTarget
+import org.upscalerelay.protocol.HighBitDepth
 import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.MediaPacket
+import org.upscalerelay.protocol.SessionInfo
+import org.upscalerelay.protocol.VideoColor
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -148,14 +152,78 @@ class RelaySessionControllerTest {
         return Socket(uri.host, uri.port).apply { soTimeout = 5_000 }
     }
 
+    @Test(timeout = 20_000)
+    fun `deep colour and the display are asked for only as the server advertises them`() = runBlocking {
+        suspend fun session(capabilities: String, opened: String = "", seekReady: String = ""): FakeControl {
+            val media = FakeMedia(ackDelayMillis = 0)
+            val control = FakeControl(media.port, capabilities = capabilities, opened = opened, seekReady = seekReady)
+            val controller = controller(control)
+            try {
+                controller.connect(display)
+                val first = controller.preparePlayback(
+                    "show.mkv", display,
+                    highBitDepth = HighBitDepth.HDR, displayTarget = DisplayTarget.SDR,
+                )
+                connect(first).use {
+                    controller.startServerPlayback()
+                    controller.expectPlayerReload()
+                    control.lastSeekSession = controller.seek(targetPts = 90_000).session
+                }
+            } finally {
+                controller.close()
+                media.close()
+            }
+            return control
+        }
+        val sdr = Json.parseToJsonElement("""{"transfer":"sdr"}""")
+
+        val mapping = session(
+            capabilities = ""","high_bit_depth":true,"display_mapping":true""",
+            opened = ""","downlink_bit_depth":10,"downlink_color":{"primaries":1,"transfer":1,"matrix":1},""" +
+                """"downlink_mapping":{"transfer":"sdr","applied":["dolby_vision"]}""",
+            seekReady = ""","downlink_color":{"primaries":9,"transfer":16,"matrix":9},""" +
+                """"downlink_mapping":{"transfer":"sdr","applied":[]}""",
+        )
+        assertEquals("hdr", mapping.sent("open_session")["high_bit_depth"]?.jsonPrimitive?.content)
+        assertEquals(sdr, mapping.sent("open_session")["display_target"])
+        assertEquals(sdr, mapping.sent("seek")["display_target"])
+        // The epoch's endpoint describes the epoch seek_ready announced.
+        val seeked = requireNotNull(mapping.lastSeekSession)
+        assertEquals(1, seeked.epoch)
+        assertEquals(VideoColor(9, 16, 9), seeked.downlinkColor)
+        assertEquals(emptyList<String>(), seeked.downlinkMapping?.applied)
+        assertEquals(10, seeked.downlinkBitDepth)
+
+        val deepOnly = session(capabilities = ""","high_bit_depth":true""")
+        assertEquals("hdr", deepOnly.sent("open_session")["high_bit_depth"]?.jsonPrimitive?.content)
+        assertNull(deepOnly.sent("open_session")["display_target"])
+        assertNull(deepOnly.sent("seek")["display_target"])
+
+        // A server from before either field streams 8 bits, unasked.
+        val older = session(capabilities = "")
+        assertNull(older.sent("open_session")["high_bit_depth"])
+        assertNull(older.sent("open_session")["display_target"])
+        assertNull(older.sent("seek")["display_target"])
+        assertEquals(8, older.lastSeekSession?.downlinkBitDepth)
+    }
+
     /** Answers hello, open_session and seek the way the relay server does. */
     private inner class FakeControl(
         private val mediaPort: Int,
         private val seekReplyDelayMillis: Long = 0,
+        /** Extra capabilities, session_opened and seek_ready fields, each starting with a comma. */
+        private val capabilities: String = "",
+        private val opened: String = "",
+        private val seekReady: String = "",
     ) : WebSocket, WebSocket.Factory {
         private lateinit var listener: WebSocketListener
         private lateinit var request: Request
         @Volatile private var cancelled = false
+        private val messages = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+        var lastSeekSession: SessionInfo? = null
+
+        /** The last message of [type] the client sent. */
+        fun sent(type: String): JsonObject = messages.last { it["type"]?.jsonPrimitive?.content == type }
 
         override fun newWebSocket(request: Request, listener: WebSocketListener): WebSocket {
             this.request = request
@@ -169,24 +237,25 @@ class RelaySessionControllerTest {
 
         override fun send(text: String): Boolean {
             val message: JsonObject = Json.parseToJsonElement(text).jsonObject
+            messages += message
             when (message["type"]?.jsonPrimitive?.content) {
                 "hello" -> receive(
                     """{"type":"capabilities","protocol_version":1,"server_name":"test",""" +
                         """"models":[{"name":"passthrough","scale_factor":1}],""" +
-                        """"quality_tiers":["lossless-hevc"],"library":false}""",
+                        """"quality_tiers":["lossless-hevc"],"library":false$capabilities}""",
                 )
                 "open_session" -> receive(
                     """{"type":"session_opened","session_id":"s1","media_port":$mediaPort,""" +
                         """"downlink_token":"$token","downlink_codec":"hevc",""" +
                         """"downlink_container":"matroska","downlink_width":1920,""" +
                         """"downlink_height":1080,"epoch":0,"time_base":[1,1000],""" +
-                        """"duration_s":600.0}""",
+                        """"duration_s":600.0$opened}""",
                 )
                 "seek" -> {
                     val epoch = message.getValue("epoch").jsonPrimitive.int
                     thread(isDaemon = true) {
                         Thread.sleep(seekReplyDelayMillis)
-                        receive("""{"type":"seek_ready","epoch":$epoch}""")
+                        receive("""{"type":"seek_ready","epoch":$epoch$seekReady}""")
                     }
                 }
             }

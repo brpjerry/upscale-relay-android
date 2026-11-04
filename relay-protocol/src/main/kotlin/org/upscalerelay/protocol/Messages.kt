@@ -1,10 +1,12 @@
 package org.upscalerelay.protocol
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
@@ -13,6 +15,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 data class DisplaySize(val width: Int, val height: Int) {
     init {
@@ -73,6 +76,13 @@ data class Capabilities(
      * (watch history, recents) is scoped by it.
      */
     val serverId: String? = null,
+    /** open_session may ask for a 10-bit downlink (PROTOCOL.md §3.5). */
+    val highBitDepth: Boolean = false,
+    /**
+     * open_session and seek may name the display (§3.6), and the server then
+     * applies Dolby Vision and HDR10+ for it.
+     */
+    val displayMapping: Boolean = false,
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -126,6 +136,8 @@ data class Capabilities(
                     ?.coerceAtLeast(0) ?: 0,
                 serverId = (value["server_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                     ?.takeIf(SERVER_ID::matches),
+                highBitDepth = value["high_bit_depth"].wireBoolean(),
+                displayMapping = value["display_mapping"].wireBoolean(),
             )
         }
     }
@@ -260,6 +272,125 @@ data class ChapterInfo(
     }
 }
 
+/** open_session.high_bit_depth (PROTOCOL.md §3.5). */
+enum class HighBitDepth(val wire: String) {
+    /** PQ and HLG sources at 10 bits with their HDR metadata, the rest at 8. */
+    HDR("hdr"),
+
+    /** Every source at 10 bits, an 8-bit one widened. */
+    ALL("all"),
+}
+
+/**
+ * A video's colour description as the protocol carries it: ITU-T H.273 code
+ * points (FFmpeg's enum values, 2 for unspecified), and the range by name
+ * when it is known.
+ */
+data class VideoColor(
+    val primaries: Int,
+    val transfer: Int,
+    val matrix: Int,
+    val range: String? = null,
+) {
+    /** PQ or HLG. */
+    val isHdr: Boolean get() = transfer == TRANSFER_PQ || transfer == TRANSFER_HLG
+
+    fun toJson(): JsonObject = buildJsonObject {
+        put("primaries", primaries)
+        put("transfer", transfer)
+        put("matrix", matrix)
+        range?.let { put("range", it) }
+    }
+
+    companion object {
+        const val TRANSFER_PQ = 16
+        const val TRANSFER_HLG = 18
+        private val RANGES = setOf("limited", "full")
+
+        /**
+         * Null for anything but an object with three code points. The colour
+         * is diagnostic on this side, so an unknown range is dropped rather
+         * than failing the session.
+         */
+        fun fromJson(value: JsonElement?): VideoColor? {
+            val color = value as? JsonObject ?: return null
+            fun code(name: String) = color[name].wireInt()?.takeIf { it in 0..255 }
+            return VideoColor(
+                primaries = code("primaries") ?: return null,
+                transfer = code("transfer") ?: return null,
+                matrix = code("matrix") ?: return null,
+                range = (color["range"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?.takeIf { it in RANGES },
+            )
+        }
+    }
+}
+
+/**
+ * open_session / seek display_target (PROTOCOL.md §3.6): the display the
+ * client presents on. "pq" shows PQ as HDR up to [peakNits]; "sdr" shows SDR.
+ * Null luminances: the platform does not say.
+ */
+data class DisplayTarget(
+    val transfer: String,
+    val peakNits: Double? = null,
+    val sdrWhiteNits: Double? = null,
+) {
+    init {
+        require(transfer in TRANSFERS) { "unknown display transfer '$transfer'" }
+    }
+
+    /** The server ignores luminances outside 0..10000 nits, so none are sent. */
+    fun toJson(): JsonObject = buildJsonObject {
+        put("transfer", transfer)
+        peakNits?.takeIf(::plausibleNits)?.let { put("peak_nits", it) }
+        sdrWhiteNits?.takeIf(::plausibleNits)?.let { put("sdr_white_nits", it) }
+    }
+
+    companion object {
+        private val TRANSFERS = setOf("pq", "sdr")
+
+        /** A display that shows SDR, at a white level the platform does not report. */
+        val SDR = DisplayTarget("sdr")
+
+        private fun plausibleNits(value: Double) = value.isFinite() && value > 0 && value <= 10_000
+    }
+}
+
+/**
+ * session_opened / seek_ready downlink_mapping (PROTOCOL.md §3.6): what the
+ * server applied to an epoch for the display it was made for. An empty
+ * [applied] means that epoch streams as §3.5 says.
+ */
+data class DownlinkMapping(
+    val transfer: String?,
+    val peakNits: Double?,
+    val sdrWhiteNits: Double?,
+    /** "dolby_vision", "hdr10plus"; unknown names are kept as they came. */
+    val applied: List<String>,
+) {
+    fun toJson(): JsonObject = buildJsonObject {
+        put("transfer", transfer)
+        put("peak_nits", peakNits)
+        put("sdr_white_nits", sdrWhiteNits)
+        put("applied", JsonArray(applied.map(::JsonPrimitive)))
+    }
+
+    companion object {
+        /** Null for anything but an object: a session the server never maps. */
+        fun fromJson(value: JsonElement?): DownlinkMapping? {
+            val mapping = value as? JsonObject ?: return null
+            return DownlinkMapping(
+                transfer = (mapping["transfer"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
+                peakNits = mapping["peak_nits"].wireNumber(),
+                sdrWhiteNits = mapping["sdr_white_nits"].wireNumber(),
+                applied = (mapping["applied"] as? JsonArray).orEmpty()
+                    .mapNotNull { (it as? JsonPrimitive)?.takeIf { item -> item.isString }?.content },
+            )
+        }
+    }
+}
+
 data class SessionInfo(
     val sessionId: String,
     val mediaPort: Int,
@@ -288,7 +419,40 @@ data class SessionInfo(
     val sourceHasAudio: Boolean? = null,
     /** Includes audio OR subtitles; false alone authorizes omitting external media. */
     val sourceHasAuxiliary: Boolean? = null,
+    /** 8 or 10 (PROTOCOL.md §3.5); 8 from servers that predate the field. */
+    val downlinkBitDepth: Int = 8,
+    /** The colour the current epoch is encoded with; null when the server does not know it. */
+    val downlinkColor: VideoColor? = null,
+    /** A Dolby Vision profile 8 RPU rides the downlink. */
+    val downlinkDolbyVision: Boolean = false,
+    /** The source's bits per sample; null when the server did not say. */
+    val sourceBitDepth: Int? = null,
+    /**
+     * What the server applied to the current epoch for the client's display
+     * (§3.6); null on a session it never maps.
+     */
+    val downlinkMapping: DownlinkMapping? = null,
 ) {
+    /**
+     * This session as of the epoch a seek_ready announced. On a mapped
+     * session each epoch says what it carries, and an epoch made for another
+     * display can switch between PQ and SDR (§3.6); other sessions' epochs
+     * keep the session's colour, and their seek_ready says nothing of it.
+     * A colour the seek_ready reports as null or malformed is unknown for the
+     * new epoch; only an omitted one keeps the session's.
+     */
+    fun describedBy(seekReady: JsonObject): SessionInfo {
+        if ("downlink_mapping" !in seekReady) return this
+        return copy(
+            downlinkMapping = DownlinkMapping.fromJson(seekReady["downlink_mapping"]),
+            downlinkColor = if ("downlink_color" in seekReady) {
+                VideoColor.fromJson(seekReady["downlink_color"])
+            } else {
+                downlinkColor
+            },
+        )
+    }
+
     companion object {
         fun fromJson(value: JsonObject): SessionInfo {
             val auxTracks = value["aux_tracks"]?.jsonPrimitive?.content
@@ -343,6 +507,11 @@ data class SessionInfo(
             attachmentToken = attachmentToken,
             sourceHasAudio = value["source_has_audio"]?.jsonPrimitive?.booleanOrNull,
             sourceHasAuxiliary = value["source_has_auxiliary"]?.jsonPrimitive?.booleanOrNull,
+            downlinkBitDepth = value["downlink_bit_depth"].wireInt()?.takeIf { it == 8 || it == 10 } ?: 8,
+            downlinkColor = VideoColor.fromJson(value["downlink_color"]),
+            downlinkDolbyVision = value["downlink_dolby_vision"].wireBoolean(),
+            sourceBitDepth = value["source_bit_depth"].wireInt()?.takeIf { it > 0 },
+            downlinkMapping = DownlinkMapping.fromJson(value["downlink_mapping"]),
         )
         }
 
@@ -404,3 +573,17 @@ fun JsonObject.requiredInt(name: String): Int =
 
 fun JsonObject.requiredArray(name: String): JsonArray =
     this[name]?.jsonArray ?: error("missing '$name'")
+
+/*
+ * Optional fields read as the server writes them. Anything else (a string,
+ * an object, a null) is absent, never an error: a malformed optional field
+ * must not fail the message that carries it.
+ */
+private fun JsonElement?.wireBoolean(): Boolean =
+    (this as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull == true
+
+private fun JsonElement?.wireInt(): Int? =
+    (this as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
+
+private fun JsonElement?.wireNumber(): Double? =
+    (this as? JsonPrimitive)?.takeUnless { it.isString }?.doubleOrNull?.takeIf { it.isFinite() }
