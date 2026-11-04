@@ -27,8 +27,19 @@ internal fun decodesHevcMain10(display: DisplaySize): Boolean = main10Support.ge
             ?: return@any false
         val capabilities = info.getCapabilitiesForType(type)
         val video = capabilities.videoCapabilities ?: return@any false
+        // isSizeSupported also wants each side a multiple of the decoder's
+        // alignment, and the display need not be one (1848 rows is not a
+        // multiple of 16). The stream is coded padded to it and cropped back,
+        // so the padded size is the one to ask about.
+        fun supports(width: Int, height: Int) = video.isSizeSupported(
+            alignUp(width, video.widthAlignment),
+            alignUp(height, video.heightAlignment),
+        )
         capabilities.profileLevels.any { it.profile in MAIN_10_PROFILES } &&
-            (video.isSizeSupported(display.width, display.height) ||
-                video.isSizeSupported(display.height, display.width))
+            (supports(display.width, display.height) || supports(display.height, display.width))
     }
 }
+
+/** [value] rounded up to a multiple of [alignment]. */
+internal fun alignUp(value: Int, alignment: Int): Int =
+    if (alignment <= 1) value else (value + alignment - 1) / alignment * alignment

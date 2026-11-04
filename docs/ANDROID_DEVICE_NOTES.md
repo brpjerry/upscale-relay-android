@@ -30,6 +30,17 @@ names an SDR display.
   episodes started in 0.7-2.1 s.
 - The low-bitrate card is no test of lossless bandwidth: a lossless 10-bit
   episode over Wi-Fi was not tried.
+- Dithering (`dither=fruit`, `dither-depth=auto`; `profile=fast` had it off),
+  rerun the same day. One pixel row across the card's ramp (screencap, levels
+  11-147): undithered it ran in flat steps of 7.3 px on average and up to
+  22 px, visible bands; dithered, 1.9 px and at most 12, with neighbouring
+  pixels alternating between adjacent levels. On the mapped Dolby Vision
+  episode it cost nothing visible: no drops over 56 s of playback or after a
+  seek (3 output drops on the resume load that opened it, none on the seek's
+  load).
+- With the same build: the Main 10 check passes on the tablet (the session
+  asked for `"hdr"`), and mpv's picture fields, cleared at each load, came
+  back on the new epoch after every seek.
 
 ## Palm rejection on the player's top bar — 2026-10-09
 
