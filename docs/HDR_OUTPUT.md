@@ -4,27 +4,35 @@ The relay already carries HDR end to end: a capable server sends 10-bit PQ or
 HLG with its metadata (PROTOCOL §3.5), and the client names its display
 (§3.6). This document covers what is still missing: showing that signal as
 HDR on the Galaxy Tab S9 Ultra's panel instead of mpv tone-mapping it to SDR.
-It is the result of a spike (2026-11-03). Nothing here is shipped yet:
-`PLAYER_DISPLAY` on main is still `sdr`.
+It is the result of a spike (2026-11-03, with an eye check on 2026-11-04).
+Nothing here is shipped yet: `PLAYER_DISPLAY` on main is still `sdr`.
 
 ## Recommendation
 
-**Keep mpv's `gpu` renderer and give it an HDR surface (approach 3).** mpv
-renders PQ into a 10-bit window (`--egl-output-format=rgb10_a2`,
-`target-trc=pq`, `target-prim=bt.2020`, `target-peak=<display peak>`). The app
-then has to tag that output as BT.2020 PQ, because neither mpv nor a Java call
-on the `SurfaceView` can do it. The variant that works without an NDK, and
-was measured, is an **ImageReader relay**:
+**Keep mpv rendering and give it an HDR surface (approach 3).**
 
-- mpv renders into an `ImageReader` whose default dataspace is BT2020_PQ.
-- The app hands each buffer to a child `SurfaceControl` of the `SurfaceView`,
-  with that dataspace (API 33+).
+- **mpv's output.** mpv renders PQ into a 10-bit window on the GL context the
+  app already uses, with the same zero-copy MediaCodec decoding. Options:
+  `vo=gpu-next`, `--egl-output-format=rgb10_a2`, `target-trc=pq`,
+  `target-prim=bt.2020`, `target-peak=<display peak>`.
+- **Subtitle white.** Set `sub-hdr-peak` and `image-subs-hdr-peak` to the
+  same peak, so subtitles match the interface's white (checked by eye, see
+  below).
+- **Why gpu-next.** The `gpu` renderer works too, but it pins subtitle white
+  at 203 nits, and on this panel that looks grey next to the controls.
+- **The tag.** The app has to mark the output as BT.2020 PQ, because neither
+  mpv nor a Java call on the `SurfaceView` can. The variant that works
+  without an NDK, and was measured, is an **ImageReader relay**:
+  - mpv renders into an `ImageReader` whose default dataspace is BT2020_PQ.
+  - The app hands each buffer to a child `SurfaceControl` of the
+    `SurfaceView`, with that dataspace (API 33+).
 
 On the tablet this put a 2960x1848 RGBA_1010102 PQ layer on screen and
 DisplayManager switched the panel to HDR brightness. The hardware composer
-took the layer as an overlay. There were no drops, startup and seeks did not
-change, and the GPU did the same work as today's SDR path. mpv keeps drawing
-subtitles, OSD, deband and its scalers, so nothing the app relies on breaks.
+took the layer as an overlay. There were no drops, and startup and seeks did
+not change. With gpu-next the GPU did less work than today's SDR path. mpv
+keeps drawing subtitles, OSD, deband and its scalers, so nothing the app
+relies on breaks. PiP looked fine.
 
 The two other approaches lose more than they gain:
 
@@ -39,12 +47,12 @@ The two other approaches lose more than they gain:
   interop on Android (`hwdec_aimagereader`) is GL-only, so Vulkan would have
   to decode with `mediacodec-copy`, and that hands mpv **`nv12`**, 8 bits, for
   the 10-bit PQ downlink (measured). It also needs a custom native build that
-  upstream mpv-android does not do (`-Dvulkan=disabled` to this day). Its one
-  advantage, gpu-next applying Dolby Vision and HDR10+ itself, is moot here:
-  the server maps Dolby Vision for the display it is told about, and the
-  panel has no Dolby Vision.
+  upstream mpv-android does not do (`-Dvulkan=disabled` to this day).
+  gpu-next itself runs on the GL context without it. What Vulkan would add
+  is a swapchain that mpv tags itself, and the relay already does that.
 
-Before this ships, someone has to look at the panel (see "Still open").
+The panel was checked by eye on 2026-11-04 (see "Eye check"). The test card's
+patch-by-patch comparison is still open.
 
 ## What the tablet does with HDR
 
@@ -61,15 +69,22 @@ Adreno 740.
   DisplayManager logs `hbmMode=hdr` and raises the backlight to about 2.64x
   the current SDR level, whatever that is. Measured pairs (SDR nits → HDR
   nits): 57.6 → 151.9 in the dark, 97.6 → 259.9, 174.4 → 455.8,
-  188.4 → 484.0. 2.64 is 540/203: SDR white is treated as a 203-nit
-  reference, and the panel's 540-nit peak is only reached near full
-  brightness.
+  188.4 → 484.0, and 420 → 900 at full brightness. Up to there the ratio is
+  540/203. At the top it is capped at 2.14 (`brightnessMaximum 2.145`). The
+  reported 540 nits is not the panel's HDR ceiling.
+- **The interface is boosted with the picture.** SurfaceFlinger does no SDR
+  dimming (`whitePointNits=-1`, `dimmingRatio=1` on every layer), so the
+  controls' white rises with the backlight. By eye it matches PQ at the
+  display's 540-nit peak, not 203 nits: subtitles at 203 looked grey beside
+  the controls, and at 540 they matched. In relative terms the picture is
+  right: the video's diffuse white (203) sits at the old SDR level, with
+  highlights above it. What differs from a dimming platform is that the
+  interface is as bright as the highlights.
 - The HDR mode needs the HDR layer to cover half the screen
-  (`minimumHdrPercentOfScreenForHbm 0.5`). It is off in battery saver
-  (`HdrBrightnessData.allowInLowPowerMode false`).
-- SurfaceFlinger does no SDR dimming of its own (`whitePointNits=-1`,
-  `dimmingRatio=1` on every layer): Samsung's display pipeline balances the
-  UI against the HDR layer.
+  (`minimumHdrPercentOfScreenForHbm 0.5`). In PiP the layer stays HDR for
+  SurfaceFlinger (`numHdrLayers(1), size(971x606)`), but DisplayManager
+  drops the boost (`mIsHdrLayerPresent=false`). It is also off in battery
+  saver (`HdrBrightnessData.allowInLowPowerMode false`).
 
 ## How it was measured
 
@@ -91,10 +106,11 @@ Prototype branch `spike/android-hdr-output-prototype` (not for merging):
 - **Load sampler.** A host script read `kgsl` GPU busy %, the GPU clock and
   the app's CPU % once a second over 15 s of steady playback.
 
-The tablet was locked with a PIN, so the test activity showed over the
-keyguard (`setShowWhenLocked`). That has two consequences. Nobody looked at
-the panel during these runs. And picture-in-picture could not be entered
-(the layer stayed 2960x1848), so every PiP step below is **not measured**.
+For the first round (2026-11-03) the tablet was locked with a PIN, and the
+test activity showed over the keyguard (`setShowWhenLocked`). Over the
+keyguard, picture-in-picture could not be entered: the layer stayed
+2960x1848. The PiP results and the eye check come from a second round on
+2026-11-04, with the tablet unlocked and its owner watching.
 
 ### Results
 
@@ -108,7 +124,8 @@ to 10-bit BT.709.
 | today: `gpu`, 8-bit | sdr | RGBx_8888, V0_SRGB | no | 4.1 s, 4.5 s | 6.7 / 4.5 s | 0 | 27 % (475 MHz) | 32 % |
 | 2: `mediacodec_embed` | pq | vendor 10-bit (`0x7fa30c09`), BT2020_ITU_PQ, metadata types 3 | **yes** | 5.9 s, 2.8 s | 7.4 / 4.4 s | 0 | 0.1 % (220 MHz) | 33 % |
 | 3, untagged: `gpu`, rgb10_a2, PQ out | pq | RGBA_1010102, V0_SRGB | no (PQ read as sRGB) | 6.5 s | 7.6 / 4.4 s | 0 | 62 % (220 MHz) | 39 % |
-| **3, relay** | pq | RGBA_1010102, BT2020_PQ, no metadata | **yes** | 6.2 s | 7.6 / 4.4 s | 0 | 62 % (220 MHz) | 39 % |
+| 3, relay, `gpu` | pq | RGBA_1010102, BT2020_PQ, no metadata | **yes** | 6.2 s, 6.3 s | 7.6 / 4.4 s, 7.7 / 4.5 s | 0 | 62-66 % (220 MHz) | 38-39 % |
+| **3, relay, `gpu-next`** (`sub-hdr-peak=540`) | pq | RGBA_1010102, BT2020_PQ, no metadata | **yes** | 3.1 s, 4.7 s | 7.6 / 4.4 s | 0 | 50 % (220 MHz) | 39-40 % |
 | 1's decode: `gpu` + `mediacodec-copy` | pq | RGBx_8888, V0_SRGB; frames arrive as **nv12** | no | 3.7 s | 7.3 / 4.6 s | 0 | 30 % (220 MHz) | 44 % |
 
 - **Composition.** The hardware composer took every video layer as an
@@ -123,14 +140,39 @@ to 10-bit BT.709.
   The renderer changes none of it.
 - **GPU load.** The busy figure is relative to the clock the governor picked.
   Today's path ran at 475 MHz and both 10-bit PQ paths at the 220 MHz floor,
-  so the work is about the same: busy x clock is 128 against 136. The relay
-  adds nothing measurable over rendering PQ untagged.
+  so `gpu`'s work is about the same: busy x clock is 128 against 136-145.
+  gpu-next does less (110). The relay adds nothing measurable over rendering
+  PQ untagged.
 - **A/V sync.** `avsync` stayed under 0.05 ms on every path, so the drift
   watchdog's input is unchanged. Embed reports it too.
+- **PiP** (2026-11-04, unlocked). PiP was entered on the relay with `gpu`,
+  on the relay with gpu-next, on embed and on today's path. All four played
+  20 s in a 971x606 window with 0 drops and `avsync` under 0.05 ms. The PQ
+  layers stayed PQ, without the panel's HDR boost (see above).
+- **gpu-next's log.** gpu-next logs `[aimagereader] Waiting for frame timed
+  out!` / `acquireLatestImage failed: -30001` about once per load (5 times
+  over an open, two seeks and PiP), with no dropped frames. `gpu` never
+  logged it in the same run. Both paths log 3 `Audio device underrun`
+  warnings per such run, so those are not gpu-next's.
 
 The HDR test card (`HDR test card - 10000 nits.mkv`, HDR10, no audio) gave the
 same picture. It takes 7-9 s to start on any path because it streams at
 0.67 Mbps.
+
+### Eye check (2026-11-04)
+
+The tablet's owner watched each run, with a label in mpv's OSD naming the
+path:
+
+- **The test card**, 75 s each on the relay (`gpu`), on embed and on today's
+  path. Both HDR paths showed an HDR layer with no drops. The
+  patch-by-patch comparison was not reported (see "Still open").
+- **Subtitles**, on the episode on the relay with English subtitles:
+  - With `gpu`: "controls white was much brighter than the subtitles
+    (greyish)". `gpu` maps sRGB subtitle white to `MP_REF_WHITE`, a fixed
+    203 nits.
+  - With gpu-next and `sub-hdr-peak=540`: "subtitle white matches".
+- **PiP** (relay, embed and today's path): "pip window looks fine".
 
 ## Approach 1: a Vulkan libmpv (gpu-next, `androidvk`)
 
@@ -187,8 +229,8 @@ but `IMGFMT_MEDIACODEC`. From that:
   switches to `mediacodec-copy` instead and keeps hardware decoding. Getting
   the picture back means a new decoder on the new Surface, which is a
   reload.
-- **Untested here:** PiP (keyguard), and whether mpv re-creates the decoder
-  cleanly on a new Surface without a reload.
+- **PiP** played fine. Untested: whether mpv re-creates the decoder cleanly
+  on a new Surface without a reload.
 
 **A separate subtitle renderer** would have to cover what mpv does now:
 
@@ -220,6 +262,11 @@ reload. Not worth carrying.
   `eglCreateWindowSurface` and ignores `target-colorspace-hint`. The window's
   dataspace stays unknown, which SurfaceFlinger shows as V0_SRGB, and the PQ
   code values are shown as sRGB.
+- **gpu-next on the same GL context works** with zero-copy
+  `hwdec=mediacodec`, the same options and the relay. It offers what `gpu`
+  lacks: `sub-hdr-peak` and `image-subs-hdr-peak` place subtitle white
+  (`gpu` fixes it at 203 nits). It is also lighter on the GPU here. The
+  bundled libplacebo has no LittleCMS, which only matters for ICC profiles.
 - **`Window.setColorMode`** (not tried) sets the colour mode of the window's
   own HWUI surface. The video is on a separate `SurfaceView` layer, so it
   cannot tag the video.
@@ -249,9 +296,9 @@ reload. Not worth carrying.
     (540/203), SurfaceFlinger's HDR events read `desiredRatio(2.66)` instead
     of 49.26 (the PQ ceiling over 203). Samsung's brightness policy ignored
     it: the boost was the same 151.9 nits.
-  - Whether the panel's own tone mapping treats an untagged-range PQ layer
-    differently from embed's (which carries the stream's 10000-nit mastering
-    data) is for the eye check below.
+  - Whether the panel's own tone mapping treats the relay's metadata-less PQ
+    layer differently from embed's (which carries the stream's 10000-nit
+    mastering data) was not compared patch by patch.
   - If it matters, `ASurfaceTransaction_setHdrMetadata_smpte2086` and
     `_cta861_3` (NDK) on the same child layer would carry the target's
     range.
@@ -272,29 +319,35 @@ reload. Not worth carrying.
 - **Surface.** `MpvSurfaceView` owns the relay: reader, child layer and
   handler thread, all at the Surface's size. It gives mpv the reader's
   Surface only while the output is PQ. API 33 or later, else stay SDR.
-- **Mode switches.** `egl-output-format` and the `target-*` options take
-  effect when the VO is re-created. Switch them only between loads, the way
-  the desktop moves its render context. Each relay seek is already a reload.
+- **Mode switches.** `vo`, `egl-output-format` and the `target-*` options
+  take effect when the VO is re-created. Switch them only between loads, the
+  way the desktop moves its render context. Each relay seek is already a
+  reload.
 - **Teardown.** The reader is a new owner under the hard rule on retiring
   owners: detach mpv (`vo=null`) and await the command queue before closing
   the reader and releasing the child layer.
-- **Subtitles and OSD.** mpv draws them into the PQ output at its SDR
-  reference white. They should match the interface's white, but nobody has
-  looked yet.
+- **Subtitles and OSD.** Set `sub-hdr-peak` and `image-subs-hdr-peak` to the
+  level where the interface's white lands:
+  - the display peak here, where nothing dims SDR layers;
+  - 203 nits (`sdr`) on a platform whose SurfaceFlinger dims them, which
+    shows up as a real `whitePointNits` on the layers.
+- **The SDR path.** Whether the SDR path moves to gpu-next too is a separate
+  decision. `profile=fast`, `dither`, `deband` and the interpolation options
+  all exist there, but gpu-next was measured here on HDR output only.
 
 ## Upgrading mpv-android (2026-04-25 → 2026-09-17)
 
-Changes nothing for HDR. Between the pinned mpv (`v0.41.0-556-g9ce79bcaa`)
-and mid-September:
+It changes nothing about what can be shown. Between the pinned mpv
+(`v0.41.0-556-g9ce79bcaa`) and mid-September:
 
 - The Android GL context, `vo_mediacodec_embed` and the EGL helpers are
   untouched.
-- `hwdec_aimagereader` only got better error handling and `maxImages` 3.
+- `hwdec_aimagereader` got better error handling and `maxImages` 3. That is
+  the code behind gpu-next's once-per-load "Waiting for frame timed out", so
+  if gpu-next is adopted, retest it on the upgrade.
 - mpv-android's build still disables Vulkan (also at HEAD, 2026-10-30). Its
   other changes are library bumps (FFmpeg n9.0.2, NDK), target API 36 and
   UI work.
-
-Upgrade for its own sake, not for this.
 
 ## When `display_target` should be `pq`
 
@@ -315,7 +368,7 @@ seek took 4.3-7.6 s on this link.
 
 Leave `sdr_white_nits` out: Android reports no SDR white, and the panel
 anchors SDR white to 203 nits under the slider. mpv takes the same peak as
-`target-peak`.
+`target-peak`, `sub-hdr-peak` and `image-subs-hdr-peak`.
 
 **Back to `sdr`:**
 
@@ -326,33 +379,34 @@ anchors SDR white to 203 nits under the slider. mpv takes the same peak as
   monitor or a cast. Re-check on `DisplayManager.DisplayListener` /
   `onConfigurationChanged` and on each open and seek. An HDR monitor keeps
   `pq` with its own peak. Unmeasured: no external monitor was attached.
-- **PiP: decide after measuring.** The boost needs the HDR layer on half the
-  screen, so a PiP window will not get it. Whether a PQ layer then looks
-  wrong, or only dim, has to be seen. Every switch costs a reload as the
-  window shrinks, so stay `pq` unless it looks wrong. The relay itself
-  presented fine wherever the layer was shown.
 - **Anything else** that ends HDR presentation: the setting is turned off,
   or the display's HDR capabilities change.
 
+**PiP stays `pq`.** The panel drops its HDR boost for the small window, but
+the PQ layer still played with no drops and in sync, and it looked fine
+(2026-11-04). A switch would cost a reload just as the window shrinks.
+
 ## Still open
 
-- **The eye check.** Someone has to unlock the tablet and look, on the HDR
-  test card, comparing the relay and `mediacodec_embed`:
-  - Patches above SDR white should be brighter than the interface's white.
-  - 203 nits should match the interface's white.
-  - 540 and above should bunch at the top (mpv tone-maps above 540).
-  - Subtitles in the PQ output should match the interface's white.
-  - The relay's missing static metadata must not dim the picture.
-  Then run the same check in PiP.
-- **Not measured** (keyguard or fixtures):
-  - PiP;
+- **The test card, patch by patch.** On this panel the interface is boosted
+  along with the picture, so the right expectations are:
+  - On the relay and embed, patches from 203 nits up get brighter step by
+    step.
+  - 540 and above match the controls' white, since mpv and the panel
+    tone-map above it.
+  - 203 sits at the brightness of today's tone-mapped white.
+  - The relay without static metadata looks the same as embed with it.
+  The subtitle and PiP checks are done.
+- **Not measured** (fixtures or hardware):
   - background and return;
   - battery saver;
   - DeX;
   - HLG and HDR10+ through each path.
-- **Pre-existing, not HDR** (seen on today's path too, under the test with
-  the keyguard up). With background playback on, the drift watchdog reloaded
-  the epoch ("resyncing playback: 4.7s A/V error") while no Surface existed.
-  The load waited for a Surface, and the controller failed after 30 s with
-  `CONNECT_TIMEOUT`. On return the player sat in LOADING. Worth checking by
-  hand on an unlocked tablet.
+- **Background stall, unconfirmed and not HDR-related.** Under the test
+  with the keyguard up, today's path showed it too. With background playback
+  on, the drift watchdog reloaded the epoch ("resyncing playback: 4.7s A/V
+  error") while no Surface existed. The load waited for a Surface, and the
+  controller failed after 30 s with `CONNECT_TIMEOUT`. On return the player
+  sat in LOADING. With the tablet unlocked, the test could not stop the
+  activity at all: `ActivityScenario` never got past PAUSED. So this is only
+  known from the keyguard runs, and needs checking by hand.

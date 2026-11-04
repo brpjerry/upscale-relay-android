@@ -5,9 +5,10 @@
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
 `passthrough`, `hevc-qp4`, 2960x1848 cover. The setup and full table are in
 docs/HDR_OUTPUT.md; the prototype is on branch
-`spike/android-hdr-output-prototype`. The tablet was locked, so the test
-activity ran over the keyguard: nobody looked at the panel, and PiP could
-not be entered.
+`spike/android-hdr-output-prototype`. On the first day the tablet was locked,
+and the test activity ran over the keyguard, where PiP cannot be entered.
+PiP and the eye check were done on 2026-11-04, unlocked, with the owner
+watching.
 
 - **HDR shown.** `vo=mediacodec_embed` and the ImageReader relay (mpv's
   RGBA_1010102 PQ output, presented with a BT2020_PQ dataspace) both put an
@@ -27,10 +28,20 @@ not be entered.
 - **Panel behaviour.** HDR raises the backlight to about 2.64x the current
   SDR brightness (57.6 → 151.9 nits in the dark, 174.4 → 455.8 in light),
   not to a fixed 540 nits.
-- **Background playback.** Backgrounding with it on stalled today's path and
-  embed alike. The drift watchdog reloaded without a Surface, and the
-  controller timed out after 30 s. Embed had also fallen back to software
-  decoding.
+- **Subtitles.** In PQ output, mpv's `gpu` renderer draws subtitle white at
+  a fixed 203 nits, which looked grey beside the boosted controls. gpu-next
+  with `sub-hdr-peak=540` matched them. gpu-next also ran the GPU at 50 % of
+  220 MHz with no drops. It logs an AImageReader "waiting for frame timed
+  out" about once per load.
+- **PiP.** The 971x606 window played with 0 drops on every path and "looks
+  fine". The panel drops its HDR boost there (`mIsHdrLayerPresent=false`),
+  though SurfaceFlinger still counts an HDR layer.
+- **Panel peak.** At full brightness the HDR level read 900 nits.
+- **Background playback.** Under the keyguard, backgrounding with it on
+  stalled today's path and embed alike. The drift watchdog reloaded without a
+  Surface, and the controller timed out after 30 s. Embed had also fallen
+  back to software decoding. With the tablet unlocked the test could not
+  stop the activity, so this is unconfirmed.
 
 ## Local HDR sources and "Use 10 bit video" — 2026-11-03
 

@@ -339,8 +339,11 @@ release.yml` builds and publishes the signed APK with those notes.
   so mpv tone-maps, and dithers the result to the 8-bit surface
   (`dither=fruit`, which `profile=fast` would otherwise turn off). The spike
   (docs/HDR_OUTPUT.md, 2026-11-03) showed HDR on the panel two ways and
-  recommends keeping mpv's `gpu` renderer with a 10-bit PQ output that the
-  app tags (an ImageReader relay to a child `SurfaceControl`). It rules out
+  recommends mpv's gpu-next on the existing GL context with a 10-bit PQ
+  output that the app tags (an ImageReader relay to a child
+  `SurfaceControl`). `sub-hdr-peak` goes at the display peak: Samsung boosts
+  the interface along with the picture, and subtitles at 203 nits looked
+  grey. It rules out
   `vo=mediacodec_embed`, which drops mpv's subtitles. It also rules out a
   Vulkan build: mpv's MediaCodec interop is GL-only, and copy-back delivers
   8-bit `nv12`. Not implemented yet.
