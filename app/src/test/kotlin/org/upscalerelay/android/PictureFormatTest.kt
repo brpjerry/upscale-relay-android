@@ -48,12 +48,20 @@ class PictureFormatTest {
 
     @Test
     fun `deep colour and HDR are named by depth and transfer`() {
-        assertEquals("10-bit HDR", session(10, pq).pictureSummary())
+        // mpv tone-maps every HDR stream here, and the top bar says so.
+        assertEquals("10-bit HDR, shown as SDR", session(10, pq).pictureSummary())
         assertEquals("10-bit PQ", session(10, pq).pictureDiagnostics())
         assertEquals("10-bit HLG", session(10, hlg).pictureDiagnostics())
         assertEquals("10-bit", session(10, bt709).pictureSummary())
         // A tier with no 10-bit encoder keeps an HDR source's tags at 8 bits.
-        assertEquals("8-bit HDR", session(8, pq).pictureSummary())
+        assertEquals("8-bit HDR, shown as SDR", session(8, pq).pictureSummary())
+    }
+
+    @Test
+    fun `an unspecified or unknown transfer is not called SDR`() {
+        assertEquals("8-bit transfer unspecified", session(color = VideoColor(2, 2, 2)).pictureDiagnostics())
+        assertEquals("8-bit transfer 3", session(color = VideoColor(1, 3, 1)).pictureDiagnostics())
+        assertEquals("8-bit SDR", session(color = VideoColor(1, 13, 1)).pictureDiagnostics())
     }
 
     @Test
@@ -61,13 +69,33 @@ class PictureFormatTest {
         val dolbyVision = session(10, bt709, mapped("dolby_vision"))
         assertEquals("10-bit · Dolby Vision applied by the server", dolbyVision.pictureSummary())
         assertEquals("10-bit SDR (Dolby Vision mapped)", dolbyVision.pictureDiagnostics())
+        assertEquals("10-bit colour unknown (Dolby Vision mapped)", session(10, null, mapped("dolby_vision")).pictureDiagnostics())
         assertEquals(
             "Dolby Vision and HDR10+",
             session(10, bt709, mapped("dolby_vision", "hdr10plus")).appliedDynamicHdr(),
         )
         assertEquals("future_metadata", session(10, bt709, mapped("future_metadata")).appliedDynamicHdr())
         // A mapped session's epoch that applied nothing streams as it is.
-        assertEquals("10-bit HDR", session(10, pq, mapped()).pictureSummary())
+        assertEquals("10-bit HDR, shown as SDR", session(10, pq, mapped()).pictureSummary())
         assertNull(session(10, pq, mapped()).appliedDynamicHdr())
+    }
+
+    @Test
+    fun `the top bar joins the session description and the picture's`() {
+        val hdr = session(10, pq)
+        assertEquals(
+            "passthrough · hevc-qp4 · 2960×1848 · 10-bit HDR, shown as SDR",
+            RelayUiState(sessionDescription = "passthrough · hevc-qp4 · 2960×1848", session = hdr).playerDescription(),
+        )
+        assertEquals("10-bit HDR, shown as SDR", RelayUiState(session = hdr).playerDescription())
+        assertEquals("passthrough", RelayUiState(sessionDescription = "passthrough", session = session()).playerDescription())
+        assertEquals("", RelayUiState().playerDescription())
+    }
+
+    @Test
+    fun `the original file playing directly is not described by the retired downlink`() {
+        val fallback = RelayUiState(sessionDescription = "passthrough", session = session(10, pq), directLocalFallback = true)
+        assertNull(fallback.relaySession)
+        assertEquals("passthrough", fallback.playerDescription())
     }
 }

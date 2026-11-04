@@ -111,6 +111,12 @@ class ColorMessagesTest {
         assertEquals(listOf("hdr10plus"), toSdr.downlinkMapping!!.applied)
         // A mapping without colour keeps the colour the session had.
         assertEquals(pq, mapped.describedBy(json("""{"type":"seek_ready","epoch":3,"downlink_mapping":{"transfer":"pq","applied":[]}}""")).downlinkColor)
+        // One that says the colour is null, or garbles it, makes it unknown for the new epoch.
+        for (color in listOf("null", "\"pq\"", """{"primaries":9}""")) {
+            assertNull(color, mapped.describedBy(json(
+                """{"type":"seek_ready","epoch":3,"downlink_color":$color,"downlink_mapping":{"transfer":"sdr","applied":[]}}""",
+            )).downlinkColor)
+        }
         // An unmapped session's seek_ready carries neither field.
         assertSame(mapped, mapped.describedBy(json("""{"type":"seek_ready","epoch":3}""")))
     }

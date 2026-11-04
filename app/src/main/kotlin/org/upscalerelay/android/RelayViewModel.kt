@@ -1582,7 +1582,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = DOWNLINK_DEPTH,
+                        highBitDepth = downlinkDepth(landscape.display),
                         displayTarget = PLAYER_DISPLAY,
                     )
                     pendingSource = null // controller now owns the source
@@ -1678,7 +1678,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = landscape.qualityTier,
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = DOWNLINK_DEPTH,
+                        highBitDepth = downlinkDepth(landscape.display),
                         displayTarget = PLAYER_DISPLAY,
                     )
                 }
@@ -2421,7 +2421,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 qualityTier = tier,
                 fitMode = state.fitMode,
                 resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
-                highBitDepth = DOWNLINK_DEPTH,
+                highBitDepth = downlinkDepth(state.display),
                 displayTarget = PLAYER_DISPLAY,
             )
             is PlaybackOrigin.LocalDocument -> {
@@ -2449,7 +2449,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         qualityTier = tier,
                         fitMode = state.fitMode,
                         resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
-                        highBitDepth = DOWNLINK_DEPTH,
+                        highBitDepth = downlinkDepth(state.display),
                         displayTarget = PLAYER_DISPLAY,
                     ).also { pendingSource = null }
                 } finally {
@@ -3123,7 +3123,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("coded_width", mpv.codedWidth)
                 put("coded_height", mpv.codedHeight)
                 // What the server sent (PROTOCOL.md §3.5, §3.6) and what mpv reads it as.
-                val session = state.session
+                val session = state.relaySession
                 put("downlink_bit_depth", session?.downlinkBitDepth)
                 put("downlink_color", session?.downlinkColor?.toJson() ?: JsonNull)
                 put("downlink_dolby_vision", session?.downlinkDolbyVision)
@@ -3325,6 +3325,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
          * the desktop (PROTOCOL.md §3.5); every other source stays 8-bit.
          */
         private val DOWNLINK_DEPTH = HighBitDepth.HDR
+
+        /**
+         * [DOWNLINK_DEPTH] where a hardware decoder takes the 10-bit downlink
+         * at [display]; nothing elsewhere, so the session stays 8-bit and
+         * names no display either (the server maps only deep colour).
+         */
+        private fun downlinkDepth(display: DisplaySize): HighBitDepth? =
+            DOWNLINK_DEPTH.takeIf { decodesHevcMain10(display) }
 
         /**
          * The display named to a server that maps Dolby Vision and HDR10+

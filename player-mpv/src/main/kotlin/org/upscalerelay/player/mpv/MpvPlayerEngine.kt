@@ -306,6 +306,12 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         val options = mapOf(
             "config" to "no",
             "profile" to "fast",
+            // The fast profile turns dithering off (dither=no, which no
+            // dither-depth overrides). A 10-bit downlink then reaches the
+            // 8-bit surface truncated and its gradients band. mpv's default
+            // algorithm, to the depth the surface reports.
+            "dither" to "fruit",
+            "dither-depth" to "auto",
             "vo" to VIDEO_OUTPUT,
             "gpu-context" to "android",
             "opengl-es" to "yes",
@@ -508,8 +514,11 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * seek that has buffered nothing still reads as several seconds full,
      * and the buffer report hands the server that same stale number.
      *
-     * Only stream-scoped progress is reset. Track/codec identity, cumulative
-     * drop counters, and user-owned delays survive the reload.
+     * Only stream-scoped progress is reset, with the picture's description:
+     * each epoch can carry another colour, and the retired one's "unavailable"
+     * reports arrive while the load is still dropping events. Track/codec
+     * identity, cumulative drop counters, and user-owned delays survive the
+     * reload.
      */
     private fun resetStreamMetricsLocked() {
         metrics = metrics.copy(
@@ -520,7 +529,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             positionSeconds = 0.0,
             avSyncSeconds = 0.0,
             audioPtsSeconds = 0.0,
-        )
+        ).withoutVideoParams()
     }
 
     private fun observeMetrics() {
@@ -569,7 +578,11 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         attachedSurface = null
     }
 
-    override fun eventProperty(property: String) = Unit
+    /** A property that went unavailable: the picture's description must not outlive its frames. */
+    override fun eventProperty(property: String): Unit = synchronized(lock) {
+        if (closed || nativeGeneration != loadGeneration || awaitingStart) return
+        metrics = metrics.withoutVideoParam(property)
+    }
 
     override fun eventProperty(property: String, value: Long): Unit = synchronized(lock) {
         if (closed || nativeGeneration != loadGeneration || awaitingStart) return
@@ -858,3 +871,22 @@ data class MpvMetrics(
     val videoPrimaries: String = "",
     val videoSignalPeak: Double = 0.0,
 )
+
+/** The picture's description cleared, as before the first frame of a stream. */
+internal fun MpvMetrics.withoutVideoParams(): MpvMetrics = copy(
+    videoPixelFormat = "",
+    videoHwPixelFormat = "",
+    videoGamma = "",
+    videoPrimaries = "",
+    videoSignalPeak = 0.0,
+)
+
+/** One observed video-params property cleared, for mpv reporting it unavailable; anything else is kept. */
+internal fun MpvMetrics.withoutVideoParam(property: String): MpvMetrics = when (property) {
+    "video-params/pixelformat" -> copy(videoPixelFormat = "")
+    "video-params/hw-pixelformat" -> copy(videoHwPixelFormat = "")
+    "video-params/gamma" -> copy(videoGamma = "")
+    "video-params/primaries" -> copy(videoPrimaries = "")
+    "video-params/sig-peak" -> copy(videoSignalPeak = 0.0)
+    else -> this
+}

@@ -7,7 +7,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
@@ -16,6 +15,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 data class DisplaySize(val width: Int, val height: Int) {
     init {
@@ -438,12 +438,18 @@ data class SessionInfo(
      * session each epoch says what it carries, and an epoch made for another
      * display can switch between PQ and SDR (§3.6); other sessions' epochs
      * keep the session's colour, and their seek_ready says nothing of it.
+     * A colour the seek_ready reports as null or malformed is unknown for the
+     * new epoch; only an omitted one keeps the session's.
      */
     fun describedBy(seekReady: JsonObject): SessionInfo {
         if ("downlink_mapping" !in seekReady) return this
         return copy(
             downlinkMapping = DownlinkMapping.fromJson(seekReady["downlink_mapping"]),
-            downlinkColor = VideoColor.fromJson(seekReady["downlink_color"]) ?: downlinkColor,
+            downlinkColor = if ("downlink_color" in seekReady) {
+                VideoColor.fromJson(seekReady["downlink_color"])
+            } else {
+                downlinkColor
+            },
         )
     }
 
