@@ -1,5 +1,37 @@
 # Android device validation notes
 
+## HDR output spike — 2026-11-03
+
+Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
+`passthrough`, `hevc-qp4`, 2960x1848 cover. The setup and full table are in
+docs/HDR_OUTPUT.md; the prototype is on branch
+`spike/android-hdr-output-prototype`. The tablet was locked, so the test
+activity ran over the keyguard: nobody looked at the panel, and PiP could
+not be entered.
+
+- **HDR shown.** `vo=mediacodec_embed` and the ImageReader relay (mpv's
+  RGBA_1010102 PQ output, presented with a BT2020_PQ dataspace) both put an
+  HDR layer on screen. Each showed `mIsHdrLayerPresent=true`, SurfaceFlinger's
+  `numHdrLayers(1)` at 2960x1848, and `hbmMode=hdr` in DisplayManager's
+  brightness log. Both had no drops, and the composer took the layer as an
+  overlay.
+- **Not shown.** mpv's PQ output untagged, and a
+  `SurfaceControl.Transaction.setDataSpace` on the `SurfaceView` (it lands on
+  the container layer), stayed V0_SRGB.
+- **Startup and seeks** (2.8-6.5 s, 4.3-7.6 s) were the same on every path
+  within run-to-run noise.
+- **GPU load.** The 10-bit PQ paths ran the GPU at 62 % of 220 MHz, today's
+  path at 27 % of 475 MHz. `mediacodec_embed` left it idle.
+- **10-bit frames lost on copy-back.** `hwdec=mediacodec-copy` gives mpv the
+  10-bit PQ downlink as `nv12`.
+- **Panel behaviour.** HDR raises the backlight to about 2.64x the current
+  SDR brightness (57.6 → 151.9 nits in the dark, 174.4 → 455.8 in light),
+  not to a fixed 540 nits.
+- **Background playback.** Backgrounding with it on stalled today's path and
+  embed alike. The drift watchdog reloaded without a Surface, and the
+  controller timed out after 30 s. Embed had also fallen back to software
+  decoding.
+
 ## Local HDR sources and "Use 10 bit video" — 2026-11-03
 
 Galaxy Tab S9 Ultra, Android 16, against the relay at 192.168.0.115:8590 on
