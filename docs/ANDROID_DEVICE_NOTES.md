@@ -17,7 +17,7 @@ What MediaExtractor reports, and so what the uplink sends:
 | `dv81.mkv` (Dolby Vision 8.1, dvvC) | plain `video/hevc`, no record | PQ, 10 bits, Dolby Vision 8 / level 6 / compatibility 1 (`MatroskaDolbyVision`) |
 | `dv81.mp4` | two tracks: `video/dolby-vision` (record in `csd-2`, `bl_compatibility_id`), then `video/hevc` | the same, reading the HEVC track |
 | `sdr10-hevc.mkv` | range 2 and bits-per-sample 10, no transfer | 10 bits, no colour |
-| `sdr10-h264.mkv` (High 10) | profile 16, a hidden standard (71), no transfer or bits-per-sample | 10 bits from the profile, no colour |
+| `sdr10-h264.mkv` (High 10) | profile 16, a hidden standard (71), no transfer or bits-per-sample | no colour and no depth: High 10 allows 8 bits too |
 
 A Matroska file tagged PQ in its Colour element but HLG in its HEVC VUI
 read as HLG: MediaExtractor's colour is the bitstream's where it sets one.
@@ -41,6 +41,11 @@ Two local-file bugs found on the way, both older than HDR:
 
 No HDR10+ fixture was available, so an uplink's `video.hdr10plus` is covered
 by unit tests only.
+
+Rerun on the auto-review's fixes (track choice by track id, no guessed
+depths, the HDR10+ probe on its own thread): every relay test passed again,
+with the same downlinks, and the edit-list MP4 was 0.007 ms apart at 5.7 s
+with no drops.
 
 ## 10-bit HDR downlink and SDR display mapping — 2026-11-03
 
