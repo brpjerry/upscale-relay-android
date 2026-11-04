@@ -1,11 +1,17 @@
 package org.upscalerelay.client
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.upscalerelay.protocol.VideoColor
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** open_session.video.hdr10plus from the first keyframe (PROTOCOL.md §3.6). */
 class Hdr10PlusProbeTest {
@@ -58,6 +64,30 @@ class Hdr10PlusProbeTest {
         assertFalse(Source(info(), late).firstKeyframeHdr10Plus())
         assertFalse(Source(info(), emptyList(), failure = IOException("provider gone")).firstKeyframeHdr10Plus())
         assertFalse(Source(info(), emptyList()).firstKeyframeHdr10Plus())
+    }
+
+    @Test
+    fun `cancelling a probe stuck in a provider read closes the source and returns`() = runBlocking {
+        val reading = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        val stuck = object : UplinkMediaSource {
+            override val videoInfo = info()
+            override fun openPacketReader(fromPts: Long?) = object : UplinkPacketReader {
+                // A document provider that stops answering until its descriptor closes.
+                override fun read(): UplinkAccessUnit? {
+                    reading.countDown()
+                    closed.await()
+                    throw IOException("descriptor closed")
+                }
+                override fun close() = Unit
+            }
+            override fun close() = closed.countDown()
+        }
+        val probe = launch(Dispatchers.Default) { stuck.probeFirstKeyframeHdr10Plus() }
+        assertTrue(reading.await(5, TimeUnit.SECONDS))
+        probe.cancel()
+        withTimeout(5_000) { probe.join() }
+        assertEquals(0L, closed.count)
     }
 
     @Test

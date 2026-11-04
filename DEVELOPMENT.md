@@ -117,9 +117,12 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby
-  Vision) and, against the real relay, what comes back. Its last test plays
-  the first fixture, which should be a 10-bit SDR one, under "Use 10 bit
-  video". The fixtures it knows are cut from the server's files with ffmpeg
+  Vision) and, against the real relay, what comes back.
+  `tenBitVideoWidensAnSdrSourceAndTurningItOffRestarts` plays the first
+  fixture, which should be a 10-bit SDR one, under "Use 10 bit video".
+  `anMp4StartingBeforeZeroPlaysInSync` needs `-e editListFixture` with an MP4
+  whose samples start before zero (`dv81.mp4`). The fixtures it knows are cut
+  from the server's files with ffmpeg
   (`-c copy` for `dv81.mkv`/`.mp4`, `sdr10-hevc.mkv`, `sdr10-h264.mkv` and
   `hdr10-card.mkv`). `hlg.mkv` and `hdr10-container.mkv` are re-encoded with
   `libx265` and `setparams` (the frames' tags win over `-color_trc`), and

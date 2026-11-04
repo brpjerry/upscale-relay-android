@@ -66,32 +66,39 @@ class AndroidMediaSource private constructor(
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(pfd.fileDescriptor)
-                    fun mimeOf(index: Int) = extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
-                    val videoTracks = (0 until extractor.trackCount).filter { mimeOf(it)?.startsWith("video/") == true }
-                    if (videoTracks.isEmpty()) error("The selected document has no video track")
-                    // A Dolby Vision MP4 lists its samples twice: as
-                    // video/dolby-vision, with the configuration record in
-                    // csd-2, and as its base layer's codec (verified on the
-                    // Tab S9 Ultra). The server decodes the base layer and
-                    // takes the RPU from the samples, so that track is read.
-                    val dolbyVisionTrack = videoTracks.firstOrNull {
-                        mimeOf(it) == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION
+                    val videoTracks = (0 until extractor.trackCount).mapNotNull { index ->
+                        val trackFormat = extractor.getTrackFormat(index)
+                        trackFormat.getString(MediaFormat.KEY_MIME)?.takeIf { it.startsWith("video/") }?.let { mime ->
+                            ExtractorVideoTrack(index, mime, trackFormat.intOrNull(MediaFormat.KEY_TRACK_ID))
+                        }
                     }
-                    val dolbyVisionFormat = dolbyVisionTrack?.let(extractor::getTrackFormat)
-                    val videoTrack = videoTracks.firstOrNull { codecName(mimeOf(it)) != null }
-                        ?: dolbyVisionTrack
-                        ?: error("Unsupported local video codec: ${mimeOf(videoTracks.first())}")
-                    val format = extractor.getTrackFormat(videoTrack)
-                    val mime = requireNotNull(format.getString(MediaFormat.KEY_MIME))
+                    if (videoTracks.isEmpty()) error("The selected document has no video track")
+                    // A first video track that is a Dolby Vision view carries
+                    // the configuration record in csd-2 (MP4); a Matroska
+                    // file's sits in its BlockAdditionMapping.
+                    val dolbyVisionFormat = videoTracks.first()
+                        .takeIf { it.mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION }
+                        ?.let { extractor.getTrackFormat(it.index) }
                     val dolbyVision = dolbyVisionFormat?.byteBufferOrNull("csd-2")?.let(DolbyVisionConfig::fromRecord)
                         ?: readMatroskaDolbyVision(resolver, uri)
-                    val codec = codecName(mime)
-                        ?: dolbyVision?.let { dolbyVisionBaseCodec(it.profile) }
-                        ?: dolbyVisionBaseCodecOfPlatformProfile(format.intOrNull(MediaFormat.KEY_PROFILE))
+                    val dolbyVisionBase = dolbyVisionFormat?.let { dvFormat ->
+                        dolbyVision?.let { dolbyVisionBaseCodec(it.profile) }
+                            ?: dolbyVisionBaseCodecOfPlatformProfile(dvFormat.intOrNull(MediaFormat.KEY_PROFILE))
+                    }
+                    val videoTrack = chooseVideoTrack(videoTracks, dolbyVisionBase).read
+                    val format = extractor.getTrackFormat(videoTrack)
+                    val mime = requireNotNull(format.getString(MediaFormat.KEY_MIME))
+                    val readingDolbyVisionView = mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION
+                    val codec = serverCodecName(mime)
+                        ?: dolbyVisionBase?.takeIf { readingDolbyVisionView }
+                        ?: error("Unsupported local video codec: $mime")
                     val durationUs = format.longOrNull(MediaFormat.KEY_DURATION)
                     val fps = format.intOrNull(MediaFormat.KEY_FRAME_RATE)
                     val extradata = (0..3).mapNotNull { index ->
-                        format.byteBufferOrNull("csd-$index")
+                        // A Dolby Vision view's csd-2 is its configuration
+                        // record, not the base codec's: appended to the
+                        // parameter sets it would corrupt the last of them.
+                        if (readingDolbyVisionView && index == 2) null else format.byteBufferOrNull("csd-$index")
                     }.fold(ByteArray(0)) { left, right -> left + right }.takeIf(ByteArray::isNotEmpty)
                     val chapters = readChapters(resolver, uri)
                     // MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT (API 30)
@@ -134,7 +141,7 @@ class AndroidMediaSource private constructor(
                             bitDepth = sourceBitDepth(
                                 bitsPerSample = format.intOrNull(KEY_BITS_PER_SAMPLE),
                                 codec = codec,
-                                profile = if (mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION) null
+                                profile = if (readingDolbyVisionView) null
                                 else format.intOrNull(MediaFormat.KEY_PROFILE),
                             ),
                             staticHdr = staticHdrFromCta861(
@@ -193,17 +200,6 @@ class AndroidMediaSource private constructor(
                     }
                 }
             }.getOrNull()
-
-        /** The server's name for a codec MediaExtractor names; null for one it cannot take. */
-        private fun codecName(mime: String?): String? = when (mime) {
-            MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"
-            MediaFormat.MIMETYPE_VIDEO_AVC -> "h264"
-            MediaFormat.MIMETYPE_VIDEO_AV1 -> "av1"
-            MediaFormat.MIMETYPE_VIDEO_VP9 -> "vp9"
-            MediaFormat.MIMETYPE_VIDEO_MPEG2 -> "mpeg2video"
-            MediaFormat.MIMETYPE_VIDEO_MPEG4 -> "mpeg4"
-            else -> null
-        }
 
         /** MediaExtractor's depth for HEVC (from the parameter sets); not a public key. */
         private const val KEY_BITS_PER_SAMPLE = "bits-per-sample"

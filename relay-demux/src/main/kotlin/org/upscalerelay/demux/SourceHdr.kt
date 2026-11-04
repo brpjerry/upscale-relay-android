@@ -1,6 +1,7 @@
 package org.upscalerelay.demux
 
 import android.media.MediaCodecInfo.CodecProfileLevel
+import android.media.MediaFormat
 import org.upscalerelay.protocol.ContentLightLevel
 import org.upscalerelay.protocol.MasteringDisplay
 import org.upscalerelay.protocol.StaticHdrMetadata
@@ -70,8 +71,12 @@ internal fun platformColor(standard: Int?, transfer: Int?, range: Int?): VideoCo
 
 /**
  * Bits per sample of the decoded format: MediaExtractor's bits-per-sample
- * where it reports one (HEVC), else what the codec profile implies. Null
- * when neither tells, such as H.264 High 4:2:2, which allows 8 bits or more.
+ * where it reports one (HEVC), else what a codec profile fixes. Null where
+ * neither tells: HEVC Main 10 and H.264 High 10 allow 8 bits too, VP9
+ * profiles 2 and 3 allow 10 or 12, and H.264 High 4:2:2 allows 8 or more.
+ * The server reads an HEVC uplink's depth from its parameter sets where this
+ * is absent, and otherwise only reports it back (session_opened
+ * source_bit_depth): the downlink's depth follows the colour and the request.
  */
 internal fun sourceBitDepth(bitsPerSample: Int?, codec: String, profile: Int?): Int? {
     bitsPerSample?.takeIf { it in 8..16 }?.let { return it }
@@ -79,22 +84,16 @@ internal fun sourceBitDepth(bitsPerSample: Int?, codec: String, profile: Int?): 
     return when (codec) {
         "hevc" -> when (profile) {
             CodecProfileLevel.HEVCProfileMain, CodecProfileLevel.HEVCProfileMainStill -> 8
-            CodecProfileLevel.HEVCProfileMain10, CodecProfileLevel.HEVCProfileMain10HDR10,
-            CodecProfileLevel.HEVCProfileMain10HDR10Plus -> 10
             else -> null
         }
         "h264" -> when (profile) {
             CodecProfileLevel.AVCProfileBaseline, CodecProfileLevel.AVCProfileConstrainedBaseline,
             CodecProfileLevel.AVCProfileMain, CodecProfileLevel.AVCProfileExtended,
             CodecProfileLevel.AVCProfileHigh, CodecProfileLevel.AVCProfileConstrainedHigh -> 8
-            CodecProfileLevel.AVCProfileHigh10 -> 10
             else -> null
         }
         "vp9" -> when (profile) {
             CodecProfileLevel.VP9Profile0, CodecProfileLevel.VP9Profile1 -> 8
-            CodecProfileLevel.VP9Profile2, CodecProfileLevel.VP9Profile3,
-            CodecProfileLevel.VP9Profile2HDR, CodecProfileLevel.VP9Profile3HDR,
-            CodecProfileLevel.VP9Profile2HDR10Plus, CodecProfileLevel.VP9Profile3HDR10Plus -> 10
             else -> null
         }
         "av1" -> when (profile) {
@@ -150,6 +149,42 @@ internal fun dolbyVisionBaseCodec(profile: Int): String? = when (profile) {
     in 2..8 -> "hevc"
     10 -> "av1"
     else -> null
+}
+
+/** The server's name for a codec MediaExtractor names; null for one it cannot take. */
+internal fun serverCodecName(mime: String?): String? = when (mime) {
+    MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"
+    MediaFormat.MIMETYPE_VIDEO_AVC -> "h264"
+    MediaFormat.MIMETYPE_VIDEO_AV1 -> "av1"
+    MediaFormat.MIMETYPE_VIDEO_VP9 -> "vp9"
+    MediaFormat.MIMETYPE_VIDEO_MPEG2 -> "mpeg2video"
+    MediaFormat.MIMETYPE_VIDEO_MPEG4 -> "mpeg4"
+    else -> null
+}
+
+/** A video track as MediaExtractor lists it. */
+internal data class ExtractorVideoTrack(val index: Int, val mime: String?, val trackId: Int?)
+
+/** The track whose samples are uplinked, and the Dolby Vision view of the file's video, if it has one. */
+internal data class VideoTrackChoice(val read: Int, val dolbyVisionView: Int?)
+
+/**
+ * The file's first video track, as before Dolby Vision: the one the
+ * Matroska readers also describe. When it is a Dolby Vision view
+ * (video/dolby-vision), its base layer's view is read instead if the file
+ * lists one: the same track id in the base codec, [dolbyVisionBase]. A
+ * Dolby Vision MP4 lists its samples that way on the Tab S9 Ultra, and the
+ * server decodes the base layer and takes the RPU from the samples. Another
+ * video track with another id is another video, and stays unread.
+ */
+internal fun chooseVideoTrack(tracks: List<ExtractorVideoTrack>, dolbyVisionBase: String?): VideoTrackChoice {
+    val first = tracks.first()
+    if (first.mime != MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION) return VideoTrackChoice(first.index, null)
+    val baseView = tracks.firstOrNull { track ->
+        track.index != first.index && first.trackId != null && track.trackId == first.trackId &&
+            dolbyVisionBase != null && serverCodecName(track.mime) == dolbyVisionBase
+    }
+    return VideoTrackChoice(baseView?.index ?: first.index, first.index)
 }
 
 /** The same for a track MediaExtractor reports as video/dolby-vision with only its MediaFormat profile. */

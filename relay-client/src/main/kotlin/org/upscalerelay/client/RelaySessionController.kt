@@ -373,7 +373,7 @@ class RelaySessionController internal constructor(
             val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
             // HDR10+ rides in the frames, so only the first keyframe tells
             // (§3.6). It matters only to a session the server may map.
-            val video = if (color.displayTarget != null && withContext(Dispatchers.IO) { source.firstKeyframeHdr10Plus() }) {
+            val video = if (color.displayTarget != null && source.probeFirstKeyframeHdr10Plus()) {
                 source.videoInfo.copy(hdr10Plus = true)
             } else {
                 source.videoInfo

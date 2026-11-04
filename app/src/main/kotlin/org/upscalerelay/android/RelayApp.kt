@@ -1400,8 +1400,8 @@ private fun TenBitVideoToggle(viewModel: RelayViewModel, state: RelayUiState) {
         "Use 10 bit video",
         state.tenBitVideo,
         viewModel::setTenBitVideo,
-        supporting = "HDR videos always stream with 10-bit colour. On, every other video does too: " +
-            "smoother gradients and a smaller stream, for more work on the server.",
+        supporting = "Where the server and this device support it, HDR videos stream with 10-bit colour. " +
+            "On, every other video does too: smoother gradients and a smaller stream, for more work on the server.",
     )
 }
 

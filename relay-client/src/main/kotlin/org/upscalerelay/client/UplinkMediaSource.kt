@@ -1,11 +1,14 @@
 package org.upscalerelay.client
 
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.upscalerelay.protocol.ChapterInfo
 import org.upscalerelay.protocol.DolbyVisionConfig
 import org.upscalerelay.protocol.StaticHdrMetadata
 import org.upscalerelay.protocol.VideoColor
 import org.upscalerelay.protocol.hevcAccessUnitHasHdr10Plus
 import java.io.Closeable
+import kotlin.concurrent.thread
+import kotlin.coroutines.resume
 
 /** Encoded local-video metadata required by protocol v1 open_session. */
 data class UplinkVideoInfo(
@@ -76,6 +79,21 @@ interface UplinkMediaSource : Closeable {
     val videoInfo: UplinkVideoInfo
     fun openPacketReader(fromPts: Long?): UplinkPacketReader
 }
+
+/**
+ * [firstKeyframeHdr10Plus] on a thread of its own. A document provider's
+ * read blocks past coroutine cancellation, so cancelling closes the source,
+ * which ends its readers' reads, instead of waiting on one that may never
+ * return. An open the user abandons closes the source anyway.
+ */
+internal suspend fun UplinkMediaSource.probeFirstKeyframeHdr10Plus(): Boolean =
+    suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { closeQuietly() }
+        thread(name = "relay-android-hdr10plus-probe", isDaemon = true) {
+            // Never throws, and a resume after cancellation is ignored.
+            continuation.resume(firstKeyframeHdr10Plus())
+        }
+    }
 
 /** How many access units [firstKeyframeHdr10Plus] reads for the first keyframe, as the desktop does. */
 internal const val HDR10PLUS_SCAN_UNITS = 16

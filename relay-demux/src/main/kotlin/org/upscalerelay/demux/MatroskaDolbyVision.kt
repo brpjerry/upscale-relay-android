@@ -51,8 +51,12 @@ object MatroskaDolbyVision {
                 val childSize = entry.readElementSize() ?: return null
                 when (childId) {
                     ID_TRACK_TYPE -> type = entry.readUnsigned(childSize.toInt())
-                    ID_BLOCK_ADDITION_MAPPING ->
-                        record = record ?: mappingRecord(entry.readBytes(childSize.toInt()))
+                    ID_BLOCK_ADDITION_MAPPING -> {
+                        // Every mapping is read, so the cursor stays on element
+                        // boundaries; the first Dolby Vision one is kept.
+                        val mapping = entry.readBytes(childSize.toInt())
+                        if (record == null) record = mappingRecord(mapping)
+                    }
                     else -> entry.skip(childSize)
                 }
             }

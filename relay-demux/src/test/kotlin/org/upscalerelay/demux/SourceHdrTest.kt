@@ -35,19 +35,52 @@ class SourceHdrTest {
     }
 
     @Test
-    fun `depth comes from bits-per-sample, else from the profile`() {
+    fun `depth comes from bits-per-sample, else from a profile that fixes it`() {
         assertEquals(10, sourceBitDepth(bitsPerSample = 10, codec = "hevc", profile = CodecProfileLevel.HEVCProfileMain))
-        assertEquals(10, sourceBitDepth(null, "hevc", CodecProfileLevel.HEVCProfileMain10HDR10))
         assertEquals(8, sourceBitDepth(null, "hevc", CodecProfileLevel.HEVCProfileMain))
-        // sdr10-h264.mkv: profile 16 (High 10) and no bits-per-sample.
-        assertEquals(10, sourceBitDepth(null, "h264", CodecProfileLevel.AVCProfileHigh10))
         assertEquals(8, sourceBitDepth(null, "h264", CodecProfileLevel.AVCProfileHigh))
-        assertNull(sourceBitDepth(null, "h264", CodecProfileLevel.AVCProfileHigh422))
-        assertEquals(10, sourceBitDepth(null, "vp9", CodecProfileLevel.VP9Profile2HDR))
         assertEquals(10, sourceBitDepth(null, "av1", CodecProfileLevel.AV1ProfileMain10))
+        assertEquals(8, sourceBitDepth(null, "av1", CodecProfileLevel.AV1ProfileMain8))
+        // Main 10 and High 10 allow 8 bits too; sdr10-h264.mkv (High 10)
+        // reports no bits-per-sample, so its depth stays unknown.
+        assertNull(sourceBitDepth(null, "hevc", CodecProfileLevel.HEVCProfileMain10HDR10))
+        assertNull(sourceBitDepth(null, "h264", CodecProfileLevel.AVCProfileHigh10))
+        assertEquals(8, sourceBitDepth(8, "h264", CodecProfileLevel.AVCProfileHigh10))
+        assertNull(sourceBitDepth(null, "h264", CodecProfileLevel.AVCProfileHigh422))
+        // VP9 profiles 2 and 3 are 10 or 12 bits.
+        for (profile in listOf(CodecProfileLevel.VP9Profile2, CodecProfileLevel.VP9Profile3HDR, CodecProfileLevel.VP9Profile2HDR10Plus)) {
+            assertNull(sourceBitDepth(null, "vp9", profile))
+            assertEquals(12, sourceBitDepth(12, "vp9", profile))
+        }
         assertNull(sourceBitDepth(null, "hevc", null))
         assertNull(sourceBitDepth(null, "mpeg2video", 1))
-        assertEquals(10, sourceBitDepth(7, "hevc", CodecProfileLevel.HEVCProfileMain10))
+        assertNull(sourceBitDepth(7, "hevc", CodecProfileLevel.HEVCProfileMain10))
+    }
+
+    private val dolbyVision = "video/dolby-vision"
+
+    @Test
+    fun `a Dolby Vision MP4 is read through its base layer's view of the same track`() {
+        // dv81.mp4 on the tablet: both views carry track-id 1.
+        val mp4 = listOf(ExtractorVideoTrack(0, dolbyVision, 1), ExtractorVideoTrack(1, "video/hevc", 1))
+        assertEquals(VideoTrackChoice(read = 1, dolbyVisionView = 0), chooseVideoTrack(mp4, "hevc"))
+        // A view with no base layer listed (profile 5) is read itself.
+        assertEquals(VideoTrackChoice(0, 0), chooseVideoTrack(mp4.take(1), "hevc"))
+        // Another codec, or no base codec known, is no base layer view.
+        assertEquals(VideoTrackChoice(0, 0), chooseVideoTrack(mp4, "h264"))
+        assertEquals(VideoTrackChoice(0, 0), chooseVideoTrack(mp4, null))
+    }
+
+    @Test
+    fun `another video track is another video`() {
+        // A Dolby Vision view followed by an unrelated HEVC video (another id).
+        val unrelated = listOf(ExtractorVideoTrack(0, dolbyVision, 1), ExtractorVideoTrack(1, "video/hevc", 2))
+        assertEquals(VideoTrackChoice(0, 0), chooseVideoTrack(unrelated, "hevc"))
+        // An SDR video first: its samples and nothing else's metadata.
+        val sdrFirst = listOf(ExtractorVideoTrack(0, "video/avc", 1), ExtractorVideoTrack(1, dolbyVision, 2))
+        assertEquals(VideoTrackChoice(0, null), chooseVideoTrack(sdrFirst, null))
+        assertEquals("hevc", serverCodecName("video/hevc"))
+        assertNull(serverCodecName(dolbyVision))
     }
 
     private fun cta861(vararg fields: Int): ByteArray = byteArrayOf(0) +
@@ -151,6 +184,11 @@ class SourceHdrTest {
         assertEquals(DolbyVisionConfig(8, 6, 1), parse(videoTrack(dvvC(type = 0x64766343))))
         // Another block addition (HDR10+ in Matroska is 4) is not one.
         assertNull(parse(videoTrack(dvvC(type = 4))))
+        // Nor does one after the record lose it, or the track type behind it.
+        val t35 = element(0x41E4, element(0x41E7, uint(4)) + element(0x41ED, ByteArray(12) { 0x11 }))
+        val typeLast = element(0xAE, dvvC() + t35 + element(0x83, uint(1)))
+        assertEquals(DolbyVisionConfig(8, 6, 1), parse(typeLast))
+        assertEquals(DolbyVisionConfig(8, 6, 1), parse(videoTrack(t35, dvvC())))
         assertNull(parse(videoTrack()))
         // The first video track is the one read; an audio track before it is skipped.
         val audio = element(0xAE, element(0x83, uint(2)) + dvvC())

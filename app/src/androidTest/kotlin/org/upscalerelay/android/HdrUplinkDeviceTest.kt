@@ -35,7 +35,7 @@ class HdrUplinkDeviceTest {
     private data class Expected(
         val codec: String,
         val color: VideoColor?,
-        val bitDepth: Int,
+        val bitDepth: Int?,
         val dolbyVision: DolbyVisionConfig? = null,
         val containerHdr: Boolean = false,
         /**
@@ -67,7 +67,8 @@ class HdrUplinkDeviceTest {
             downlinkDepth = 10, downlinkTransfer = 1, applied = listOf("dolby_vision"),
         ),
         "sdr10-hevc.mkv" to Expected("hevc", null, 10, downlinkDepth = 8, downlinkTransfer = null),
-        "sdr10-h264.mkv" to Expected("h264", null, 10, downlinkDepth = 8, downlinkTransfer = null),
+        // High 10 allows 8 bits too, and MediaExtractor reports no bits-per-sample for H.264.
+        "sdr10-h264.mkv" to Expected("h264", null, null, downlinkDepth = 8, downlinkTransfer = null),
     )
 
     private fun fixtures(): List<File> {
@@ -145,15 +146,20 @@ class HdrUplinkDeviceTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val model = model(scenario)
             prepare(model, tenBitVideo = true)
-            play(model, file)
-            assertEquals("${file.name} under \"all\"", 10, model.ui.value.session?.downlinkBitDepth)
-            val sessionId = model.ui.value.session?.sessionId
-            onMain { model.setTenBitVideo(false) }
-            await("8-bit restart", model, 90_000) {
-                it.session?.sessionId != sessionId && it.playerState == MpvPlaybackState.PLAYING && it.reconnecting == null
+            try {
+                play(model, file)
+                assertEquals("${file.name} under \"all\"", 10, model.ui.value.session?.downlinkBitDepth)
+                val sessionId = model.ui.value.session?.sessionId
+                onMain { model.setTenBitVideo(false) }
+                await("8-bit restart", model, 90_000) {
+                    it.session?.sessionId != sessionId && it.playerState == MpvPlaybackState.PLAYING && it.reconnecting == null
+                }
+                assertEquals("${file.name} under \"hdr\"", 8, model.ui.value.session?.downlinkBitDepth)
+                close(model)
+            } finally {
+                // A failure before the switch must not leave it on for later runs.
+                onMain { model.setTenBitVideo(false) }
             }
-            assertEquals("${file.name} under \"hdr\"", 8, model.ui.value.session?.downlinkBitDepth)
-            close(model)
         }
     }
 

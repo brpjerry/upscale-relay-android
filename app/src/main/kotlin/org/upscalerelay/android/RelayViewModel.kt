@@ -675,23 +675,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         persist { preferences.setDebandEnabled(value) }
     }
 
-    /**
-     * "Use 10 bit video": every video at 10 bits, not only HDR. Restarts only
-     * a stream whose depth it changes: an HDR source is 10-bit either way (a
-     * mapped one in its SDR epochs too), and a server without deep colour or
-     * a device without a 10-bit decoder streams 8 bits whatever is asked.
-     */
+    /** "Use 10 bit video": every video at 10 bits, not only HDR; restarts only a stream it changes. */
     fun setTenBitVideo(value: Boolean) {
         val changed = mutableUi.value.tenBitVideo != value
         mutableUi.value = mutableUi.value.copy(tenBitVideo = value)
         persist { preferences.setTenBitVideo(value) }
         val state = mutableUi.value
-        val session = state.relaySession ?: return
-        if (changed && !session.hdrSource && state.capabilities?.highBitDepth == true &&
-            decodesHevcMain10(state.display)
-        ) {
-            maybeRestartActiveSession()
-        }
+        if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
     }
 
     fun setModel(value: String) {
@@ -3341,17 +3331,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val NETWORK_WAIT_MILLIS = 10_000L
         private const val LIBRARY_CACHE_WRITE_DELAY_MILLIS = 500L
 
-        /**
-         * The deep colour asked for (PROTOCOL.md §3.5): HDR sources at 10 bits
-         * with their metadata, as to the desktop, and with "Use 10 bit video"
-         * every other source too. Only where a hardware decoder takes the
-         * 10-bit downlink at the player's size; elsewhere nothing, so the
-         * session stays 8-bit and names no display either (the server maps
-         * only deep colour).
-         */
+        /** The deep colour to ask for at the player's size (downlinkDepthFor). */
         private fun downlinkDepth(state: RelayUiState): HighBitDepth? =
-            (if (state.tenBitVideo) HighBitDepth.ALL else HighBitDepth.HDR)
-                .takeIf { decodesHevcMain10(state.display) }
+            downlinkDepthFor(state.tenBitVideo, decodesHevcMain10(state.display))
 
         /**
          * The display named to a server that maps Dolby Vision and HDR10+
