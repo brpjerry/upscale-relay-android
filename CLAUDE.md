@@ -290,7 +290,15 @@ release.yml` builds and publishes the signed APK with those notes.
   Vision and HDR10+ by their own metadata, which mpv's `gpu` renderer would
   ignore. A `pq` target would stop that and fix nothing. Each epoch's colour
   and mapping come from its own `seek_ready` (`SessionInfo.describedBy`),
-  which arrives before the endpoint is handed to mpv.
+  which arrives before the endpoint is handed to mpv. "Use 10 bit video"
+  (`tenBitVideo`) asks for `"all"` instead, and toggling it restarts only an
+  SDR stream (`SessionInfo.hdrSource`).
+- **An uplink sends `video.color` only with a transfer it knows**
+  (`platformColor`). The server decides the depth from that colour and reads
+  an HEVC uplink's own parameter sets only where it is absent, so an
+  "unspecified" transfer would make an HDR10 file stream as 8-bit SDR.
+  MediaExtractor reports the bitstream's colour where the bitstream sets one,
+  as the desktop's libav probe does.
 
 - **A loading overlay in the browser is only for a wait the user asked for.**
   Connects the app makes on its own — after leaving the player
@@ -346,12 +354,25 @@ release.yml` builds and publishes the signed APK with those notes.
 - S Pen and Samsung DeX interactive smoke tests remain hands-on.
 - A local source that fails mid-read ends playback early with no error.
   MediaExtractor reports a read error the same way as end of file
-  (`sampleTime < 0`), so `ExtractorPacketReader` returns null and the uplink
-  sends EOS. A provider that drops out (network storage, a cloud document)
+  (`sampleTrackIndex` -1), so `ExtractorPacketReader` returns null and the
+  uplink sends EOS. (A negative `sampleTime` is not the end: an MP4 whose
+  edit list trims its start has samples before zero, and reading those as
+  the end ended such files before their first frame until 2026-11-03.) A
+  provider that drops out (network storage, a cloud document)
   looks like a short file. Telling the two apart would need a heuristic, such
   as an end far short of the declared duration, which risks false errors on
   files with wrong duration headers, so it is deliberately unhandled
   (decided 2026-10-09).
+- MediaExtractor hides most container HDR metadata (Tab S9 Ultra, Android
+  16). From Matroska it keeps MaxCLL and MaxFALL but zeroes the mastering
+  display, which `MatroskaHdrStatic` reads from the Colour element instead.
+  From MP4 it reports nothing of `mdcv` or `clli`, and that stays unread.
+  HEVC sources lose nothing either way, since the server copies the
+  bitstream's SEI; an MP4 whose HDR10 metadata lives only in its boxes does.
+  A Dolby Vision MP4 is two video tracks of the same samples
+  (`video/dolby-vision` with the record in `csd-2`, then its base layer). A
+  Matroska one is plain `video/hevc`, its record left to
+  `MatroskaDolbyVision`.
 - Pixel aspect for local uplinks comes from the container: MediaExtractor for
   MP4, `MatroskaVideoAspect` for Matroska display sizes. An aspect carried
   only in the video bitstream (Matroska `DisplayUnit` 4) is left to the

@@ -230,6 +230,12 @@ internal class ControlChannel(
                         add(kotlinx.serialization.json.JsonPrimitive(denominator))
                     })
                 }
+                // §3.5 and §3.6: what the server needs before any frame decodes.
+                video.color?.let { put("color", it.toJson()) }
+                video.bitDepth?.takeIf { it in 8..16 }?.let { put("bit_depth", it) }
+                video.staticHdr?.toJson()?.let { put("hdr", it) }
+                video.dolbyVision?.let { put("dolby_vision", it.toJson()) }
+                if (video.hdr10Plus) put("hdr10plus", true)
             })
             put("model", model)
             put("quality_tier", qualityTier)

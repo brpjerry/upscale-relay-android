@@ -12,6 +12,8 @@ import org.upscalerelay.client.UplinkMediaSource
 import org.upscalerelay.client.UplinkPacketReader
 import org.upscalerelay.client.UplinkVideoInfo
 import org.upscalerelay.protocol.ChapterInfo
+import org.upscalerelay.protocol.DolbyVisionConfig
+import org.upscalerelay.protocol.StaticHdrMetadata
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -64,13 +66,28 @@ class AndroidMediaSource private constructor(
                 val extractor = MediaExtractor()
                 try {
                     extractor.setDataSource(pfd.fileDescriptor)
-                    val videoTrack = (0 until extractor.trackCount).firstOrNull { index ->
-                        extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
-                            ?.startsWith("video/") == true
-                    } ?: error("The selected document has no video track")
+                    fun mimeOf(index: Int) = extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+                    val videoTracks = (0 until extractor.trackCount).filter { mimeOf(it)?.startsWith("video/") == true }
+                    if (videoTracks.isEmpty()) error("The selected document has no video track")
+                    // A Dolby Vision MP4 lists its samples twice: as
+                    // video/dolby-vision, with the configuration record in
+                    // csd-2, and as its base layer's codec (verified on the
+                    // Tab S9 Ultra). The server decodes the base layer and
+                    // takes the RPU from the samples, so that track is read.
+                    val dolbyVisionTrack = videoTracks.firstOrNull {
+                        mimeOf(it) == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION
+                    }
+                    val dolbyVisionFormat = dolbyVisionTrack?.let(extractor::getTrackFormat)
+                    val videoTrack = videoTracks.firstOrNull { codecName(mimeOf(it)) != null }
+                        ?: dolbyVisionTrack
+                        ?: error("Unsupported local video codec: ${mimeOf(videoTracks.first())}")
                     val format = extractor.getTrackFormat(videoTrack)
                     val mime = requireNotNull(format.getString(MediaFormat.KEY_MIME))
+                    val dolbyVision = dolbyVisionFormat?.byteBufferOrNull("csd-2")?.let(DolbyVisionConfig::fromRecord)
+                        ?: readMatroskaDolbyVision(resolver, uri)
                     val codec = codecName(mime)
+                        ?: dolbyVision?.let { dolbyVisionBaseCodec(it.profile) }
+                        ?: dolbyVisionBaseCodecOfPlatformProfile(format.intOrNull(MediaFormat.KEY_PROFILE))
                     val durationUs = format.longOrNull(MediaFormat.KEY_DURATION)
                     val fps = format.intOrNull(MediaFormat.KEY_FRAME_RATE)
                     val extradata = (0..3).mapNotNull { index ->
@@ -109,6 +126,22 @@ class AndroidMediaSource private constructor(
                             sourceHasAuxiliary = if (hasAudio) true else null,
                             sampleAspectNumerator = sampleAspect?.first,
                             sampleAspectDenominator = sampleAspect?.second,
+                            color = platformColor(
+                                standard = format.intOrNull(MediaFormat.KEY_COLOR_STANDARD),
+                                transfer = format.intOrNull(MediaFormat.KEY_COLOR_TRANSFER),
+                                range = format.intOrNull(MediaFormat.KEY_COLOR_RANGE),
+                            ),
+                            bitDepth = sourceBitDepth(
+                                bitsPerSample = format.intOrNull(KEY_BITS_PER_SAMPLE),
+                                codec = codec,
+                                profile = if (mime == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION) null
+                                else format.intOrNull(MediaFormat.KEY_PROFILE),
+                            ),
+                            staticHdr = staticHdrFromCta861(
+                                format.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO)
+                                    ?: dolbyVisionFormat?.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO),
+                            ).orElse(readMatroskaHdrStatic(resolver, uri)),
+                            dolbyVision = dolbyVision,
                         ),
                     )
                 } finally {
@@ -131,6 +164,26 @@ class AndroidMediaSource private constructor(
                 }
             }.getOrNull().orEmpty()
 
+        /** Null for non-Matroska documents and tracks without HDR10 metadata; best-effort like chapters. */
+        private fun readMatroskaHdrStatic(resolver: ContentResolver, uri: Uri): StaticHdrMetadata? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaHdrStatic.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
+
+        /** Null for non-Matroska documents and tracks without a Dolby Vision record; best-effort like chapters. */
+        private fun readMatroskaDolbyVision(resolver: ContentResolver, uri: Uri): DolbyVisionConfig? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        MatroskaDolbyVision.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
+
         /** Null for non-Matroska documents and square pixels; best-effort like chapters. */
         private fun readMatroskaSampleAspect(resolver: ContentResolver, uri: Uri): Pair<Int, Int>? =
             runCatching {
@@ -141,15 +194,19 @@ class AndroidMediaSource private constructor(
                 }
             }.getOrNull()
 
-        private fun codecName(mime: String): String = when (mime) {
+        /** The server's name for a codec MediaExtractor names; null for one it cannot take. */
+        private fun codecName(mime: String?): String? = when (mime) {
             MediaFormat.MIMETYPE_VIDEO_HEVC -> "hevc"
             MediaFormat.MIMETYPE_VIDEO_AVC -> "h264"
             MediaFormat.MIMETYPE_VIDEO_AV1 -> "av1"
             MediaFormat.MIMETYPE_VIDEO_VP9 -> "vp9"
             MediaFormat.MIMETYPE_VIDEO_MPEG2 -> "mpeg2video"
             MediaFormat.MIMETYPE_VIDEO_MPEG4 -> "mpeg4"
-            else -> error("Unsupported local video codec: $mime")
+            else -> null
         }
+
+        /** MediaExtractor's depth for HEVC (from the parameter sets); not a public key. */
+        private const val KEY_BITS_PER_SAMPLE = "bits-per-sample"
     }
 }
 
@@ -191,7 +248,11 @@ private class ExtractorPacketReader(
         if (closed.get()) return null
         val extractor = requireNotNull(extractor)
         try {
-            if (extractor.sampleTime < 0) return null
+            // The end is the track index going to -1. A negative sample time
+            // is an ordinary sample before the start an MP4 edit list trims
+            // (an ffmpeg cut starts at -576 ms); reading it as the end ended
+            // such a file before its first frame. The wire PTS is signed.
+            if (extractor.sampleTrackIndex < 0) return null
             val sampleSize = extractor.sampleSize
             if (sampleSize > buffer.capacity()) {
                 require(sampleSize <= MAX_ACCESS_UNIT_BYTES) { "video access unit is too large: $sampleSize" }

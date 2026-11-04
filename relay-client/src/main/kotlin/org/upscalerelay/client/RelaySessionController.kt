@@ -371,9 +371,16 @@ class RelaySessionController internal constructor(
                 caps.models.any { it.name == requested }
             } ?: caps.phaseOneModel
             val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
+            // HDR10+ rides in the frames, so only the first keyframe tells
+            // (§3.6). It matters only to a session the server may map.
+            val video = if (color.displayTarget != null && withContext(Dispatchers.IO) { source.firstKeyframeHdr10Plus() }) {
+                source.videoInfo.copy(hdr10Plus = true)
+            } else {
+                source.videoInfo
+            }
             val session = SessionInfo.fromJson(
                 requireNotNull(control).openUplinkSession(
-                    source.videoInfo, model, display, qualityTier, fitMode, resizeAlgorithm,
+                    video, model, display, qualityTier, fitMode, resizeAlgorithm,
                     highBitDepth = color.highBitDepth,
                     displayTarget = color.displayTarget,
                 ),

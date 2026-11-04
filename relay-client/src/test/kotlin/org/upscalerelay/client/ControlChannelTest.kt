@@ -224,6 +224,44 @@ class ControlChannelTest {
     }
 
     @Test
+    fun `an uplink describes its source's colour and HDR only as far as it knows them`() = runBlocking {
+        suspend fun sentVideo(info: UplinkVideoInfo): JsonObject {
+            val socket = FakeSocket()
+            val control = connected(socket)
+            control.openUplinkSession(info, "passthrough", DisplaySize(2960, 1848), "hevc-qp4", "fit", null)
+            control.close()
+            return socket.sent.last { it["type"]?.jsonPrimitive?.content == "open_session" }
+                .getValue("video").jsonObject
+        }
+        val plain = UplinkVideoInfo(
+            name = "hdr.mkv", codec = "hevc", extradata = null, width = 3840, height = 2160,
+            timeBaseNumerator = 1, timeBaseDenominator = 1_000_000,
+            averageRateNumerator = 24, averageRateDenominator = 1, durationSeconds = 20.0,
+        )
+        // A source the demuxer says nothing about sends nothing: the server
+        // reads an HEVC uplink's colour and depth from its parameter sets.
+        val untold = sentVideo(plain)
+        for (field in listOf("color", "bit_depth", "hdr", "dolby_vision", "hdr10plus")) assertNull(field, untold[field])
+
+        val told = sentVideo(plain.copy(
+            color = org.upscalerelay.protocol.VideoColor(9, 16, 9, "limited"),
+            bitDepth = 10,
+            staticHdr = org.upscalerelay.protocol.StaticHdrMetadata(
+                contentLightLevel = org.upscalerelay.protocol.ContentLightLevel(1000, 400),
+            ),
+            dolbyVision = org.upscalerelay.protocol.DolbyVisionConfig(8, 6, 1),
+            hdr10Plus = true,
+        ))
+        assertEquals(Json.parseToJsonElement("""{"primaries":9,"transfer":16,"matrix":9,"range":"limited"}"""), told["color"])
+        assertEquals(10, told.getValue("bit_depth").jsonPrimitive.content.toInt())
+        assertEquals(Json.parseToJsonElement("""{"content_light_level":{"max_cll":1000,"max_fall":400}}"""), told["hdr"])
+        assertEquals(Json.parseToJsonElement("""{"profile":8,"level":6,"bl_signal_compatibility_id":1}"""), told["dolby_vision"])
+        assertEquals("true", told.getValue("hdr10plus").jsonPrimitive.content)
+        // The server reads depths outside 8..16 as unknown, so none is sent.
+        assertNull(sentVideo(plain.copy(bitDepth = 4))["bit_depth"])
+    }
+
+    @Test
     fun `a seek names the display for its epoch only when given one`() = runBlocking {
         val socket = FakeSocket()
         val control = connected(socket)

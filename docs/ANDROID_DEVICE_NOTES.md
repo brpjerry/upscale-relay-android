@@ -1,5 +1,47 @@
 # Android device validation notes
 
+## Local HDR sources and "Use 10 bit video" — 2026-11-03
+
+Galaxy Tab S9 Ultra, Android 16, against the relay at 192.168.0.115:8590 on
+`passthrough` and `hevc-qp4`, with `HdrUplinkDeviceTest` (DEVELOPMENT.md
+says how its fixtures were cut from the server's files).
+
+What MediaExtractor reports, and so what the uplink sends:
+
+| Fixture | Reported | Sent |
+|---|---|---|
+| `hdr10-card.mkv` (metadata in SEI only) | standard 6, transfer 6, range 2, bits-per-sample 10, profile Main10HDR10 | PQ BT.2020, 10 bits |
+| `hdr10-container.mkv` (Matroska MasteringMetadata, MaxCLL 10000/400) | `hdr-static-info` with zero chromaticities and luminance, light levels only | PQ, 10 bits, mastering display from the Colour element (`MatroskaHdrStatic`) and light levels |
+| `hdr10-container.mp4` (same, `mdcv`/`clli`) | no `hdr-static-info` at all | PQ, 10 bits, no static metadata |
+| `hlg.mkv` | transfer 7 | HLG BT.2020, 10 bits |
+| `dv81.mkv` (Dolby Vision 8.1, dvvC) | plain `video/hevc`, no record | PQ, 10 bits, Dolby Vision 8 / level 6 / compatibility 1 (`MatroskaDolbyVision`) |
+| `dv81.mp4` | two tracks: `video/dolby-vision` (record in `csd-2`, `bl_compatibility_id`), then `video/hevc` | the same, reading the HEVC track |
+| `sdr10-hevc.mkv` | range 2 and bits-per-sample 10, no transfer | 10 bits, no colour |
+| `sdr10-h264.mkv` (High 10) | profile 16, a hidden standard (71), no transfer or bits-per-sample | 10 bits from the profile, no colour |
+
+A Matroska file tagged PQ in its Colour element but HLG in its HEVC VUI
+read as HLG: MediaExtractor's colour is the bitstream's where it sets one.
+
+What the relay sent back for each, uplinked under `"hdr"` to an SDR display:
+10-bit PQ for the three HDR10 fixtures, 10-bit HLG for `hlg.mkv`, 10-bit
+BT.709 with Dolby Vision applied for both Dolby Vision fixtures (an uplink
+is mapped only for the record it sends), and 8 bits for both 10-bit SDR
+ones. Under "Use 10 bit video" `sdr10-hevc.mkv` came back at 10 bits; turning
+the setting off mid-play restarted it at 8.
+
+Two local-file bugs found on the way, both older than HDR:
+
+- A Dolby Vision MP4 could not be opened ("Unsupported local video codec:
+  video/dolby-vision"): the first video track was taken, and it is the
+  Dolby Vision view of the samples.
+- An MP4 whose edit list trims its start ended before its first frame:
+  `dv81.mp4`, an ffmpeg cut, starts at -576 ms, and a negative sample time
+  was read as the end of the file. Now the end is the track index going to
+  -1; the cut plays with audio and video 0.02 ms apart after 5 s.
+
+No HDR10+ fixture was available, so an uplink's `video.hdr10plus` is covered
+by unit tests only.
+
 ## 10-bit HDR downlink and SDR display mapping — 2026-11-03
 
 Galaxy Tab S9 Ultra `SM-X910`, Android 16/API 36, build `X910XXS6EZI2`,
