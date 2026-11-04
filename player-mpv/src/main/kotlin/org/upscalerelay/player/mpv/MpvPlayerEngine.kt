@@ -524,7 +524,15 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     private fun observeMetrics() {
-        val stringProperties = listOf("hwdec-current", "video-codec", "audio-codec")
+        val stringProperties = listOf(
+            "hwdec-current",
+            "video-codec",
+            "audio-codec",
+            "video-params/pixelformat",
+            "video-params/hw-pixelformat",
+            "video-params/gamma",
+            "video-params/primaries",
+        )
         val integerProperties = listOf(
             "video-params/w",
             "video-params/h",
@@ -542,6 +550,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "audio-delay",
             "sub-delay",
             "audio-pts",
+            "video-params/sig-peak",
         )
         stringProperties.forEach { MPVLib.observeProperty(it, MPVLib.MpvFormat.STRING) }
         integerProperties.forEach { MPVLib.observeProperty(it, MPVLib.MpvFormat.INT64) }
@@ -591,6 +600,10 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "hwdec-current" -> metrics.copy(hardwareDecoder = value)
             "video-codec" -> metrics.copy(codec = value)
             "audio-codec" -> metrics.copy(audioCodec = value)
+            "video-params/pixelformat" -> metrics.copy(videoPixelFormat = value)
+            "video-params/hw-pixelformat" -> metrics.copy(videoHwPixelFormat = value)
+            "video-params/gamma" -> metrics.copy(videoGamma = value)
+            "video-params/primaries" -> metrics.copy(videoPrimaries = value)
             else -> metrics
         }
     }
@@ -607,6 +620,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "audio-delay" -> metrics.copy(audioDelaySeconds = value)
             "sub-delay" -> metrics.copy(subtitleDelaySeconds = value)
             "audio-pts" -> metrics.copy(audioPtsSeconds = value)
+            "video-params/sig-peak" -> metrics.copy(videoSignalPeak = value)
             else -> metrics
         }
     }
@@ -832,4 +846,15 @@ data class MpvMetrics(
     val cacheBufferingPercent: Int = 0,
     val seeking: Boolean = false,
     val coreIdle: Boolean = true,
+    /**
+     * What mpv decodes: the frame format ("mediacodec" for hardware frames,
+     * whose own format is [videoHwPixelFormat] when mpv knows it), and the
+     * colour it reads them as. [videoSignalPeak] is the peak relative to SDR
+     * white that mpv tone-maps from (1 for SDR).
+     */
+    val videoPixelFormat: String = "",
+    val videoHwPixelFormat: String = "",
+    val videoGamma: String = "",
+    val videoPrimaries: String = "",
+    val videoSignalPeak: Double = 0.0,
 )

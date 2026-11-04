@@ -20,6 +20,8 @@ import okio.ByteString
 import org.junit.Assert.*
 import org.junit.Test
 import org.upscalerelay.protocol.DisplaySize
+import org.upscalerelay.protocol.DisplayTarget
+import org.upscalerelay.protocol.HighBitDepth
 import java.io.IOException
 import java.nio.file.Path
 
@@ -182,6 +184,58 @@ class ControlChannelTest {
         assertEquals(listOf(10, 1), sentVideo(10, 1).sar())
         assertNull(sentVideo(11, 1).sar())
         assertNull(sentVideo(1, 11).sar())
+    }
+
+    @Test
+    fun `opens carry deep colour and the display, and a display never goes alone`() = runBlocking {
+        fun serverFile(depth: HighBitDepth?, target: DisplayTarget?) = serverFileOpenMessage(
+            "clip.mkv", "passthrough", DisplaySize(1920, 1080), "lossless-hevc", "fit", null,
+            requestMuxedAuxTracks = true, requestCachedAttachments = true,
+            highBitDepth = depth, displayTarget = target,
+        )
+        val mapped = serverFile(HighBitDepth.HDR, DisplayTarget.SDR)
+        assertEquals("hdr", mapped["high_bit_depth"]?.jsonPrimitive?.content)
+        assertEquals(Json.parseToJsonElement("""{"transfer":"sdr"}"""), mapped["display_target"])
+        val deepOnly = serverFile(HighBitDepth.ALL, null)
+        assertEquals("all", deepOnly["high_bit_depth"]?.jsonPrimitive?.content)
+        assertNull(deepOnly["display_target"])
+        // The server maps only a deep-colour session, so a display alone is not sent.
+        val neither = serverFile(null, DisplayTarget.SDR)
+        assertNull(neither["high_bit_depth"])
+        assertNull(neither["display_target"])
+
+        val socket = FakeSocket()
+        val control = connected(socket)
+        control.openUplinkSession(
+            UplinkVideoInfo(
+                name = "hdr.mkv", codec = "hevc", extradata = null,
+                width = 3840, height = 2160,
+                timeBaseNumerator = 1, timeBaseDenominator = 1_000_000,
+                averageRateNumerator = 24_000, averageRateDenominator = 1001,
+                durationSeconds = 60.0,
+            ),
+            "passthrough", DisplaySize(2960, 1848), "hevc-qp4", "fit", null,
+            highBitDepth = HighBitDepth.HDR, displayTarget = DisplayTarget.SDR,
+        )
+        control.close()
+        val uplink = socket.sent.last { it["type"]?.jsonPrimitive?.content == "open_session" }
+        assertEquals("hdr", uplink["high_bit_depth"]?.jsonPrimitive?.content)
+        assertEquals(Json.parseToJsonElement("""{"transfer":"sdr"}"""), uplink["display_target"])
+    }
+
+    @Test
+    fun `a seek names the display for its epoch only when given one`() = runBlocking {
+        val socket = FakeSocket()
+        val control = connected(socket)
+        suspend fun seek(epoch: Int, target: DisplayTarget?): JsonObject {
+            val seek = async(start = CoroutineStart.UNDISPATCHED) { control.seek(1_000, epoch, target) }
+            socket.receive("""{"type":"seek_ready","epoch":$epoch}""")
+            withTimeout(2_000) { seek.await() }
+            return socket.sent.last { it["type"]?.jsonPrimitive?.content == "seek" }
+        }
+        assertEquals(Json.parseToJsonElement("""{"transfer":"sdr"}"""), seek(1, DisplayTarget.SDR)["display_target"])
+        assertNull(seek(2, null)["display_target"])
+        control.close()
     }
 
     private suspend fun open(control: ControlChannel) {

@@ -1833,7 +1833,10 @@ private fun PlayerChrome(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    state.sessionDescription,
+                    listOfNotNull(
+                        state.sessionDescription.ifEmpty { null },
+                        state.session?.pictureSummary(),
+                    ).joinToString(" · "),
                     color = Color.LightGray,
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
@@ -2627,6 +2630,9 @@ private fun diagnosticsLine(state: RelayUiState): String {
     return "${state.sessionState}/${state.playerState}" +
         " · hwdec ${mpv.hardwareDecoder.ifEmpty { "pending" }}" +
         " · ${mpv.codedWidth}×${mpv.codedHeight}" +
+        (state.session?.let { " · ${it.pictureDiagnostics()}" } ?: "") +
+        (mpv.videoHwPixelFormat.ifEmpty { mpv.videoPixelFormat }.takeIf { it.isNotEmpty() }
+            ?.let { " · $it ${mpv.videoGamma}".trimEnd() } ?: "") +
         " · rx ${format(transport.averageMegabitsPerSecond)} Mbps" +
         " · cache ${mpv.cacheDurationMillis} ms" +
         " · drops ${mpv.outputDroppedFrames}/${mpv.decoderDroppedFrames}" +

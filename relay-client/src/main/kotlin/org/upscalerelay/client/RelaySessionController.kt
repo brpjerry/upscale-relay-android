@@ -21,6 +21,8 @@ import kotlinx.coroutines.sync.withLock
 import okhttp3.WebSocket
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
+import org.upscalerelay.protocol.DisplayTarget
+import org.upscalerelay.protocol.HighBitDepth
 import org.upscalerelay.protocol.LibraryNode
 import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
@@ -94,6 +96,9 @@ class RelaySessionController internal constructor(
     private var attachmentCacheStats = AttachmentCacheStats()
     private var requestedAuxTracks: String? = null
     private var requestedAuxAttachments: String? = null
+
+    /** The display this session's epochs are mapped for (§3.6); null when it negotiated none. */
+    private var negotiatedDisplayTarget: DisplayTarget? = null
 
     suspend fun connect(display: DisplaySize, librarySort: String? = null): ConnectedLibrary {
         check(!closed.get())
@@ -204,6 +209,8 @@ class RelaySessionController internal constructor(
         qualityTier: String = "lossless-hevc",
         fitMode: String = "fit",
         resizeAlgorithm: String? = null,
+        highBitDepth: HighBitDepth? = null,
+        displayTarget: DisplayTarget? = null,
     ): PlaybackEndpoint {
         check(state.value == SessionState.BROWSING)
         stateMachine.transition(SessionState.OPENING)
@@ -218,6 +225,7 @@ class RelaySessionController internal constructor(
             val model = requestedModel?.takeIf { requested ->
                 caps.models.any { it.name == requested }
             } ?: caps.phaseOneModel
+            val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
             val requestMuxedAuxTracks = caps.muxedAuxTracks
             val requestCachedAttachments = requestMuxedAuxTracks && caps.attachmentCacheVersion >= 1
             requestedAuxTracks = if (requestMuxedAuxTracks) "muxed" else null
@@ -231,6 +239,8 @@ class RelaySessionController internal constructor(
                     path, model, display, qualityTier, fitMode, resizeAlgorithm,
                     requestMuxedAuxTracks = requestMuxedAuxTracks,
                     requestCachedAttachments = requestCachedAttachments,
+                    highBitDepth = color.highBitDepth,
+                    displayTarget = color.displayTarget,
                 ),
             )
             openedSessionId = session.sessionId
@@ -299,6 +309,7 @@ class RelaySessionController internal constructor(
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
+            negotiatedDisplayTarget = color.displayTarget
             originalMediaUrl = if (session.needsExternalMedia) requireNotNull(control).mediaUrl(path) else null
             currentEpoch.set(session.epoch)
             downlink.start()
@@ -343,6 +354,8 @@ class RelaySessionController internal constructor(
         qualityTier: String = "lossless-hevc",
         fitMode: String = "fit",
         resizeAlgorithm: String? = null,
+        highBitDepth: HighBitDepth? = null,
+        displayTarget: DisplayTarget? = null,
     ): PlaybackEndpoint {
         check(state.value == SessionState.BROWSING)
         stateMachine.transition(SessionState.OPENING)
@@ -357,9 +370,12 @@ class RelaySessionController internal constructor(
             val model = requestedModel?.takeIf { requested ->
                 caps.models.any { it.name == requested }
             } ?: caps.phaseOneModel
+            val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
             val session = SessionInfo.fromJson(
                 requireNotNull(control).openUplinkSession(
                     source.videoInfo, model, display, qualityTier, fitMode, resizeAlgorithm,
+                    highBitDepth = color.highBitDepth,
+                    displayTarget = color.displayTarget,
                 ),
             ).copy(
                 sourceHasAudio = source.videoInfo.sourceHasAudio,
@@ -406,6 +422,7 @@ class RelaySessionController internal constructor(
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
+            negotiatedDisplayTarget = color.displayTarget
             this.originalMediaUrl = originalMediaUrl.takeIf { session.needsExternalMedia }
             currentEpoch.set(session.epoch)
             startReporter()
@@ -502,10 +519,15 @@ class RelaySessionController internal constructor(
             previousLoopback?.close()
 
             withContext(Dispatchers.IO) { uplink?.stopCurrent() }
-            requireNotNull(control).seek(targetPts.coerceAtLeast(0), epoch)
+            // The endpoint goes out only after seek_ready: on a mapped session
+            // that reply is what says the epoch's colour (§3.6), so mpv never
+            // loads an epoch the session cannot describe yet.
+            val ready = requireNotNull(control).seek(
+                targetPts.coerceAtLeast(0), epoch, negotiatedDisplayTarget,
+            )
             check(epoch == currentEpoch.get()) { "seek epoch $epoch was superseded" }
             uplink?.startEpoch(epoch, targetPts.coerceAtLeast(0), discontinuity = true)
-            val session = requireNotNull(activeSession).copy(epoch = epoch)
+            val session = requireNotNull(activeSession).copy(epoch = epoch).describedBy(ready)
             activeSession = session
             synchronized(playbackStateLock) {
                 stateMachine.transition(
@@ -667,6 +689,7 @@ class RelaySessionController internal constructor(
         attachmentCacheStats = AttachmentCacheStats()
         requestedAuxTracks = null
         requestedAuxAttachments = null
+        negotiatedDisplayTarget = null
         currentEpoch.set(0)
         suppressBufferReports.set(false)
         desiredPaused.set(false)
@@ -737,6 +760,21 @@ class RelaySessionController internal constructor(
 
 internal val SessionInfo.needsExternalMedia: Boolean
     get() = auxTracks != "muxed" && sourceHasAuxiliary != false
+
+/**
+ * What open_session asks for, limited to what the server advertises: deep
+ * colour after capabilities.high_bit_depth (§3.5), and a display only together
+ * with deep colour, after capabilities.display_mapping (§3.6). A server
+ * without them streams 8-bit as before, so asking never costs a session.
+ */
+internal data class ColorRequest(val highBitDepth: HighBitDepth?, val displayTarget: DisplayTarget?) {
+    companion object {
+        fun negotiate(caps: Capabilities, highBitDepth: HighBitDepth?, displayTarget: DisplayTarget?): ColorRequest {
+            val depth = highBitDepth?.takeIf { caps.highBitDepth }
+            return ColorRequest(depth, displayTarget?.takeIf { depth != null && caps.displayMapping })
+        }
+    }
+}
 
 data class ConnectedLibrary(
     val capabilities: Capabilities,

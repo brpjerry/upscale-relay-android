@@ -121,7 +121,10 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 
 - A machine-readable snapshot is written every second to the app-private
   `files/phase4-latest.json` (playback/session state, decoder, drops, A/V
-  error, buffers, transport rates, selected settings, resume counters).
+  error, buffers, transport rates, selected settings, resume counters). The
+  `downlink_*` fields say what the server sent: bit depth, colour, the Dolby
+  Vision flag and any display mapping (PROTOCOL.md §3.5, §3.6); `video_*`
+  say what mpv decodes it as (pixel format, gamma, primaries, `sig-peak`).
   Retrieve it from a debug build with:
 
   ```text
