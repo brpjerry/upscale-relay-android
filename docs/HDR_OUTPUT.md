@@ -348,8 +348,8 @@ reload. Not worth carrying.
   - JNI `ANativeWindow_setBuffersDataSpace` on mpv's own window. AOSP's EGL
     loader sets the dataspace when it creates the surface (from
     `EGL_GL_COLORSPACE_KHR`, unknown by default), so this has to run after
-    every mpv VO init, on a signal from mpv's thread. It saves the relay hop, which
-    measured as free anyway, and adds the project's first NDK build.
+    every mpv VO init, on a signal from mpv's thread. It saves the relay hop,
+    which measured as free anyway, and adds the project's first NDK build.
   - Patch mpv's `context_android.c` to create the surface with
     `EGL_GL_COLORSPACE_BT2020_PQ_EXT`, and set the SMPTE 2086 surface
     attributes from `target-peak`, when `target-colorspace-hint` asks for
