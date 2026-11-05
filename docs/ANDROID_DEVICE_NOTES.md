@@ -1,5 +1,31 @@
 # Android device validation notes
 
+## MP4 HDR10 boxes (`mdcv`, `clli`) — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, against the relay at 192.168.0.115:8590 on
+`passthrough` and `hevc-qp4`, with `HdrUplinkDeviceTest` over the nine
+fixtures (DEVELOPMENT.md says how they were made). Both tests passed.
+
+MediaExtractor still reports no `hdr-static-info` for an MP4 with `mdcv` and
+`clli`; `Mp4HdrStatic` now reads them from the sample entry of the track it
+reads (`track-id` 1, the `tkhd` track_ID). What the uplink sends, and what
+the server wrote into the downlink (`/status`
+`sessions[].pipeline.hdr_metadata.static`):
+
+| Fixture | Uplink `video.hdr` | Written into the downlink |
+|---|---|---|
+| `hdr10-container.mkv` | 10000-nit BT.2020 display, MaxCLL 10000, MaxFALL 400 | 1000-nit display, MaxCLL 1000, MaxFALL 400: its HEVC SEI |
+| `hdr10-container.mp4` | the same, now from `mdcv`/`clli` (was none) | the same SEI values |
+| `hdr10-boxes-only.mp4` (no SEI in samples or `hvcC`) | the same, from `mdcv`/`clli` | 10000-nit display, MaxCLL 10000, MaxFALL 400: the uplink's |
+
+The two `hdr10-container` fixtures turned out to carry HEVC SEI as well,
+with values that differ from their container's, so they show only that the
+server prefers a frame's SEI. `hdr10-boxes-only.mp4` is the case this change
+is for: before it, that file's downlink would have carried no static
+metadata at all (inferred, since MediaExtractor reports none and the file
+has no SEI; the old build was not run on it). Every other fixture sent and
+received what the 2026-11-03 entry below records.
+
 ## HDR output spike — 2026-11-03
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
@@ -61,8 +87,8 @@ What MediaExtractor reports, and so what the uplink sends:
 | Fixture | Reported | Sent |
 |---|---|---|
 | `hdr10-card.mkv` (metadata in SEI only) | standard 6, transfer 6, range 2, bits-per-sample 10, profile Main10HDR10 | PQ BT.2020, 10 bits |
-| `hdr10-container.mkv` (Matroska MasteringMetadata, MaxCLL 10000/400) | `hdr-static-info` with zero chromaticities and luminance, light levels only | PQ, 10 bits, mastering display from the Colour element (`MatroskaHdrStatic`) and light levels |
-| `hdr10-container.mp4` (same, `mdcv`/`clli`) | no `hdr-static-info` at all | PQ, 10 bits, no static metadata |
+| `hdr10-container.mkv` (Matroska MasteringMetadata, MaxCLL 10000/400; its HEVC SEI says 1000 nits, MaxCLL 1000) | `hdr-static-info` with zero chromaticities and luminance, light levels only | PQ, 10 bits, mastering display from the Colour element (`MatroskaHdrStatic`) and light levels |
+| `hdr10-container.mp4` (same, `mdcv`/`clli`) | no `hdr-static-info` at all | PQ, 10 bits, no static metadata (read from the boxes since 2026-11-04) |
 | `hlg.mkv` | transfer 7 | HLG BT.2020, 10 bits |
 | `dv81.mkv` (Dolby Vision 8.1, dvvC) | plain `video/hevc`, no record | PQ, 10 bits, Dolby Vision 8 / level 6 / compatibility 1 (`MatroskaDolbyVision`) |
 | `dv81.mp4` | two tracks: `video/dolby-vision` (record in `csd-2`, `bl_compatibility_id`), then `video/hevc` | the same, reading the HEVC track |
