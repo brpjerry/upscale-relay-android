@@ -26,6 +26,7 @@ class BackupCodecTest {
         port = 9001,
         autoPlayNext = false,
         model = "2x_AnimeJaNai_HD_V3_Compact",
+        passthrough4k = true,
         qualityTier = "hevc-qp10",
         fitMode = "cover",
         resizeAlgorithm = "lanczos",

@@ -9,6 +9,11 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -16,9 +21,14 @@ import org.junit.runner.RunWith
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.demux.AndroidMediaSource
 import org.upscalerelay.player.mpv.MpvPlaybackState
+import org.upscalerelay.protocol.ContentLightLevel
 import org.upscalerelay.protocol.DolbyVisionConfig
+import org.upscalerelay.protocol.MasteringDisplay
+import org.upscalerelay.protocol.StaticHdrMetadata
 import org.upscalerelay.protocol.VideoColor
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * Local HDR sources: what MediaExtractor reports, what the uplink sends
@@ -37,7 +47,16 @@ class HdrUplinkDeviceTest {
         val color: VideoColor?,
         val bitDepth: Int?,
         val dolbyVision: DolbyVisionConfig? = null,
-        val containerHdr: Boolean = false,
+        /**
+         * The HDR10 static metadata the container declares, which the uplink
+         * sends; null where there is none (the test card's is in its SEI).
+         */
+        val staticHdr: StaticHdrMetadata? = null,
+        /**
+         * What the server writes into the downlink, per half the frames' SEI
+         * where they carry one and else what the uplink sent; null is unchecked.
+         */
+        val writtenHdr: StaticHdrMetadata? = null,
         /**
          * The downlink under "hdr" to an SDR display: its depth, its transfer
          * (null for a source that names none, which the server tags from the
@@ -49,12 +68,34 @@ class HdrUplinkDeviceTest {
     )
 
     private val pq = VideoColor(9, VideoColor.TRANSFER_PQ, 9, "limited")
+
+    private val bt2020Display = MasteringDisplay(
+        primaries = listOf(34_000 to 16_000, 13_250 to 34_500, 7_500 to 3_000),
+        whitePoint = 15_635 to 16_450,
+        maxLuminance = 100_000_000,
+        minLuminance = 50,
+    )
+
+    /** hdr10-container's container: a 10000-nit BT.2020 mastering display, MaxCLL 10000, MaxFALL 400. */
+    private val containerHdr = StaticHdrMetadata(bt2020Display, ContentLightLevel(10_000, 400))
+
+    /** Its HEVC SEI, which differs: a 1000-nit display, MaxCLL 1000, MaxFALL 400. */
+    private val seiHdr = StaticHdrMetadata(bt2020Display.copy(maxLuminance = 10_000_000), ContentLightLevel(1_000, 400))
     private val expected = mapOf(
         "hdr10-card.mkv" to Expected("hevc", pq, 10, downlinkDepth = 10, downlinkTransfer = 16),
-        // MediaExtractor drops Matroska's mastering display; MatroskaHdrStatic reads it.
-        "hdr10-container.mkv" to Expected("hevc", pq, 10, containerHdr = true, downlinkDepth = 10, downlinkTransfer = 16),
-        // An MP4's mdcv reaches nothing: MediaExtractor reports no hdr-static-info.
-        "hdr10-container.mp4" to Expected("hevc", pq, 10, containerHdr = false, downlinkDepth = 10, downlinkTransfer = 16),
+        // MediaExtractor drops Matroska's mastering display; MatroskaHdrStatic
+        // reads it. The server prefers the frames' SEI to it.
+        "hdr10-container.mkv" to Expected(
+            "hevc", pq, 10, staticHdr = containerHdr, writtenHdr = seiHdr, downlinkDepth = 10, downlinkTransfer = 16,
+        ),
+        // MediaExtractor reports nothing of an MP4's mdcv and clli; Mp4HdrStatic reads them.
+        "hdr10-container.mp4" to Expected(
+            "hevc", pq, 10, staticHdr = containerHdr, writtenHdr = seiHdr, downlinkDepth = 10, downlinkTransfer = 16,
+        ),
+        // The same with the SEI stripped from its samples and hvcC: only the boxes say it.
+        "hdr10-boxes-only.mp4" to Expected(
+            "hevc", pq, 10, staticHdr = containerHdr, writtenHdr = containerHdr, downlinkDepth = 10, downlinkTransfer = 16,
+        ),
         "hlg.mkv" to Expected(
             "hevc", VideoColor(9, VideoColor.TRANSFER_HLG, 9, "limited"), 10, downlinkDepth = 10, downlinkTransfer = 18,
         ),
@@ -90,7 +131,7 @@ class HdrUplinkDeviceTest {
             assertEquals(file.name, want.color, info.color)
             assertEquals(file.name, want.bitDepth, info.bitDepth)
             assertEquals(file.name, want.dolbyVision, info.dolbyVision)
-            assertEquals(file.name, want.containerHdr, info.staticHdr?.masteringDisplay != null)
+            assertEquals(file.name, want.staticHdr, info.staticHdr)
         }
     }
 
@@ -135,6 +176,11 @@ class HdrUplinkDeviceTest {
                 assertEquals(file.name, want.downlinkDepth, session.downlinkBitDepth)
                 want.downlinkTransfer?.let { assertEquals(file.name, it, session.downlinkColor?.transfer) }
                 assertEquals(file.name, want.applied, session.downlinkMapping?.applied.orEmpty())
+                want.writtenHdr?.let { hdr ->
+                    val written = writtenStaticHdr(model, session.sessionId)
+                    Log.i(TAG, "${file.name} static metadata written: $written")
+                    assertEquals(file.name, hdr.toJson(), written)
+                }
                 close(model)
             }
         }
@@ -189,6 +235,27 @@ class HdrUplinkDeviceTest {
         await("closed", model, 60_000) {
             it.playingPath == null && !it.busy && it.sessionState == SessionState.BROWSING
         }
+    }
+
+    /**
+     * The static metadata the server writes into session [sessionId]'s
+     * downlink: GET /status sessions[].pipeline.hdr_metadata.static.
+     */
+    private fun writtenStaticHdr(model: RelayViewModel, sessionId: String): JsonObject? {
+        val ui = model.ui.value
+        // As the app connects: trimmed host (an IPv6 literal is bracketed here), default port.
+        val connection = URL("http", ui.host.trim(), ui.port.toIntOrNull() ?: 8590, "/status")
+            .openConnection() as HttpURLConnection
+        val status = try {
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            Json.parseToJsonElement(connection.inputStream.bufferedReader().use { it.readText() }).jsonObject
+        } finally {
+            connection.disconnect()
+        }
+        val entry = status.getValue("sessions").jsonArray.map { it.jsonObject }
+            .single { it["id"]?.jsonPrimitive?.content == sessionId }
+        return (entry["pipeline"] as? JsonObject)?.let { it["hdr_metadata"] as? JsonObject }?.let { it["static"] as? JsonObject }
     }
 
     private fun logFormats(file: File) {

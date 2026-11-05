@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -28,6 +29,7 @@ import org.upscalerelay.protocol.LibraryPage
 import org.upscalerelay.protocol.MediaFraming
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.SeekProgress
+import org.upscalerelay.protocol.VideoSize
 import java.io.Closeable
 import java.io.IOException
 import java.net.SocketTimeoutException
@@ -43,6 +45,7 @@ class RelaySessionController internal constructor(
     private val attachmentCacheRoot: Path?,
     private val webSocketFactory: WebSocket.Factory?,
     private val playerConnectTimeoutMillis: Long,
+    private val sourceSizeProbeTimeoutMillis: Long = SOURCE_SIZE_PROBE_TIMEOUT_MILLIS,
 ) : Closeable {
     constructor(host: String, port: Int = 8590, attachmentCacheRoot: Path? = null) :
         this(host, port, attachmentCacheRoot, null, PLAYER_CONNECT_TIMEOUT_MILLIS)
@@ -86,7 +89,7 @@ class RelaySessionController internal constructor(
 
     @Volatile
     private var openedSessionId: String? = null
-    private var activeModel: String? = null
+    private var activeModel: ModelChoice? = null
     private var activeQualityTier: String? = null
     private var activeFitMode: String? = null
     private var activeResizeAlgorithm: String? = null
@@ -211,6 +214,9 @@ class RelaySessionController internal constructor(
         resizeAlgorithm: String? = null,
         highBitDepth: HighBitDepth? = null,
         displayTarget: DisplayTarget? = null,
+        passthrough4k: Boolean = false,
+        sourceSizeProbe: SourceSizeProbe? = null,
+        knownSourceSize: VideoSize? = null,
     ): PlaybackEndpoint {
         check(state.value == SessionState.BROWSING)
         stateMachine.transition(SessionState.OPENING)
@@ -222,9 +228,21 @@ class RelaySessionController internal constructor(
             require(resizeAlgorithm == null || resizeAlgorithm in caps.resizeAlgorithms) {
                 "server does not support resize algorithm '$resizeAlgorithm'"
             }
-            val model = requestedModel?.takeIf { requested ->
-                caps.models.any { it.name == requested }
-            } ?: caps.phaseOneModel
+            val chosen = ModelChoice.chosenModel(caps, requestedModel)
+            // A library file's size is read only when it can change the model
+            // and no earlier session of the file read it already (a restart):
+            // the probe costs a request or two to /media before the open, and
+            // a resume whose probe failed would put a 4K file on the model.
+            val sourceSize = knownSourceSize
+                ?: if (sourceSizeProbe != null && ModelChoice.sizeMatters(caps, chosen, passthrough4k)) {
+                    probeServerFileSize(path, sourceSizeProbe)
+                } else {
+                    null
+                }
+            // A controller closed during the probe must not open a session.
+            if (closed.get()) throw IOException("the connection closed while reading the video size")
+            val choice = ModelChoice.decide(caps, chosen, passthrough4k, sourceSize)
+            val model = choice.sent
             val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
             val requestMuxedAuxTracks = caps.muxedAuxTracks
             val requestCachedAttachments = requestMuxedAuxTracks && caps.attachmentCacheVersion >= 1
@@ -242,7 +260,7 @@ class RelaySessionController internal constructor(
                     highBitDepth = color.highBitDepth,
                     displayTarget = color.displayTarget,
                 ),
-            )
+            ).copy(model = model, sourceSize = choice.sourceSize)
             openedSessionId = session.sessionId
             require(session.uplinkToken == null) { "server_file unexpectedly requires an uplink" }
             require(session.downlinkContainer == "matroska") {
@@ -305,7 +323,7 @@ class RelaySessionController internal constructor(
             )
             receiver = downlink
             activeSession = session
-            activeModel = model
+            activeModel = choice
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
@@ -332,6 +350,7 @@ class RelaySessionController internal constructor(
                 attachmentCacheStats = attachmentCacheStats,
                 session = session,
                 model = model,
+                chosenModel = chosen,
                 qualityTier = qualityTier,
                 fitMode = fitMode,
                 resizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm,
@@ -346,6 +365,23 @@ class RelaySessionController internal constructor(
         }
     }
 
+    /**
+     * A library file's stored size, read through /media by [probe]. Null
+     * when the probe fails, finds no video or runs past
+     * [SOURCE_SIZE_PROBE_TIMEOUT_MILLIS]: the session then opens with the
+     * chosen model, as it would without passthrough4k.
+     */
+    private suspend fun probeServerFileSize(path: String, probe: SourceSizeProbe): VideoSize? {
+        val url = requireNotNull(control) { "not connected" }.mediaUrl(path)
+        return try {
+            withTimeoutOrNull(sourceSizeProbeTimeoutMillis) { probe.videoSize(url) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun prepareLocalPlayback(
         source: UplinkMediaSource,
         originalMediaUrl: String,
@@ -356,6 +392,7 @@ class RelaySessionController internal constructor(
         resizeAlgorithm: String? = null,
         highBitDepth: HighBitDepth? = null,
         displayTarget: DisplayTarget? = null,
+        passthrough4k: Boolean = false,
     ): PlaybackEndpoint {
         check(state.value == SessionState.BROWSING)
         stateMachine.transition(SessionState.OPENING)
@@ -367,9 +404,14 @@ class RelaySessionController internal constructor(
             require(resizeAlgorithm == null || resizeAlgorithm in caps.resizeAlgorithms) {
                 "server does not support resize algorithm '$resizeAlgorithm'"
             }
-            val model = requestedModel?.takeIf { requested ->
-                caps.models.any { it.name == requested }
-            } ?: caps.phaseOneModel
+            // An uplink's size is the one its own demuxer read.
+            val choice = ModelChoice.decide(
+                caps,
+                ModelChoice.chosenModel(caps, requestedModel),
+                passthrough4k,
+                VideoSize.of(source.videoInfo.width, source.videoInfo.height),
+            )
+            val model = choice.sent
             val color = ColorRequest.negotiate(caps, highBitDepth, displayTarget)
             // HDR10+ rides in the frames, so only the first keyframe tells
             // (§3.6). It matters only to a session the server may map.
@@ -387,6 +429,8 @@ class RelaySessionController internal constructor(
             ).copy(
                 sourceHasAudio = source.videoInfo.sourceHasAudio,
                 sourceHasAuxiliary = source.videoInfo.sourceHasAuxiliary,
+                model = model,
+                sourceSize = choice.sourceSize,
             )
             openedSessionId = session.sessionId
             val token = requireNotNull(session.uplinkToken) { "uplink session did not return a token" }
@@ -425,7 +469,7 @@ class RelaySessionController internal constructor(
             sender.startEpoch(epoch = 0)
 
             activeSession = session
-            activeModel = model
+            activeModel = choice
             activeQualityTier = qualityTier
             activeFitMode = fitMode
             activeResizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm
@@ -445,6 +489,7 @@ class RelaySessionController internal constructor(
                 requestedAuxAttachments = null,
                 session = session,
                 model = model,
+                chosenModel = choice.chosen,
                 qualityTier = qualityTier,
                 fitMode = fitMode,
                 resizeAlgorithm = session.resizeAlgorithm ?: resizeAlgorithm,
@@ -558,7 +603,8 @@ class RelaySessionController internal constructor(
                 requestedAuxAttachments = requestedAuxAttachments,
                 attachmentCacheStats = attachmentCacheStats,
                 session = session,
-                model = requireNotNull(activeModel),
+                model = requireNotNull(activeModel).sent,
+                chosenModel = requireNotNull(activeModel).chosen,
                 qualityTier = requireNotNull(activeQualityTier),
                 fitMode = requireNotNull(activeFitMode),
                 resizeAlgorithm = activeResizeAlgorithm,
@@ -752,6 +798,13 @@ class RelaySessionController internal constructor(
         const val PLAYER_CONNECT_TIMEOUT_MILLIS = 30_000L
 
         /**
+         * How long a library file's size may take to read before the session
+         * opens with the chosen model. Over Wi-Fi the desktop's probe took
+         * 20 ms to 0.4 s; this is the desktop's per-read timeout.
+         */
+        const val SOURCE_SIZE_PROBE_TIMEOUT_MILLIS = 10_000L
+
+        /**
          * How long a lost session may stay listed before it counts as stuck.
          * The server can take 30 s to notice a dead control connection (a
          * 20 s heartbeat plus a 10 s pong wait) and bounds its native close
@@ -805,11 +858,18 @@ data class PlaybackEndpoint(
     val requestedAuxAttachments: String?,
     val attachmentCacheStats: AttachmentCacheStats = AttachmentCacheStats(),
     val session: SessionInfo,
+    /** The model sent in open_session ([ModelChoice.sent]). */
     val model: String,
     val qualityTier: String,
     val fitMode: String,
     val resizeAlgorithm: String?,
-)
+    /** The user's model as the server advertises it ([ModelChoice.chosen]); what a later open asks for again. */
+    val chosenModel: String = model,
+) {
+    /** Passthrough replaced [chosenModel] because the source is 4K or larger. */
+    val passthroughFor4k: Boolean
+        get() = passthroughStoodIn(model, chosenModel)
+}
 
 data class PlayerBufferSnapshot(
     val cacheDurationMillis: Long = 0,

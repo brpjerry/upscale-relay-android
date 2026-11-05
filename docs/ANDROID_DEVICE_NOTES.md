@@ -50,6 +50,82 @@ keyguard (PiP with the tablet unlocked). The display reported HDR at a
   what the owner matched by eye in the spike), background and return, DeX
   or an external monitor, HLG and HDR10+ sources shown as HDR.
 
+## "Use passthrough for 4K or higher resolution videos" — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 over
+Wi-Fi, chosen model `2x_AnimeJaNai_HD_V3_Compact`, 2960x1848 cover.
+`Passthrough4kDeviceTest` passed (41.6 s) with
+`Cyberpunk.Edgerunners.S02E01.MULTi.2160p…H265-YiLongMa.mkv` (HEVC, Dolby
+Vision 8.1) and `BOCCHI THE ROCK! - S01E01 … (BD Remux 1080p H.264
+FLAC).mkv`:
+
+- The 2160p file's size was read through `/media` in 581 ms: 1.33 MB in six
+  256 KiB range requests. It opened with `model=passthrough
+  chosen=2x_AnimeJaNai_HD_V3_Compact source=3840x2160`, and kept passthrough
+  through a seek to 5:00 and a quality restart (`hevc-qp4` to `hevc-qp14`;
+  that first version of the test set `hevc-qp18` before connecting, and the
+  connect replaced it with a tier the server offers Android).
+  The restart passed the known size and read nothing. The saved model stayed
+  `2x_AnimeJaNai_HD_V3_Compact`.
+- The 1080p file's size took 436 ms: 4.0 MB in 17 requests. MediaExtractor
+  reads further into this Matroska file (H.264, FLAC) before it describes
+  its tracks. The file opened with the model; the session was open 19 s
+  after the probe, while the server loaded the model. Turning the option off
+  left that stream alone.
+- By hand: the player's top line read `passthrough (4K source) · hevc-qp14 ·
+  2960×1848 · 10-bit · Dolby Vision applied by the server`. The Model sheet
+  showed the switch on and the chosen model still selected.
+  `phase4-latest.json` had `session_model: passthrough`, `selected_model:
+  2x_AnimeJaNai_HD_V3_Compact`, `source_width/height: 3840/2160`.
+
+After the first review round the test passed again (34 s) with two more
+checks. Choosing another upscaling model and then the first one again
+restarted neither the 2160p library stream nor a local 4K one. The saved
+model followed each choice. The local file was `dv81.mkv`, the 20 s 3840x2160
+Dolby Vision fixture. It opened with `model=passthrough source=3840x2160`
+from its own MediaExtractor, and kept passthrough through a quality restart.
+
+After the second round it passed again (32 s). It now picks its two quality
+tiers after the connect, from the ones the server offers Android.
+`ServerVideoSizeDeviceTest` passed too (3 s). It serves files through the
+app's `LocalDocumentHttpServer` instead of the relay:
+- `dv81.mkv` read as 3840x2160 through Samsung's `SMKVExtractor`.
+- `hdr10-boxes-only.mp4` read as 1920x1080 through `SECMPEG4Extractor`.
+- A text file was refused: "FAILED to autodetect media content".
+- A probe of a server that never answers was cancelled at 3 s. The
+  extractor's blocked read failed with "Socket closed" at the same
+  millisecond, so the probe's thread does not outlive the cancel.
+
+Turning the option off on the 4K file was not tried on the device: it opens
+the 2x model on 4K frames, well below realtime, on a GPU shared with the
+server's owner. `Passthrough4kTest` covers which toggles restart.
+
+## MP4 HDR10 boxes (`mdcv`, `clli`) — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, against the relay at 192.168.0.115:8590 on
+`passthrough` and `hevc-qp4`, with `HdrUplinkDeviceTest` over the nine
+fixtures (DEVELOPMENT.md says how they were made). Both tests passed.
+
+MediaExtractor still reports no `hdr-static-info` for an MP4 with `mdcv` and
+`clli`; `Mp4HdrStatic` now reads them from the sample entry of the track it
+reads (`track-id` 1, the `tkhd` track_ID). What the uplink sends, and what
+the server wrote into the downlink (`/status`
+`sessions[].pipeline.hdr_metadata.static`):
+
+| Fixture | Uplink `video.hdr` | Written into the downlink |
+|---|---|---|
+| `hdr10-container.mkv` | 10000-nit BT.2020 display, MaxCLL 10000, MaxFALL 400 | 1000-nit display, MaxCLL 1000, MaxFALL 400: its HEVC SEI |
+| `hdr10-container.mp4` | the same, now from `mdcv`/`clli` (was none) | the same SEI values |
+| `hdr10-boxes-only.mp4` (no SEI in samples or `hvcC`) | the same, from `mdcv`/`clli` | 10000-nit display, MaxCLL 10000, MaxFALL 400: the uplink's |
+
+The two `hdr10-container` fixtures turned out to carry HEVC SEI as well,
+with values that differ from their container's, so they show only that the
+server prefers a frame's SEI. `hdr10-boxes-only.mp4` is the case this change
+is for: before it, that file's downlink would have carried no static
+metadata at all (inferred, since MediaExtractor reports none and the file
+has no SEI; the old build was not run on it). Every other fixture sent and
+received what the 2026-11-03 entry below records.
+
 ## HDR output spike — 2026-11-03
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
@@ -111,8 +187,8 @@ What MediaExtractor reports, and so what the uplink sends:
 | Fixture | Reported | Sent |
 |---|---|---|
 | `hdr10-card.mkv` (metadata in SEI only) | standard 6, transfer 6, range 2, bits-per-sample 10, profile Main10HDR10 | PQ BT.2020, 10 bits |
-| `hdr10-container.mkv` (Matroska MasteringMetadata, MaxCLL 10000/400) | `hdr-static-info` with zero chromaticities and luminance, light levels only | PQ, 10 bits, mastering display from the Colour element (`MatroskaHdrStatic`) and light levels |
-| `hdr10-container.mp4` (same, `mdcv`/`clli`) | no `hdr-static-info` at all | PQ, 10 bits, no static metadata |
+| `hdr10-container.mkv` (Matroska MasteringMetadata, MaxCLL 10000/400; its HEVC SEI says 1000 nits, MaxCLL 1000) | `hdr-static-info` with zero chromaticities and luminance, light levels only | PQ, 10 bits, mastering display from the Colour element (`MatroskaHdrStatic`) and light levels |
+| `hdr10-container.mp4` (same, `mdcv`/`clli`) | no `hdr-static-info` at all | PQ, 10 bits, no static metadata (read from the boxes since 2026-11-04) |
 | `hlg.mkv` | transfer 7 | HLG BT.2020, 10 bits |
 | `dv81.mkv` (Dolby Vision 8.1, dvvC) | plain `video/hevc`, no record | PQ, 10 bits, Dolby Vision 8 / level 6 / compatibility 1 (`MatroskaDolbyVision`) |
 | `dv81.mp4` | two tracks: `video/dolby-vision` (record in `csd-2`, `bl_compatibility_id`), then `video/hevc` | the same, reading the HEVC track |

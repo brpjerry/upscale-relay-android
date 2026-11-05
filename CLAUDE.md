@@ -337,6 +337,31 @@ release.yml` builds and publishes the signed APK with those notes.
   then is the reader closed. A relay keeps the size it was made at for as
   long as its Surface lives: a resize (PiP) scales the layer to fit
   (`fitTo`) instead of giving mpv a new VO in the middle of an epoch.
+- **"Use passthrough for 4K or higher resolution videos" swaps the model a
+  session sends, never the model the user chose.** `ModelChoice` (in
+  `relay-client`) decides at the open, as the desktop's
+  `SessionConfig.passthrough_4k` does: 3840 wide or 2160 tall and up
+  (`is4kOrHigher`) opens with `passthrough`. An uplink's size is its own
+  demuxer's; a library file's is read through `/media` before the open
+  (`ServerVideoSize`: MediaExtractor over `HttpRangeReader`, only when the
+  option can change the model), and a probe that fails or takes over 10 s
+  keeps the chosen model. A restart of the same file passes the size the
+  last open read for that file (`SourceSizeMemo`, as `knownSourceSize`)
+  instead of probing again, so a resume whose network is not back yet
+  cannot put a 4K file on the model. Never take it from `state.session`:
+  next/previous and auto-play move `activeOrigin` to the next file while
+  the old file's session is still on screen. `PlaybackEndpoint.model` and
+  `SessionInfo.model` are what was sent; `chosenModel` is what the app
+  stores as `selectedModel` and saves. Storing `endpoint.model` instead, as
+  every open did before, would make one 4K file switch the user's model to
+  passthrough for good. Toggling restarts only a stream it changes
+  (`passthrough4kChangesStream`), decided after any open in flight has
+  published its session; another upscaling model leaves a 4K passthrough
+  stream alone (`modelChangeKeepsStream`) unless an open is in flight,
+  whose old session may still be on screen. After the first load, only the
+  switch and an import set `passthrough4k` in the UI state, as with
+  `fileLoggingEnabled`: its own DataStore writes can come back behind older
+  ones.
 - **An uplink sends `video.color` only with a transfer it knows**
   (`platformColor`). The server decides the depth from that colour and reads
   an HEVC uplink's own parameter sets only where it is absent, so an
@@ -419,9 +444,12 @@ release.yml` builds and publishes the signed APK with those notes.
 - MediaExtractor hides most container HDR metadata (Tab S9 Ultra, Android
   16). From Matroska it keeps MaxCLL and MaxFALL but zeroes the mastering
   display, which `MatroskaHdrStatic` reads from the Colour element instead.
-  From MP4 it reports nothing of `mdcv` or `clli`, and that stays unread.
-  HEVC sources lose nothing either way, since the server copies the
-  bitstream's SEI; an MP4 whose HDR10 metadata lives only in its boxes does.
+  From MP4 it reports nothing of `mdcv` or `clli`, which `Mp4HdrStatic`
+  reads from the sample entry of the track MediaExtractor reads (matched by
+  its track-id, the `tkhd` track_ID). The VP9 binding's older `SmDm` and
+  `CoLL` boxes stay unread. Whatever MediaExtractor does report wins, per
+  half, and the server prefers a frame's SEI to anything the uplink sends,
+  so an HEVC source whose SEI carries the metadata is unaffected.
   A Dolby Vision MP4 is two video tracks of the same samples
   (`video/dolby-vision` with the record in `csd-2`, then its base layer). A
   Matroska one is plain `video/hevc`, its record left to

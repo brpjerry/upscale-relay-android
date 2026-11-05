@@ -114,10 +114,30 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - `PlayerSeekDeviceTest` needs the real relay and `-e auditMediaPath` with a
   file of 20 minutes or more. It presses the skip buttons back to back and
   checks where playback lands.
+- `Passthrough4kDeviceTest` needs the real relay, `-e uhdMediaPath` with a
+  2160p library file and `-e fhdMediaPath` with a 1080p one, and `-e model`
+  when the server lacks `2x_AnimeJaNai_HD_V3_Compact`. Under "Use
+  passthrough for 4K or higher resolution videos" it checks that the 2160p
+  file plays with passthrough through a seek and a quality restart, the
+  chosen model staying the saved one, that another model restarts nothing,
+  and that the 1080p file plays with the model and does not restart when
+  the option goes off. `-e uhdLocalFixture dv81.mkv` (the 4K Dolby Vision
+  cut `HdrUplinkDeviceTest` uses) adds the same checks for a local uplink.
+  The probe's cost is in logcat: `read the video size (...) through /media
+  in N ms`.
+- `ServerVideoSizeDeviceTest` needs no relay. It probes `dv81.mkv` and
+  `hdr10-boxes-only.mp4` (`HdrUplinkDeviceTest`'s fixtures) through the
+  app's `LocalDocumentHttpServer`, plus a file that is not media. It also
+  checks that cancelling a probe of a server that never answers drops the
+  connection at once.
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby
-  Vision) and, against the real relay, what comes back.
+  Vision) and, against the real relay, what comes back. For the HDR10
+  container fixtures it also reads the server's `GET /status`
+  `sessions[].pipeline.hdr_metadata.static`, the static metadata written
+  into the downlink: the server prefers the frames' SEI, per half, to what
+  the uplink sends.
   `tenBitVideoWidensAnSdrSourceAndTurningItOffRestarts` plays the first
   fixture, which should be a 10-bit SDR one, under "Use 10 bit video".
   `anMp4StartingBeforeZeroPlaysInSync` needs `-e editListFixture` with an MP4
@@ -126,8 +146,13 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   (`-c copy` for `dv81.mkv`/`.mp4`, `sdr10-hevc.mkv`, `sdr10-h264.mkv` and
   `hdr10-card.mkv`). `hlg.mkv` and `hdr10-container.mkv` are re-encoded with
   `libx265` and `setparams` (the frames' tags win over `-color_trc`), and
-  `hdr10-container.mp4` is that file remuxed. docs/ANDROID_DEVICE_NOTES.md
-  records what the tablet's MediaExtractor reports for each.
+  `hdr10-container.mp4` is that file remuxed. Their HEVC SEI (1000 nits,
+  MaxCLL 1000) differs from their container (10000 nits, MaxCLL 10000).
+  `hdr10-boxes-only.mp4` is that MP4 with every SEI removed, from the
+  samples and from `hvcC`, so only its `mdcv` and `clli` boxes carry the
+  metadata (`tools/make_boxes_only_hdr10.py`).
+  docs/ANDROID_DEVICE_NOTES.md records what the tablet's MediaExtractor
+  reports for each.
 - `HdrOutputDeviceTest` needs a device with an HDR display (API 33+, the
   battery saver off) and the real relay: `-e hdrPath` (an HDR10 server
   file; the HDR test card does) and `-e sdrPath`, plus `-e mappedHdrPath`
