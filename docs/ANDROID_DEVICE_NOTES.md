@@ -60,9 +60,28 @@ keyguard (PiP with the tablet unlocked). The display reported HDR at a
   frame (`superseded`). The PiP test now asserts that it is in PiP.
   `HdrUplinkDeviceTest` puts the setting back on afterwards: `hdr_output`
   read true in DataStore after `anMp4StartingBeforeZeroPlaysInSync`.
+- **After the second review round** (all seven tests in one run, 249 s,
+  tablet unlocked).
+  - `pictureInPictureInFitFramingFillsTheWindow`: in "fit" framing the card's
+    downlink is 2960x1664, drawn with mpv's bars in the 2960x1848 relay. In
+    the 16:9 PiP window the layer showed rows 92-1756 of the relay (its
+    bounds in SurfaceFlinger's layer table), in a 1059x595 display frame:
+    the picture alone, filling the window.
+  - The HWC table's source-crop column still read the whole buffer. A
+    screen capture settled it: the card's square markers measured 27x27 px
+    in the window, where the whole relay squeezed into 16:9 would have made
+    them 27x24.
+  - Release fences are now waited on a thread of their own. Every relay
+    failed 0 frames and passed over at most one per load. The HDR card's
+    steady 20 s and the seek had 0 drops, as before.
+  - Over the keyguard (the tablet locks itself after ten idle minutes),
+    entering "PiP" left a portrait full screen while
+    `isInPictureInPictureMode` said true. The first run of this round fell
+    into that, so the PiP tests now refuse a locked tablet.
 - **Not checked:** subtitles against the controls by eye (the options match
   what the owner matched by eye in the spike), background and return, DeX
-  or an external monitor, HLG and HDR10+ sources shown as HDR.
+  or an external monitor, HLG and HDR10+ sources shown as HDR, frame pacing
+  of 50/60 fps HDR sources.
 
 ## "Use passthrough for 4K or higher resolution videos" — 2026-11-04
 

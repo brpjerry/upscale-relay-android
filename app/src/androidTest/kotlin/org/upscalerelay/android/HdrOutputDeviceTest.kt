@@ -183,7 +183,7 @@ class HdrOutputDeviceTest {
         val (crop, frame) = relayGeometry("pip-fit")
         val cropWidth = crop[2] - crop[0]
         val cropHeight = crop[3] - crop[1]
-        assertTrue("mpv's bars cropped off: $crop", cropHeight < session.downlinkHeight + 4)
+        assertEquals("mpv's bars cropped off: $crop", session.downlinkHeight.toDouble(), cropHeight, 4.0)
         assertEquals("the crop has the picture's aspect", downlinkAspect, cropWidth / cropHeight, 0.02)
         assertEquals("the layer fills the window's width", viewWidth.toDouble(), (frame[2] - frame[0]).toDouble(), 3.0)
         assertEquals("the layer fills the window's height", viewHeight.toDouble(), (frame[3] - frame[1]).toDouble(), 3.0)
@@ -455,17 +455,24 @@ class HdrOutputDeviceTest {
     private fun relayLayerPresent(tag: String) = surfaceFlinger(tag).isNotEmpty()
 
     /**
-     * The relay layer's source crop (in its buffer's pixels) and display
-     * frame (on screen), from its line in SurfaceFlinger's HWC table.
+     * The part of the relay's buffer its layer shows (its bounds, in buffer
+     * pixels, give or take a pixel of rounding) and where on screen it goes
+     * (the display frame), from SurfaceFlinger's two tables. The HWC table's
+     * own source-crop column keeps the whole buffer on the Tab S9 Ultra even
+     * with a crop set. A capture of the window showed the crop applied
+     * (2026-11-04: the card's square markers stayed square in fit-mode PiP).
      */
     private fun relayGeometry(tag: String): Pair<List<Double>, List<Int>> {
-        val line = surfaceFlinger(tag).firstOrNull { "0000002b" in it }
-        val fields = checkNotNull(line) { "no relay layer in the HWC table" }.split('|').map { it.trim() }
-        val format = fields.indexOfFirst { "0000002b" in it }
-        val crop = fields[format + 1].split(Regex("\\s+")).map { it.toDouble() }
-        val frame = fields[format + 2].split(Regex("\\s+")).map { it.toInt() }
-        log("relay[$tag] crop=$crop frame=$frame")
-        return crop to frame
+        val lines = surfaceFlinger(tag)
+        val hwc = checkNotNull(lines.firstOrNull { "0000002b" in it }) { "no relay layer in the HWC table" }
+            .split('|').map { it.trim() }
+        val format = hwc.indexOfFirst { "0000002b" in it }
+        val frame = hwc[format + 2].split(Regex("\\s+")).map { it.toInt() }
+        val bounds = checkNotNull(lines.firstOrNull { "0000002b" !in it && (it.first().isDigit() || it.first() == '-') }) {
+            "no relay layer in the layer table"
+        }.substringBefore('|').trim().split(Regex("\\s+")).map { it.toDouble() }
+        log("relay[$tag] bounds=$bounds frame=$frame")
+        return bounds to frame
     }
 
     private fun relayLayerIsPq(tag: String) = surfaceFlinger(tag).any { "dataspace=BT2020_PQ" in it }
