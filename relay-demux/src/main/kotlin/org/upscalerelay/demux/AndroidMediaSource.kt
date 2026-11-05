@@ -144,10 +144,14 @@ class AndroidMediaSource private constructor(
                                 profile = if (readingDolbyVisionView) null
                                 else format.intOrNull(MediaFormat.KEY_PROFILE),
                             ),
+                            // MediaExtractor's hdr-static-info, where it has one,
+                            // then what it hides: Matroska's mastering display,
+                            // and an MP4's mdcv and clli.
                             staticHdr = staticHdrFromCta861(
                                 format.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO)
                                     ?: dolbyVisionFormat?.byteBufferOrNull(MediaFormat.KEY_HDR_STATIC_INFO),
-                            ).orElse(readMatroskaHdrStatic(resolver, uri)),
+                            ).orElse(readMatroskaHdrStatic(resolver, uri))
+                                .orElse(readMp4HdrStatic(resolver, uri, videoTracks.first { it.index == videoTrack }.trackId)),
                             dolbyVision = dolbyVision,
                         ),
                     )
@@ -177,6 +181,20 @@ class AndroidMediaSource private constructor(
                 resolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     FileInputStream(pfd.fileDescriptor).use { stream ->
                         MatroskaHdrStatic.parse(stream.channel)
+                    }
+                }
+            }.getOrNull()
+
+        /**
+         * Null for non-MP4 documents and tracks without mdcv or clli;
+         * best-effort like chapters. [trackId] is the track read, by
+         * MediaExtractor's track-id (the tkhd track_ID).
+         */
+        private fun readMp4HdrStatic(resolver: ContentResolver, uri: Uri, trackId: Int?): StaticHdrMetadata? =
+            runCatching {
+                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { stream ->
+                        Mp4HdrStatic.parse(stream.channel, trackId)
                     }
                 }
             }.getOrNull()
