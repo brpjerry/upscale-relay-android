@@ -334,9 +334,12 @@ release.yml` builds and publishes the signed APK with those notes.
   (`requestedOutput`), so that never turns into a reload loop. The relay is
   an owner: mpv is detached first (`vo=null`, which returns once the VO is
   gone), then its command queue drained (`afterPendingCommands`), and only
-  then is the reader closed. A relay keeps the size it was made at for as
-  long as its Surface lives: a resize (PiP) scales the layer to fit
-  (`fitTo`) instead of giving mpv a new VO in the middle of an epoch.
+  then is the reader closed. A relay keeps its size while an epoch plays: a
+  resize (PiP) scales the layer to fit (`fitTo`) instead of giving mpv a new
+  VO in the middle of an epoch. The next load replaces a relay smaller than
+  the view, as one first made in PiP is once the window grows, and keeps a
+  larger one. A frame goes back to mpv only on the relay's thread, after its
+  release fence has signalled, however long that takes.
 - **"Use passthrough for 4K or higher resolution videos" swaps the model a
   session sends, never the model the user chose.** `ModelChoice` (in
   `relay-client`) decides at the open, as the desktop's

@@ -1,11 +1,14 @@
 package org.upscalerelay.android
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
 import `is`.xyz.mpv.MPVLib
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
@@ -19,6 +22,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.player.mpv.MpvPlaybackState
+import org.upscalerelay.player.mpv.MpvSurfaceView
 import org.upscalerelay.player.mpv.VideoOutput
 import java.io.File
 
@@ -31,7 +35,8 @@ import java.io.File
  * - an SDR file plays exactly as before;
  * - the battery saver and "Show HDR videos in HDR" send an HDR video back to
  *   SDR at its position, and back again;
- * - picture-in-picture keeps PQ, without a reload;
+ * - picture-in-picture keeps PQ, without a reload, and a relay first made in
+ *   PiP is made again at full size by the first load after the window grows;
  * - a Dolby Vision source the server maps is remapped for each display.
  *
  * `-e hdrPath '<server file, HDR10>' -e sdrPath '<server file, SDR>'
@@ -96,27 +101,27 @@ class HdrOutputDeviceTest {
         try {
             // Battery saver is refused while charging: unplug, as far as the
             // battery service knows.
-            shell("cmd battery unplug")
-            shell("cmd power set-mode 1")
-            awaitCondition("battery saver on", 10_000) { power.isPowerSaveMode }
-            reloadedTo(model, VideoOutput.Sdr, "battery saver on")
+            reloadedTo(model, VideoOutput.Sdr, "battery saver on") {
+                shell("cmd battery unplug")
+                shell("cmd power set-mode 1")
+                awaitCondition("battery saver on", 10_000) { power.isPowerSaveMode }
+            }
             assertFalse("no HDR layer with the battery saver on", hdrLayerPresent("saver"))
             assertNoDrops(model, "battery saver on", 8_000)
 
-            shell("cmd power set-mode 0")
-            awaitCondition("battery saver off", 10_000) { !power.isPowerSaveMode }
-            reloadedTo(model, VideoOutput.Pq(peak), "battery saver off")
+            reloadedTo(model, VideoOutput.Pq(peak), "battery saver off") {
+                shell("cmd power set-mode 0")
+                awaitCondition("battery saver off", 10_000) { !power.isPowerSaveMode }
+            }
             assertTrue("an HDR layer again", hdrLayerPresent("saver-off"))
         } finally {
             shell("cmd power set-mode 0")
             shell("cmd battery reset")
         }
         try {
-            onMain { model.setHdrOutput(false) }
-            reloadedTo(model, VideoOutput.Sdr, "setting off")
+            reloadedTo(model, VideoOutput.Sdr, "setting off") { onMain { model.setHdrOutput(false) } }
             assertFalse("no HDR layer with the setting off", hdrLayerPresent("setting-off"))
-            onMain { model.setHdrOutput(true) }
-            reloadedTo(model, VideoOutput.Pq(peak), "setting on")
+            reloadedTo(model, VideoOutput.Pq(peak), "setting on") { onMain { model.setHdrOutput(true) } }
             assertTrue("an HDR layer with the setting on", hdrLayerPresent("setting-on"))
         } finally {
             onMain { model.setHdrOutput(true) }
@@ -131,8 +136,9 @@ class HdrOutputDeviceTest {
         SystemClock.sleep(3_000)
         val epoch = epochOf(model)
         val before = model.ui.value.mpvMetrics
-        scenario.onActivity { it.enterPictureInPictureMode(PictureInPictureParams.Builder().build()) }
+        enterPictureInPicture()
         SystemClock.sleep(15_000)
+        assertTrue("still in PiP", inPictureInPicture())
         val after = model.ui.value
         log(
             "pip drops=${after.mpvMetrics.outputDroppedFrames - before.outputDroppedFrames}/" +
@@ -151,6 +157,45 @@ class HdrOutputDeviceTest {
         assertEquals(0L, after.mpvMetrics.decoderDroppedFrames - before.decoderDroppedFrames)
     }
 
+    /**
+     * A relay keeps its size while an epoch plays, so one first made in PiP
+     * (here: the setting switched on in the small window) is scaled up when
+     * the window grows. The next load, a seek, must give mpv one at the
+     * window's size, not reuse the small one for good.
+     */
+    @Test
+    fun aRelayMadeInPictureInPictureGrowsAtTheNextLoad() = player("pip-grow") { model ->
+        val peak = hdrDisplayPeak(model)
+        onMain { model.setHdrOutput(false) }
+        try {
+            open(model, path("hdrPath"))
+            awaitOutput(model, VideoOutput.Sdr)
+            val full = playerViewSize()
+            enterPictureInPicture()
+            awaitCondition("the player shrinks", 10_000) { playerViewSize() != full }
+            reloadedTo(model, VideoOutput.Pq(peak), "setting on in PiP") { onMain { model.setHdrOutput(true) } }
+            val small = mpvSurfaceSize("in PiP")
+            assertEquals("the relay made at the PiP size", playerViewSize(), small)
+
+            leavePictureInPicture()
+            awaitCondition("the player grows", 10_000) { playerViewSize() == full }
+            SystemClock.sleep(2_000)
+            // Within the epoch the small relay is scaled up, not replaced.
+            assertEquals(small, mpvSurfaceSize("back to full screen"))
+
+            val epoch = epochOf(model)
+            val target = model.ui.value.mpvMetrics.positionSeconds + 10
+            onMain { model.seekTo(target) }
+            awaitPlaying(model, "seek to $target") { epochOf(model) > epoch && it.videoOutput == VideoOutput.Pq(peak) }
+            assertEquals("a relay at the window's size", full, mpvSurfaceSize("after the seek"))
+            SystemClock.sleep(3_000)
+            assertTrue("the new relay layer tagged BT2020_PQ", relayLayerIsPq("grown"))
+            assertNoDrops(model, "after the seek", 8_000)
+        } finally {
+            onMain { model.setHdrOutput(true) }
+        }
+    }
+
     @Test
     fun aMappedSourceIsRemappedForEachDisplay() = player("mapped") { model ->
         val peak = hdrDisplayPeak(model)
@@ -160,21 +205,25 @@ class HdrOutputDeviceTest {
         assertEquals("pq", model.ui.value.session?.downlinkMapping?.transfer)
         val power = context.getSystemService(PowerManager::class.java)
         try {
-            shell("cmd battery unplug")
-            shell("cmd power set-mode 1")
-            awaitCondition("battery saver on", 10_000) { power.isPowerSaveMode }
-            reloadedTo(model, VideoOutput.Sdr, "battery saver on")
+            reloadedTo(model, VideoOutput.Sdr, "battery saver on") {
+                shell("cmd battery unplug")
+                shell("cmd power set-mode 1")
+                awaitCondition("battery saver on", 10_000) { power.isPowerSaveMode }
+            }
             // The reload's seek named sdr: the server applied the RPU.
             val mapping = model.ui.value.session?.downlinkMapping
             assertEquals("sdr", mapping?.transfer)
             assertEquals(listOf("dolby_vision"), mapping?.applied)
             assertFalse(model.ui.value.session?.downlinkColor?.isHdr == true)
+            reloadedTo(model, VideoOutput.Pq(peak), "battery saver off") {
+                shell("cmd power set-mode 0")
+                awaitCondition("battery saver off", 10_000) { !power.isPowerSaveMode }
+            }
+            assertEquals("pq", model.ui.value.session?.downlinkMapping?.transfer)
         } finally {
             shell("cmd power set-mode 0")
             shell("cmd battery reset")
         }
-        reloadedTo(model, VideoOutput.Pq(peak), "battery saver off")
-        assertEquals("pq", model.ui.value.session?.downlinkMapping?.transfer)
     }
 
     // ---- helpers -----------------------------------------------------------
@@ -246,11 +295,16 @@ class HdrOutputDeviceTest {
         return output
     }
 
-    /** A reload at the current position that ends on [output]. */
-    private fun reloadedTo(model: RelayViewModel, output: VideoOutput, label: String) {
+    /**
+     * The reload that [change] causes, at the current position, ending on
+     * [output]. Where it started is read before the change, which may
+     * already have moved the epoch or reset mpv's position when it returns.
+     */
+    private fun reloadedTo(model: RelayViewModel, output: VideoOutput, label: String, change: () -> Unit) {
         val epoch = epochOf(model)
         val position = model.ui.value.mpvMetrics.positionSeconds
         val started = SystemClock.elapsedRealtime()
+        change()
         awaitPlaying(model, label, 60_000) { epochOf(model) > epoch && it.videoOutput == output }
         val state = model.ui.value
         log(
@@ -289,6 +343,51 @@ class HdrOutputDeviceTest {
     }
 
     private fun epochOf(model: RelayViewModel) = model.ui.value.session?.epoch ?: -1
+
+    private fun enterPictureInPicture() {
+        var entered = false
+        scenario.onActivity { entered = it.enterPictureInPictureMode(PictureInPictureParams.Builder().build()) }
+        assertTrue("PiP entry accepted", entered)
+        awaitCondition("in PiP", 10_000) { inPictureInPicture() }
+    }
+
+    /** As the PiP window's expand button does: the task back in front, full screen. */
+    private fun leavePictureInPicture() {
+        context.startActivity(
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+        )
+        awaitCondition("out of PiP", 10_000) { !inPictureInPicture() }
+    }
+
+    private fun inPictureInPicture(): Boolean {
+        var pip = false
+        scenario.onActivity { pip = it.isInPictureInPictureMode }
+        return pip
+    }
+
+    /** The player view's size, which a relay made for it now would have. */
+    private fun playerViewSize(): String {
+        var size = ""
+        scenario.onActivity { activity ->
+            size = findPlayerView(activity.window.decorView)?.let { "${it.width}x${it.height}" }.orEmpty()
+        }
+        return size
+    }
+
+    private fun findPlayerView(view: View): MpvSurfaceView? = when (view) {
+        is MpvSurfaceView -> view
+        is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { findPlayerView(view.getChildAt(it)) }
+        else -> null
+    }
+
+    /** The size mpv draws at: the relay's, for PQ. */
+    private fun mpvSurfaceSize(tag: String): String {
+        val size = MPVLib.getPropertyString("android-surface-size").orEmpty()
+        log("mpv[$tag] android-surface-size=$size view=${playerViewSize()}")
+        surfaceFlinger(tag)
+        return size
+    }
 
     /** DisplayManager's own word on whether the panel is in HDR. */
     private fun hdrLayerPresent(tag: String): Boolean {

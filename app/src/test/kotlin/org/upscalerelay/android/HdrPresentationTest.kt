@@ -132,14 +132,6 @@ class HdrPresentationTest {
     }
 
     @Test
-    fun `an output the surface could not give does not reload on a loop`() {
-        // What a load asked for is what counts: when the HDR relay could not
-        // be made, mpv tone-maps on the SDR surface, and the next load asks
-        // again rather than a reload every few seconds.
-        assertFalse(hdrPresentationStale(pq540, epoch(pq), VideoOutput.Pq(540.0)))
-    }
-
-    @Test
     fun `the display shows HDR with HDR10 or HLG, without what the user turned off`() {
         // Tab S9 Ultra: HDR10, HLG, HDR10+ at 540 nits.
         assertEquals(tablet, displayHdrFrom(intArrayOf(2, 3, 4), 540f))

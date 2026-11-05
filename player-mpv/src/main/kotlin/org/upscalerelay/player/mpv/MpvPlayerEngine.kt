@@ -64,17 +64,29 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var requested: VideoOutput = VideoOutput.Sdr
     /** What the attached Surface carries, and mpv's options are set for. */
     private var attachedOutput: VideoOutput = VideoOutput.Sdr
+    /**
+     * False while mpv draws at less than its view's size: an HDR relay made
+     * in a small window (PiP, split screen) and kept through the resize. The
+     * next load asks the view for one at the view's size.
+     */
+    private var attachedCoversView = true
     /** mpv's start-up values of the options the outputs change. */
     private var outputDefaults: Map<String, String> = emptyMap()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mutablePresentedOutput = MutableStateFlow<VideoOutput>(VideoOutput.Sdr)
 
-    /** The output mpv renders to now: Pq only while it draws into an HDR relay. */
+    /**
+     * The output mpv's VO is set up for: Pq while it is on an HDR relay. That
+     * stays so after [stop] (the relay stays attached until a load asks for
+     * the SDR surface), so idle it says what the next HDR load reuses, not
+     * that a picture is shown.
+     */
     val presentedOutput: StateFlow<VideoOutput> = mutablePresentedOutput.asStateFlow()
 
     /**
      * Called on the main thread when a load asks for an output the attached
-     * Surface does not carry. The surface view answers with [attachSurface].
+     * Surface does not carry, or the Surface is smaller than the view. The
+     * surface view answers with [attachSurface].
      */
     @Volatile
     var outputRequestListener: (() -> Unit)? = null
@@ -151,14 +163,14 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     /**
-     * Loads now if the attached Surface carries [output]. Otherwise the load
-     * waits, and the surface view is asked for the Surface that does: the
-     * output changes between loads only, with mpv stopped, and each relay
-     * seek is a load.
+     * Loads now if the attached Surface carries [output] at the view's size.
+     * Otherwise the load waits, and the surface view is asked for the Surface
+     * that does: the output and an HDR relay's size change between loads
+     * only, with mpv stopped, and each relay seek is a load.
      */
     private fun loadOn(output: VideoOutput, load: MpvLoadRequest) {
         requested = output
-        if (attachedSurface != null && attachedOutput == output) {
+        if (attachedSurface != null && attachedOutput == output && attachedCoversView) {
             loadNow(load)
             return
         }
@@ -169,6 +181,13 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     /** The output the current or pending load asks for. */
     fun requestedOutput(): VideoOutput = synchronized(lock) { requested }
+
+    /**
+     * Whether a load waits for a Surface: mpv is stopped, so the view may
+     * give it a new one (a relay at the view's size) without cutting into
+     * an epoch.
+     */
+    fun awaitsSurface(): Boolean = synchronized(lock) { pendingLoad != null }
 
     /**
      * Runs [action] once every command queued so far has run: how an owner
@@ -323,15 +342,18 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * Gives mpv [surface], which carries [output]: the `SurfaceView`'s own for
      * SDR, an HDR relay's for PQ. A load waiting for a Surface runs on it,
      * also when it asked for another output the view could not provide (mpv
-     * then tone-maps).
+     * then tone-maps). [coversView] is false for a relay smaller than its
+     * view, which the next load replaces.
      */
     fun attachSurface(
         surface: Surface,
         width: Int,
         height: Int,
         output: VideoOutput = VideoOutput.Sdr,
+        coversView: Boolean = true,
     ) = synchronized(lock) {
         check(initialized && !closed)
+        attachedCoversView = coversView
         if (attachedSurface === surface && attachedOutput == output) {
             resize(width, height)
         } else {

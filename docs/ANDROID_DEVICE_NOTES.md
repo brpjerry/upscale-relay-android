@@ -46,6 +46,20 @@ keyguard (PiP with the tablet unlocked). The display reported HDR at a
   `HdrUplinkDeviceTest`'s `localHdrStreamsAsTheServerShouldSendIt`. That
   one now switches HDR output off, since it checks the downlink for an SDR
   display.
+- **After the first review round** (same setup, all six tests in one run,
+  235 s). `aRelayMadeInPictureInPictureGrowsAtTheNextLoad` covers the new
+  case: the card opened on SDR, then the setting was turned on in PiP.
+  - The reload made a 1018x635 relay (`android-surface-size=1018x635`).
+  - Back in full screen, mpv kept drawing at 1018x635 for the rest of that
+    epoch, and SurfaceFlinger stretched it to 2960x1847.
+  - The next seek made a new 2960x1848 relay (BT2020_PQ, DEVICE overlay)
+    and hid the small one after 84 frames, with 0 drops.
+
+  Release fences are now waited out on the relay's thread with no timeout.
+  Across the run, every relay failed 0 frames and passed over at most one
+  frame (`superseded`). The PiP test now asserts that it is in PiP.
+  `HdrUplinkDeviceTest` puts the setting back on afterwards: `hdr_output`
+  read true in DataStore after `anMp4StartingBeforeZeroPlaysInSync`.
 - **Not checked:** subtitles against the controls by eye (the options match
   what the owner matched by eye in the spike), background and return, DeX
   or an external monitor, HLG and HDR10+ sources shown as HDR.

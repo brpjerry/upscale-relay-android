@@ -75,15 +75,19 @@ internal fun videoOutputFor(target: DisplayTarget, epoch: SessionInfo): VideoOut
 /**
  * Whether the epoch playing no longer fits [target], so a reload at the
  * current position has to replace it: the server made a mapped epoch for
- * another display, or mpv presents it ([presented], what its load asked for)
- * another way than the display now calls for. The battery saver coming on,
- * the window moving to an SDR monitor and the setting switched off all end
- * here, and so do their opposites.
+ * another display, or its load asked mpv for another output ([requested])
+ * than the display now calls for. The battery saver coming on, the window
+ * moving to an SDR monitor and the setting switched off all end here, and so
+ * do their opposites.
+ *
+ * [requested] is what the load asked for, never what mpv got: when no HDR
+ * relay could be made, a PQ load plays tone-mapped on the SDR surface, and
+ * comparing that would reload the epoch every cooldown for nothing.
  */
-internal fun hdrPresentationStale(target: DisplayTarget, epoch: SessionInfo, presented: VideoOutput): Boolean {
+internal fun hdrPresentationStale(target: DisplayTarget, epoch: SessionInfo, requested: VideoOutput): Boolean {
     val madeFor = epoch.downlinkMapping?.transfer
     if (madeFor != null && madeFor != target.transfer) return true
-    return videoOutputFor(target, epoch) != presented
+    return videoOutputFor(target, epoch) != requested
 }
 
 /** For logs and diagnostics: "SDR", "PQ to 540 nits". */

@@ -2981,15 +2981,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (seekJob?.isActive == true || restartJob?.isActive == true || reconnectJob?.isActive == true) return
         if (closingJob?.isActive == true || openingJob?.isActive == true) return
         val target = displayTarget(state, session.hdrSource)
-        val presented = playerEngine.requestedOutput()
-        if (!hdrPresentationStale(target, session, presented)) return
+        if (!hdrPresentationStale(target, session, playerEngine.requestedOutput())) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastHdrReloadAt < HDR_RELOAD_COOLDOWN_MILLIS) return
         lastHdrReloadAt = now
         val position = state.userPositionSeconds()
         AppLog.i(
             TAG,
-            "display now calls for ${target.transfer} (${presented.describe()} playing, epoch made for " +
+            "display now calls for ${target.transfer} (${playerEngine.requestedOutput().describe()} asked for, epoch made for " +
                 "${session.downlinkMapping?.transfer ?: "any display"}): reloading at %.1fs".format(position),
         )
         seekTo(position)

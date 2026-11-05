@@ -3,6 +3,7 @@ package org.upscalerelay.player.mpv
 import android.annotation.TargetApi
 import android.hardware.DataSpace
 import android.hardware.HardwareBuffer
+import android.hardware.SyncFence
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -10,7 +11,6 @@ import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
-import java.time.Duration
 
 /**
  * Presents mpv's PQ output as HDR (docs/HDR_OUTPUT.md, approach 3).
@@ -30,7 +30,9 @@ import java.time.Duration
  * (MpvPlayerEngine.afterPendingCommands).
  *
  * Everything that touches the reader or the layer runs on the relay's own
- * thread, so a retirement can never race a frame in flight.
+ * thread, so a retirement can never race a frame in flight. That includes
+ * returning a frame SurfaceFlinger let go of: its release callback comes on
+ * another thread and only hands the frame over.
  */
 @TargetApi(33) // callers check: MpvSurfaceView relays only from API 33
 internal class HdrSurfaceRelay private constructor(
@@ -130,13 +132,11 @@ internal class HdrSurfaceRelay private constructor(
             image.fence.use { fence ->
                 SurfaceControl.Transaction()
                     .setBuffer(layer, buffer, fence) { release ->
-                        // SurfaceFlinger is done with the buffer once its
-                        // release fence signals; only then may mpv draw into
-                        // it again.
-                        release.use { it.await(RELEASE_FENCE_TIMEOUT) }
-                        buffer.close()
-                        image.close()
-                        handler.post(::relayLatest)
+                        // Once the relay has quit (close), its reader is
+                        // closed and nothing presents any more.
+                        if (!handler.post { recycle(image, buffer, release, relayNext = true) }) {
+                            recycle(image, buffer, release, relayNext = false)
+                        }
                     }
                     .setDataSpace(layer, DataSpace.DATASPACE_BT2020_PQ)
                     .apply()
@@ -150,12 +150,24 @@ internal class HdrSurfaceRelay private constructor(
         }
     }
 
+    /**
+     * Gives a frame SurfaceFlinger let go of back to mpv. The compositor may
+     * read the buffer until its release fence signals, so this waits for that
+     * however long it takes: a buffer returned early is one mpv may draw the
+     * next frame into while it is still on screen.
+     */
+    private fun recycle(image: Image, buffer: HardwareBuffer, release: SyncFence, relayNext: Boolean) {
+        release.use { it.awaitForever() }
+        buffer.close()
+        image.close()
+        if (relayNext) relayLatest()
+    }
+
     companion object {
         private const val TAG = "RelayMpv"
 
         /** mpv holds about two, the compositor two: five leaves one to spare. */
         private const val MAX_IMAGES = 5
-        private val RELEASE_FENCE_TIMEOUT: Duration = Duration.ofMillis(200)
 
         /** A relay of [width]x[height] under [parent], the `SurfaceView`'s layer. Main thread. */
         fun create(parent: SurfaceControl, width: Int, height: Int): HdrSurfaceRelay {

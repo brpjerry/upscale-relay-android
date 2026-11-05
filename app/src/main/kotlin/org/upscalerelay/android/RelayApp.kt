@@ -1575,6 +1575,9 @@ private fun PlayerScreen(
         AndroidView(
             factory = { context -> MpvSurfaceView(context).apply { engine = viewModel.playerEngine } },
             update = { it.engine = viewModel.playerEngine },
+            // The engine lives in the ViewModel: let go of the view, and with
+            // it the Activity, when the player leaves.
+            onRelease = { it.engine = null },
             modifier = Modifier.fillMaxSize(),
         )
         // Keep this AndroidView at the same composition position in PiP.
