@@ -1,5 +1,42 @@
 # Android device validation notes
 
+## Settings changed while a file opens — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, over the keyguard, the relay at
+192.168.0.115:8590 on `passthrough`, Bad Girl S01E01 and E02 (1080p SDR).
+`SettingsRestartDeviceTest` makes each change once the controller reports
+OPENING, after the open has sent its settings. It passed 5/5, twice:
+
+- **Quality, then model, during an open from a 300 s resume point.** The
+  open published what it had read (`hevc-qp18`, `passthrough`) at 300.0 s.
+  25-40 ms later came one restart, with the chosen tier or model, also at
+  300.0 s. The selection and the saved model stayed on the chosen one
+  throughout.
+- **Quality during a reconnect.** Wi-Fi went off and the dead socket
+  started a reconnect at 300.0 s. Once Wi-Fi was back and the reconnect had
+  reached OPENING, the change was made. The reconnect published at
+  300.0 s with the old tier, the UI kept the new one, and one restart
+  followed 12 ms later at 300.0 s.
+- **Quality during the advance to E02, by auto-play and by the next
+  button.** E01's session was never on screen under E02's name. The advance
+  published at 0 s with the old tier, and one restart followed, at 0.0 s.
+  The next button stops the metrics first, so before the start target was
+  recorded, this restart would have read E01's last position.
+
+Each restarted stream played on (301-302 s, or 4.4 s, at close). No
+controller failure appeared outside the Wi-Fi test.
+`PlayerSeekDeviceTest`, `Passthrough4kDeviceTest` and
+`ConnectionLossDeviceTest` passed as before: the 4K stand-in kept its
+session through both model changes, the quality change was one restart, and
+the reconnect resumed at 300 s.
+
+The first three cases on main's app code (the version of the test before
+the resume point and the reconnect were added) failed 3/3. The quality
+change was never applied, and the open put `passthrough` back over the
+chosen model. During the advance, E01's session stayed on screen under E02's
+name, and a settings restart started 200 ms in, at E01's position
+(1421.6 s), beside the advance's own open.
+
 ## HDR output — 2026-11-04
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on

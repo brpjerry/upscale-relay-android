@@ -58,15 +58,6 @@ internal val RelayUiState.passthroughHoldsFor4k: Boolean
     get() = passthrough4k && passthroughStandsIn && relaySession?.sourceSize?.is4kOrHigher() == true
 
 /**
- * Whether choosing [next] restarts the stream. With an open, reconnect, file
- * advance or restart [inFlight], always: the session on screen may be the
- * file being left, and the open may have read the old model, which would
- * then come back as the selection when it finishes.
- */
-internal fun RelayUiState.modelChangeRestarts(next: String, inFlight: Boolean): Boolean =
-    inFlight || !modelChangeKeepsStream(next)
-
-/**
  * The warning after repeated rebuffers, naming the model the session really
  * runs: on a 4K source passthrough stands in for, another model changes
  * nothing, so only the quality is worth lowering.

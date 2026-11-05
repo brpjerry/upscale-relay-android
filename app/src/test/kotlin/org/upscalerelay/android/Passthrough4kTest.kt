@@ -86,15 +86,6 @@ class Passthrough4kTest {
     }
 
     @Test
-    fun `a model change while an open is in flight always restarts`() {
-        val standingIn = state(session(PASSTHROUGH_MODEL, uhd))
-        assertFalse(standingIn.modelChangeRestarts("2x_Other", inFlight = false))
-        // Next/previous: the 4K session on screen is the file being left.
-        assertTrue(standingIn.modelChangeRestarts("2x_Other", inFlight = true))
-        assertTrue(state(session("2x_Model", fhd)).modelChangeRestarts("2x_Other", inFlight = false))
-    }
-
-    @Test
     fun `passthrough stands in only for a model the user chose`() {
         assertTrue(state(session(PASSTHROUGH_MODEL, uhd)).passthroughStandsIn)
         assertFalse(state(session(PASSTHROUGH_MODEL, uhd), chosen = PASSTHROUGH_MODEL).passthroughStandsIn)

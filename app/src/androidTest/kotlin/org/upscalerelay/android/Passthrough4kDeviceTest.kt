@@ -3,7 +3,6 @@ package org.upscalerelay.android
 import android.os.SystemClock
 import android.net.Uri
 import androidx.lifecycle.ViewModelProvider
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
@@ -55,7 +54,7 @@ class Passthrough4kDeviceTest {
         assumeTrue("pass -e uhdMediaPath and -e fhdMediaPath <library files>", !uhd.isNullOrBlank() && !fhd.isNullOrBlank())
         val chosen = arguments.getString("model") ?: "2x_AnimeJaNai_HD_V3_Compact"
         check(chosen != PASSTHROUGH_MODEL) { "-e model must name an upscaling model, not $chosen" }
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+        launchOverKeyguard().use { scenario ->
             lateinit var model: RelayViewModel
             scenario.onActivity { model = ViewModelProvider(it)[RelayViewModel::class.java] }
             await("preferences", model) { it.preferencesLoaded }

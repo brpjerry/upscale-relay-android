@@ -36,6 +36,12 @@ class MainActivity : ComponentActivity() {
     private val viewModel: RelayViewModel by viewModels()
     private var inPictureInPicture by mutableStateOf(false)
 
+    // The picture size of the last session shown while the player is up. A
+    // file advance clears the session until the next file opens; the PiP
+    // window keeps its shape meanwhile instead of jumping to 16:9 and back.
+    // Leaving the player forgets it, so the next file starts from 16:9.
+    private var pipPictureSize = DEFAULT_PIP_SIZE
+
     private val pipActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_PIP_PLAY_PAUSE) {
@@ -181,8 +187,12 @@ class MainActivity : ComponentActivity() {
     private fun pictureInPictureParams(state: RelayUiState): PictureInPictureParams {
         val videoActive = state.playingPath != null && state.error == null &&
             state.reconnecting == null
-        val width = state.session?.downlinkWidth ?: 16
-        val height = state.session?.downlinkHeight ?: 9
+        val session = state.session
+        when {
+            state.playingPath == null -> pipPictureSize = DEFAULT_PIP_SIZE
+            session != null -> pipPictureSize = session.downlinkWidth to session.downlinkHeight
+        }
+        val (width, height) = pipPictureSize
         val ratio = if (width > 0 && height > 0) Rational(width, height) else Rational(16, 9)
         val clamped = when {
             ratio.toFloat() > 2.35f -> Rational(235, 100)
@@ -266,6 +276,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "RelayAndroid"
         private const val ACTION_PIP_PLAY_PAUSE = "org.upscalerelay.android.action.PIP_PLAY_PAUSE"
+
+        private val DEFAULT_PIP_SIZE = 16 to 9
 
         /** MotionEvent.FLAG_CANCELED, which is public only from API 33. */
         private const val FLAG_CANCELED = 0x20

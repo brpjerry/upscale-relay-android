@@ -206,8 +206,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
     private var restartJob: Job? = null
 
-    /** Decides whether a passthrough4k toggle restarts the stream, once any open in flight has published its own. */
-    private var passthroughToggleJob: Job? = null
+    /** Applies a settings change to the stream once any open in flight has published its session (applyStreamSettings). */
+    private var settingsJob: Job? = null
+
+    /**
+     * What the relay stream on screen was opened with (StreamSettings.carrying);
+     * null from the moment a restart, reconnect or advance takes it down until
+     * one publishes the next, and while no relay stream plays.
+     */
+    private var streamOpenedWith: StreamSettings? = null
 
     /** What the last relay open read of its file's size (passthrough4k); a restart of that file reuses it. */
     private val sourceSizes = SourceSizeMemo<PlaybackOrigin>()
@@ -345,8 +352,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     // duration may pin the entry at 100%; a mid-file END_FILE
                     // must keep the real position maybeSaveProgress last
                     // recorded, and the reconnect path takes it from there.
-                    val reconnecting =
-                        reconnectJob?.isActive == true || restartJob?.isActive == true
+                    // A file advance stops the file being left after
+                    // activeOrigin has moved on to the next one.
+                    val reconnecting = reconnectJob?.isActive == true ||
+                        restartJob?.isActive == true || autoAdvanceJob?.isActive == true
                     val duration = mutableUi.value.session?.durationSeconds
                         ?: mutableUi.value.mpvMetrics.durationSeconds
                     val position = mutableUi.value.mpvMetrics.positionSeconds
@@ -704,7 +713,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val changed = mutableUi.value.qualityTier != value
             mutableUi.value = mutableUi.value.copy(qualityTier = value)
             persist { preferences.setQualityTier(value) }
-            if (changed) maybeRestartActiveSession()
+            if (changed) applyStreamSettings()
         }
     }
 
@@ -713,7 +722,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val changed = mutableUi.value.fitMode != value
             mutableUi.value = mutableUi.value.copy(fitMode = value)
             persist { preferences.setFitMode(value) }
-            if (changed) maybeRestartActiveSession()
+            if (changed) applyStreamSettings()
         }
     }
 
@@ -723,7 +732,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val changed = mutableUi.value.resizeAlgorithm != value
         mutableUi.value = mutableUi.value.copy(resizeAlgorithm = value)
         persist { preferences.setResizeAlgorithm(value) }
-        if (changed) maybeRestartActiveSession()
+        if (changed) applyStreamSettings()
     }
 
     fun setDebandEnabled(value: Boolean) {
@@ -737,8 +746,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val changed = mutableUi.value.tenBitVideo != value
         mutableUi.value = mutableUi.value.copy(tenBitVideo = value)
         persist { preferences.setTenBitVideo(value) }
-        val state = mutableUi.value
-        if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
+        if (changed) applyStreamSettings()
     }
 
     /**
@@ -754,48 +762,25 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * "Use passthrough for 4K or higher resolution videos": restarts only a
-     * stream whose model it changes (passthrough4kChangesStream), or a
-     * restart still running, which may have read the old value. An open,
-     * reconnect or file advance in flight may have read it too, so the
-     * decision waits for it to publish its session and then reads the
-     * latest value.
+     * stream whose model it changes (passthrough4kChangesStream).
      */
     fun setPassthrough4k(value: Boolean) {
         val changed = mutableUi.value.passthrough4k != value
         mutableUi.value = mutableUi.value.copy(passthrough4k = value)
         persist { preferences.setPassthrough4k(value) }
-        if (!changed) return
-        passthroughToggleJob?.cancel()
-        passthroughToggleJob = viewModelScope.launch(actionErrors) {
-            while (true) {
-                val opening = listOfNotNull(openingJob, reconnectJob, autoAdvanceJob)
-                    .firstOrNull { it.isActive } ?: break
-                opening.join()
-            }
-            val state = mutableUi.value
-            if (restartJob?.isActive == true || state.passthrough4kChangesStream(state.passthrough4k)) {
-                maybeRestartActiveSession()
-            }
-        }
+        if (changed) applyStreamSettings()
     }
 
     fun setModel(value: String) {
         val advertised = mutableUi.value.capabilities?.models.orEmpty().map { it.name }
         if (advertised.isNotEmpty() && value !in advertised) return
-        val before = mutableUi.value
-        val changed = before.selectedModel != value
-        mutableUi.value = before.copy(selectedModel = value)
+        val changed = mutableUi.value.selectedModel != value
+        mutableUi.value = mutableUi.value.copy(selectedModel = value)
         persist { preferences.setModel(value) }
-        // A 4K source the option put on passthrough stays on it under the new
-        // model: nothing to restart, unless an open in flight read the old one.
-        if (changed && before.modelChangeRestarts(value, inFlight = playbackOpenInFlight())) {
-            maybeRestartActiveSession()
-        }
+        // A 4K source the option put on passthrough stays on it under another
+        // upscaling model (modelChangeKeepsStream): nothing to restart.
+        if (changed) applyStreamSettings()
     }
-
-    /** An open, reconnect, file advance or settings restart that has not published its session yet. */
-    private fun playbackOpenInFlight(): Boolean =
-        listOfNotNull(openingJob, reconnectJob, autoAdvanceJob, restartJob).any { it.isActive }
 
     fun setSubtitlesEnabled(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(subtitlesEnabled = value)
@@ -1671,12 +1656,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             )
             var bridge: LocalDocumentHttpServer? = null
             var pendingSource: AndroidMediaSource? = null
+            var read: StreamSettings? = null
             try {
                 runPlaybackCatching {
                     val landscape = withTimeoutOrNull(5_000) {
                         ui.first { it.display.width > it.display.height }
                     }
                     checkNotNull(landscape) { "Timed out waiting for the landscape player surface." }
+                    read = landscape.streamSettings
                     val (source, localBridge) = withContext(Dispatchers.IO) {
                         val uri = uriValue.toUri()
                         val source = AndroidMediaSource.open(getApplication(), uri).also { pendingSource = it }
@@ -1703,9 +1690,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         passthrough4k = landscape.passthrough4k,
                     )
                     pendingSource = null // controller now owns the source
-                    applyResumePoint(currentController, endpoint, "local:$uriValue") to
-                        source.videoInfo.name
-                }.onSuccess { (endpoint, displayName) ->
+                    val (resumed, start) = applyResumePoint(currentController, endpoint, "local:$uriValue")
+                    Triple(resumed, start, source.videoInfo.name)
+                }.onSuccess { (endpoint, start, displayName) ->
                     AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     withContext(Dispatchers.IO) { localDocumentServer?.close() }
                     localDocumentServer = bridge
@@ -1716,19 +1703,25 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
+                    val opened = checkNotNull(read)
+                    streamOpenedWith = opened.carrying(endpoint.chosenModel, endpoint.qualityTier)
+                    // A model chosen while this opened stays, and is saved
+                    // already; the settings restart waiting on this applies it.
+                    val adoptModel = mutableUi.value.selectedModel == opened.model
                     mutableUi.value = mutableUi.value.copy(
                         busy = false,
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
                         playingPath = displayName,
-                        selectedModel = endpoint.chosenModel,
+                        seekTargetSeconds = startTarget(start),
+                        selectedModel = settledChoice(mutableUi.value.selectedModel, opened.model, endpoint.chosenModel),
                         sessionDescription =
                             "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
                                 "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
                     )
                     subtitlePreferenceAppliedSession = null
                     persist {
-                        preferences.setModel(endpoint.chosenModel)
+                        if (adoptModel) preferences.setModel(endpoint.chosenModel)
                         preferences.addRecentLocalUri(uriValue)
                     }
                     playerEngine.setPanscan(0.0)
@@ -1824,27 +1817,33 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     prepare(currentController)
                 }
                 openRetryPending = false
-                Triple(applyResumePoint(currentController, endpoint, progressKey(origin)), currentController, origin)
+                val (resumed, start) = applyResumePoint(currentController, endpoint, progressKey(origin))
+                OpenedServerFile(resumed, start, currentController, origin, landscape.streamSettings)
             }
-                .onSuccess { (endpoint, currentController, origin) ->
+                .onSuccess { (endpoint, start, currentController, origin, read) ->
                     AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     activeOrigin = origin
                     sourceSizes.remember(origin, endpoint.session.sourceSize)
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
+                    streamOpenedWith = read.carrying(endpoint.chosenModel, endpoint.qualityTier)
+                    // A model chosen while this opened stays, and is saved
+                    // already; the settings restart waiting on this applies it.
+                    val adoptModel = mutableUi.value.selectedModel == read.model
                     mutableUi.value = mutableUi.value.copy(
                         busy = false,
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
-                        selectedModel = endpoint.chosenModel,
+                        seekTargetSeconds = startTarget(start),
+                        selectedModel = settledChoice(mutableUi.value.selectedModel, read.model, endpoint.chosenModel),
                         sessionDescription =
                             "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
                                 "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
                     )
                     subtitlePreferenceAppliedSession = null
                     persist {
-                        preferences.setModel(endpoint.chosenModel)
+                        if (adoptModel) preferences.setModel(endpoint.chosenModel)
                         preferences.addRecent(progressKey(origin))
                     }
                     playerEngine.setPanscan(0.0)
@@ -2009,6 +2008,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private data class AdjacentFile(val origin: PlaybackOrigin, val displayPath: String, val local: Boolean)
 
+    /** A server file's open, where it starts, and the settings it read. */
+    private data class OpenedServerFile(
+        val endpoint: PlaybackEndpoint,
+        val startSeconds: Double,
+        val controller: RelaySessionController,
+        val origin: PlaybackOrigin.ServerFile,
+        val read: StreamSettings,
+    )
+
     /**
      * The file after ([forward]) or before the one playing, in the same
      * folder and in name order. Forward skips anything already watched, as
@@ -2117,6 +2125,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             // back on screen at once; tearing the session down and opening a
             // fresh control connection happen behind it.
             mutableUi.update { it.copy(endpoint = null, playingPath = null) }
+            settingsJob?.cancelAndJoin()
+            settingsJob = null
             openingJob?.cancelAndJoin()
             openingJob = null
             closing?.join()
@@ -2124,6 +2134,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             val host = mutableUi.value.host.trim()
             val port = mutableUi.value.port.toIntOrNull() ?: 8590
             activeOrigin = null
+            streamOpenedWith = null
             reconnectExhausted = false
             pendingFailure = null
             quietConnectJob?.cancelAndJoin()
@@ -2189,7 +2200,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // The original is what plays now: progress, history and the end of
         // the file all belong to it, whether or not the relay ever started.
         activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
+        streamOpenedWith = null
         closingJob = viewModelScope.launch(actionErrors) {
+            settingsJob?.cancelAndJoin()
+            settingsJob = null
             openingJob?.cancelAndJoin()
             openingJob = null
             autoAdvanceJob?.cancelAndJoin()
@@ -2229,9 +2243,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (resumePendingPlayback("retry")) return
         if (closingJob?.isActive == true) return
         closingJob = viewModelScope.launch(actionErrors) {
+            settingsJob?.cancelAndJoin()
+            settingsJob = null
             openingJob?.cancelAndJoin()
             openingJob = null
             activeOrigin = null
+            streamOpenedWith = null
             reconnectExhausted = false
             pendingFailure = null
             quietConnectJob?.cancelAndJoin()
@@ -2373,6 +2390,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             metricsJob = null
             seekJob?.cancelAndJoin()
             seekJob = null
+            // A settings restart whose connection failed brought this on; the
+            // reconnect reads the latest settings, and takes over from it
+            // rather than racing it for the controller.
+            restartJob?.cancelAndJoin()
+            restartJob = null
             mutableUi.update {
                 it.copy(error = null, busy = false, reconnecting = ReconnectStatus("Reconnecting…"))
             }
@@ -2499,8 +2521,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Rebuilds the control connection and the active session at the given
-     * position with the current UI settings. Shared by automatic resume and
-     * mid-play model/quality/framing changes.
+     * position with the current UI settings. Shared by automatic resume,
+     * file advances and settings restarts; it takes the published stream
+     * down (streamOpenedWith null) and publishes the next with the settings
+     * it read, as every path that publishes a relay session must.
      */
     private suspend fun restartPlayback(
         origin: PlaybackOrigin,
@@ -2508,6 +2532,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         preserveTrackChoices: Boolean = true,
     ) {
         cleanupFailure?.let { throw it }
+        streamOpenedWith = null
         awaitNetwork()
         stopPlayerForDisposal(preserveTrackChoices)
         withContext(Dispatchers.IO) { disposeController() }
@@ -2589,24 +2614,30 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         sourceSizes.remember(origin, endpoint.session.sourceSize)
         var finalEndpoint = endpoint
         val timeBase = endpoint.session.timeBase
+        var startSeconds = 0.0
         if (positionSeconds > 0.5 && timeBase != null) {
             finalEndpoint = next.seek((positionSeconds / timeBase.value).roundToLong())
+            startSeconds = positionSeconds
         }
         sessionStartedAt = Instant.now()
         subtitlePreferenceAppliedSession = null
         warningDismissed = false
         reconnectExhausted = false
         val pauseIntent = mutableUi.value.paused
+        val startAt = startTarget(startSeconds)
+        streamOpenedWith = state.streamSettings.carrying(finalEndpoint.chosenModel, finalEndpoint.qualityTier)
         mutableUi.update {
             it.copy(
                 endpoint = finalEndpoint.localUrl,
                 session = finalEndpoint.session,
-                selectedModel = finalEndpoint.chosenModel,
-                qualityTier = finalEndpoint.qualityTier,
+                // A model or tier chosen while a reconnect or advance ran
+                // stays; applyStreamSettings, waiting on it, applies it next.
+                selectedModel = settledChoice(it.selectedModel, state.selectedModel, finalEndpoint.chosenModel),
+                qualityTier = settledChoice(it.qualityTier, state.qualityTier, finalEndpoint.qualityTier),
                 paused = pauseIntent,
                 seeking = false,
                 seekPreviewSeconds = null,
-                seekTargetSeconds = null,
+                seekTargetSeconds = startAt,
                 busy = false,
                 error = null,
                 performanceWarning = null,
@@ -2623,12 +2654,41 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         startMetrics(next)
     }
 
-    /** Applies changed model/quality/framing settings to the active session. */
+    /**
+     * A setting a relay open reads (StreamSettings) changed. An open,
+     * reconnect or file advance in flight may or may not have read it, and
+     * until it publishes, the session on screen may be the file being left, so
+     * the decision waits for it and then compares what the published session
+     * was opened with to the settings chosen by then. Any number of changes
+     * made meanwhile come to one restart, with the latest settings.
+     */
+    private fun applyStreamSettings() {
+        settingsJob?.cancel()
+        settingsJob = viewModelScope.launch(actionErrors) {
+            while (true) {
+                val inFlight = listOfNotNull(openingJob, reconnectJob, autoAdvanceJob)
+                    .firstOrNull { it.isActive } ?: break
+                inFlight.join()
+            }
+            maybeRestartActiveSession()
+        }
+    }
+
+    /**
+     * Restarts the relay stream if it does not carry the settings chosen now
+     * (settingsRestartNeeded). A settings restart still running is replaced,
+     * as it may have read an older value; one open at a time either way.
+     */
     private fun maybeRestartActiveSession() {
         val origin = activeOrigin ?: return
         val state = mutableUi.value
-        if (state.playingPath == null || state.directLocalFallback) return
-        if (reconnectJob?.isActive == true) return
+        if (state.playingPath == null || state.directLocalFallback || closingJob?.isActive == true) return
+        // A reconnect that failed out of sight is left to the next foreground
+        // (resumePendingPlayback), which reads the settings chosen by then; a
+        // restart now would only fail into an error nobody is looking at.
+        if (pendingFailure != null && !appInForeground) return
+        if (!state.settingsRestartNeeded(streamOpenedWith, decodesHevcMain10(state.display))) return
+        streamOpenedWith = null
         val prior = restartJob
         restartJob = viewModelScope.launch(actionErrors) {
             prior?.cancelAndJoin()
@@ -2643,6 +2703,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             }
             try {
                 restartPlayback(origin, position)
+                // A failed reconnect may have left one for the next foreground
+                // to retry; the stream is back, so there is nothing to retry.
+                pendingFailure = null
                 mutableUi.update { it.copy(reconnecting = null) }
             } catch (timeout: TimeoutCancellationException) {
                 mutableUi.update {
@@ -2769,6 +2832,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         reason: String = "Playing next video",
     ) {
         AppLog.i(TAG, "$reason: '${displayPath.substringAfterLast('/')}'")
+        // The open below reads the latest settings, so a settings restart
+        // still running is replaced rather than left to race it for the
+        // controller. A change still waiting is applied after this publishes.
+        restartJob?.cancelAndJoin()
+        restartJob = null
         playbackRequests += 1
         activeOrigin = origin
         mutableUi.update {
@@ -2776,6 +2844,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 playingPath = displayPath,
                 localPlayback = local,
                 directLocalFallback = false,
+                // The session is the file being left: its chapters, length,
+                // picture and model must not be shown as this file's.
+                session = null,
+                sessionDescription = "",
                 paused = false,
                 seeking = false,
                 seekPreviewSeconds = null,
@@ -2919,17 +2991,29 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Applies a stored resume point to a freshly opened session by seeking
      * before mpv attaches. Points near the end (credits) or too close to the
-     * start are ignored.
+     * start are ignored. Returns the endpoint to play and where it starts.
      */
     private suspend fun applyResumePoint(
         controller: RelaySessionController,
         endpoint: PlaybackEndpoint,
         key: String,
-    ): PlaybackEndpoint {
-        val saved = resumeSeconds(key, endpoint.session.durationSeconds) ?: return endpoint
-        val timeBase = endpoint.session.timeBase ?: return endpoint
+    ): Pair<PlaybackEndpoint, Double> {
+        val saved = resumeSeconds(key, endpoint.session.durationSeconds) ?: return endpoint to 0.0
+        val timeBase = endpoint.session.timeBase ?: return endpoint to 0.0
         AppLog.i(TAG, "resuming at saved position %.1fs".format(saved))
-        return controller.seek((saved / timeBase.value).roundToLong())
+        return controller.seek((saved / timeBase.value).roundToLong()) to saved
+    }
+
+    /**
+     * Where a stream just published starts, held as the seek target until mpv
+     * plays there (releaseSeekTargetIfCaughtUp). A settings change waiting on
+     * the open restarts it the moment it publishes, before mpv reports any
+     * position of its own: userPositionSeconds would otherwise read the
+     * previous file's, or zero over a resume point.
+     */
+    private fun startTarget(seconds: Double): Double {
+        seekTargetSetAt = SystemClock.elapsedRealtime()
+        return seconds
     }
 
     /** The saved position worth resuming at, or null near either end of the file. */
@@ -3025,6 +3109,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableUi.value
         if (state.playingPath == null || state.seeking) return
         if (reconnectJob?.isActive == true || restartJob?.isActive == true) return
+        // During a file advance activeOrigin is the next file while mpv still
+        // reports the one being left.
+        if (autoAdvanceJob?.isActive == true) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastProgressSaveAt < PROGRESS_SAVE_INTERVAL_MILLIS) return
         val position = mpv.positionSeconds
@@ -3463,6 +3550,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         // thread responsive while cleanup outlives the cancelled ViewModel scope.
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                settingsJob?.cancelAndJoin()
                 closingJob?.cancelAndJoin()
                 openingJob?.cancelAndJoin()
                 quietConnectJob?.cancelAndJoin()
