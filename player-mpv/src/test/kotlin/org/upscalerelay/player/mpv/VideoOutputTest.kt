@@ -12,7 +12,7 @@ class VideoOutputTest {
         "target-prim" to "auto",
         "target-peak" to "auto",
         "sub-hdr-peak" to "sdr",
-        "image-subs-hdr-peak" to "sdr",
+        "image-subs-hdr-peak" to "1000",
     )
 
     @Test
@@ -45,6 +45,7 @@ class VideoOutputTest {
         val options = mpvOutputOptions(VideoOutput.Pq(null), defaults).toMap()
         assertEquals("auto", options["target-peak"])
         assertEquals("sdr", options["sub-hdr-peak"])
+        assertEquals("1000", options["image-subs-hdr-peak"])
         assertEquals("pq", options["target-trc"])
         assertEquals("auto", mpvOutputOptions(VideoOutput.Pq(5.0), defaults).toMap()["target-peak"])
     }

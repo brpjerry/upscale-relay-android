@@ -70,14 +70,14 @@ internal val OUTPUT_OPTIONS = listOf(
     "image-subs-hdr-peak",
 )
 
-/** mpv's documented defaults, for a property it would not read back. */
+/** What the bundled mpv reads back at start-up, for a property it would not read back. */
 private val SDR_FALLBACKS = mapOf(
     "egl-output-format" to "auto",
     "target-trc" to "auto",
     "target-prim" to "auto",
     "target-peak" to "auto",
     "sub-hdr-peak" to "sdr",
-    "image-subs-hdr-peak" to "sdr",
+    "image-subs-hdr-peak" to "1000",
 )
 
 /** A luminance as mpv takes it (10-10000 nits), or null for one it would reject. */

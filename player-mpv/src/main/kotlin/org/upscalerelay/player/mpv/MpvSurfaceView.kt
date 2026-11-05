@@ -35,6 +35,7 @@ class MpvSurfaceView @JvmOverloads constructor(
             }
             field = value
             value?.outputRequestListener = requestOutput
+            value?.resetHdrAvailability()
             bind()
         }
 
@@ -61,9 +62,12 @@ class MpvSurfaceView @JvmOverloads constructor(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        surfaceWidth = width.coerceAtLeast(1)
-        surfaceHeight = height.coerceAtLeast(1)
-        bind()
+        // surfaceChanged always follows, with the Surface's real size. A relay
+        // made here from the view's size (unknown before layout) would be
+        // kept for the whole epoch.
+        surfaceWidth = 0
+        surfaceHeight = 0
+        engine?.resetHdrAvailability()
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -101,7 +105,7 @@ class MpvSurfaceView @JvmOverloads constructor(
             val next = old?.takeIf { it.coversView() || !engine.awaitsSurface() } ?: newRelay() ?: old
             if (next != null) {
                 engine.attachSurface(next.surface, next.width, next.height, wanted, coversView = next.coversView())
-                next.fitTo(surfaceWidth, surfaceHeight)
+                next.fitTo(surfaceWidth, surfaceHeight, engine.pictureBounds())
                 given = next.surface
                 relay = next
                 // Attaching the new relay detached mpv from the old one.

@@ -1,5 +1,6 @@
 package org.upscalerelay.android
 
+import android.app.KeyguardManager
 import android.app.PictureInPictureParams
 import android.content.Intent
 import android.os.Build
@@ -35,8 +36,9 @@ import java.io.File
  * - an SDR file plays exactly as before;
  * - the battery saver and "Show HDR videos in HDR" send an HDR video back to
  *   SDR at its position, and back again;
- * - picture-in-picture keeps PQ, without a reload, and a relay first made in
- *   PiP is made again at full size by the first load after the window grows;
+ * - picture-in-picture keeps PQ, without a reload, and in "fit" framing
+ *   shows the picture alone, filling the window; a relay first made in PiP
+ *   is made again at full size by the first load after the window grows;
  * - a Dolby Vision source the server maps is remapped for each display.
  *
  * `-e hdrPath '<server file, HDR10>' -e sdrPath '<server file, SDR>'
@@ -158,6 +160,38 @@ class HdrOutputDeviceTest {
     }
 
     /**
+     * In "fit" framing the PiP window takes the picture's aspect, not the
+     * relay's. The layer shows the picture, cropped out of mpv's bars, filling
+     * the window, rather than the whole relay with bars on every side.
+     */
+    @Test
+    fun pictureInPictureInFitFramingFillsTheWindow() = player("pip-fit", fitMode = "fit") { model ->
+        val peak = hdrDisplayPeak(model)
+        open(model, path("hdrPath"))
+        awaitOutput(model, VideoOutput.Pq(peak))
+        SystemClock.sleep(3_000)
+        val session = checkNotNull(model.ui.value.session)
+        val downlinkAspect = session.downlinkWidth.toDouble() / session.downlinkHeight
+        val full = playerViewSize()
+        log("downlink ${session.downlinkWidth}x${session.downlinkHeight}, view $full")
+        val epoch = epochOf(model)
+        enterPictureInPicture()
+        awaitCondition("the player shrinks", 10_000) { playerViewSize() != full }
+        SystemClock.sleep(3_000)
+        assertTrue("still in PiP", inPictureInPicture())
+        val (viewWidth, viewHeight) = playerViewSize().split('x').map { it.toInt() }
+        val (crop, frame) = relayGeometry("pip-fit")
+        val cropWidth = crop[2] - crop[0]
+        val cropHeight = crop[3] - crop[1]
+        assertTrue("mpv's bars cropped off: $crop", cropHeight < session.downlinkHeight + 4)
+        assertEquals("the crop has the picture's aspect", downlinkAspect, cropWidth / cropHeight, 0.02)
+        assertEquals("the layer fills the window's width", viewWidth.toDouble(), (frame[2] - frame[0]).toDouble(), 3.0)
+        assertEquals("the layer fills the window's height", viewHeight.toDouble(), (frame[3] - frame[1]).toDouble(), 3.0)
+        assertEquals("no reload in PiP", epoch, epochOf(model))
+        assertEquals(VideoOutput.Pq(peak), model.ui.value.videoOutput)
+    }
+
+    /**
      * A relay keeps its size while an epoch plays, so one first made in PiP
      * (here: the setting switched on in the small window) is scaled up when
      * the window grows. The next load, a seek, must give mpv one at the
@@ -230,7 +264,7 @@ class HdrOutputDeviceTest {
 
     private lateinit var scenario: ActivityScenario<MainActivity>
 
-    private fun player(label: String, body: (RelayViewModel) -> Unit) {
+    private fun player(label: String, fitMode: String = "cover", body: (RelayViewModel) -> Unit) {
         check(context.packageName.endsWith(".debug")) {
             "Build with -PcoinstallDebug=true before running the device tests"
         }
@@ -255,7 +289,7 @@ class HdrOutputDeviceTest {
                     model.setAutoPlayNext(false)
                     model.setModel("passthrough")
                     model.setQualityTier("hevc-qp4")
-                    model.setFitMode("cover")
+                    model.setFitMode(fitMode)
                     model.setHdrOutput(true)
                     model.connect()
                 }
@@ -345,6 +379,11 @@ class HdrOutputDeviceTest {
     private fun epochOf(model: RelayViewModel) = model.ui.value.session?.epoch ?: -1
 
     private fun enterPictureInPicture() {
+        // Over the keyguard the "PiP" window is a portrait full screen, and
+        // isInPictureInPictureMode still says true.
+        check(!context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) {
+            "PiP tests need the tablet unlocked"
+        }
         var entered = false
         scenario.onActivity { entered = it.enterPictureInPictureMode(PictureInPictureParams.Builder().build()) }
         assertTrue("PiP entry accepted", entered)
@@ -414,6 +453,20 @@ class HdrOutputDeviceTest {
     }
 
     private fun relayLayerPresent(tag: String) = surfaceFlinger(tag).isNotEmpty()
+
+    /**
+     * The relay layer's source crop (in its buffer's pixels) and display
+     * frame (on screen), from its line in SurfaceFlinger's HWC table.
+     */
+    private fun relayGeometry(tag: String): Pair<List<Double>, List<Int>> {
+        val line = surfaceFlinger(tag).firstOrNull { "0000002b" in it }
+        val fields = checkNotNull(line) { "no relay layer in the HWC table" }.split('|').map { it.trim() }
+        val format = fields.indexOfFirst { "0000002b" in it }
+        val crop = fields[format + 1].split(Regex("\\s+")).map { it.toDouble() }
+        val frame = fields[format + 2].split(Regex("\\s+")).map { it.toInt() }
+        log("relay[$tag] crop=$crop frame=$frame")
+        return crop to frame
+    }
 
     private fun relayLayerIsPq(tag: String) = surfaceFlinger(tag).any { "dataspace=BT2020_PQ" in it }
 

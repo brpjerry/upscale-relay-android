@@ -366,21 +366,31 @@ The sketch the spike left, and what became of each part:
   (`MpvPlayerEngine.requestedOutput`). API 33 or later, else stay SDR. A
   relay that cannot be made leaves the load on the SDR surface.
   - **Built differently:** a relay keeps its size while an epoch plays. A
-    resize (entering PiP) scales the child layer to fit instead (`fitTo`).
-    Giving mpv a new reader would have meant a new VO in the middle of an
-    epoch, which today's path never does in PiP. The prototype did neither:
-    its relay ignored the resize. Between loads mpv is stopped, so a load
-    gets a new relay at the view's size when the old one is smaller than the
-    view (`coversView`, `MpvPlayerEngine.awaitsSurface`): one first made in
-    PiP, or in split screen, is replaced by the first load after the window
-    grows. A larger one is kept, so a load in PiP still leaves a full-size
-    relay for the return to full screen. A relay that cannot be made is not
-    tried again until the Surface is replaced (`relayUnavailable`).
-  - The release callback comes on a binder thread. It only hands the image
-    back to the relay's thread, which waits on the release fence for as long
-    as it takes before mpv may draw into the buffer again. (The first build
-    waited at most 200 ms in the callback itself and then returned the
-    buffer anyway.)
+    resize (entering PiP) fits the child layer to the view instead
+    (`fitTo`). Giving mpv a new reader would have meant a new VO in the
+    middle of an epoch, which today's path never does in PiP. The prototype
+    did neither: its relay ignored the resize.
+    - The layer is cropped to the picture mpv drew (`osd-dimensions` less its
+      bars), widened to the view's aspect within the relay, and that part is
+      scaled to fit (`relayPlacement`). In "fit" framing the PiP window takes
+      the picture's aspect (`MainActivity`), not the relay's 1.6. Scaling the
+      whole relay showed the picture at about 80% of the window, with bars on
+      every side and strips the layer did not cover.
+    - Between loads mpv is stopped, so a load gets a new relay at the view's
+      size when the old one is smaller than the view (`coversView`,
+      `MpvPlayerEngine.awaitsSurface`): one first made in PiP, or in split
+      screen, is replaced by the first load after the window grows. A larger
+      one is kept, so a load in PiP still leaves a full-size relay for the
+      return to full screen.
+    - A relay that cannot be made is not tried again until the Surface is
+      replaced (`relayUnavailable`). Until then the engine reports HDR
+      unavailable (`canPresentHdr`), and the app names `sdr`, so the server
+      maps Dolby Vision and HDR10+ for the tone-mapped picture.
+  - The release callback comes on a binder thread. It hands the release
+    fence to a thread of its own, which waits for as long as it takes and
+    then gives the image back on the relay's thread. So the next frame is
+    never held up behind a fence. (The first build waited at most 200 ms in
+    the callback itself and then returned the buffer anyway.)
   - The reader declares its format the non-legacy way
     (`setDefaultHardwareBufferFormat(RGBA_1010102)` with the dataspace). The
     prototype's `setImageFormat` followed by `setDefaultDataSpace` leaves

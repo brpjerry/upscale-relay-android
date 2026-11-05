@@ -1,9 +1,9 @@
 package org.upscalerelay.player.mpv
 
 import android.annotation.TargetApi
+import android.graphics.Rect
 import android.hardware.DataSpace
 import android.hardware.HardwareBuffer
-import android.hardware.SyncFence
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -31,8 +31,10 @@ import android.view.SurfaceControl
  *
  * Everything that touches the reader or the layer runs on the relay's own
  * thread, so a retirement can never race a frame in flight. That includes
- * returning a frame SurfaceFlinger let go of: its release callback comes on
- * another thread and only hands the frame over.
+ * returning a frame SurfaceFlinger let go of. Its release callback comes on a
+ * binder thread, and its release fence is waited out on a third thread, so
+ * neither that thread nor the relay's, which has the next frame to present,
+ * ever blocks on one.
  */
 @TargetApi(33) // callers check: MpvSurfaceView relays only from API 33
 internal class HdrSurfaceRelay private constructor(
@@ -41,8 +43,10 @@ internal class HdrSurfaceRelay private constructor(
     private val reader: ImageReader,
     private val layer: SurfaceControl,
     private val thread: HandlerThread,
+    private val fenceThread: HandlerThread,
 ) {
     private val handler = Handler(thread.looper)
+    private val fences = Handler(fenceThread.looper)
 
     /** Where mpv renders. Valid until [close]. */
     val surface: Surface = reader.surface
@@ -56,17 +60,22 @@ internal class HdrSurfaceRelay private constructor(
     /**
      * Shows the picture in a view of [viewWidth]x[viewHeight] without asking
      * mpv for a new size, which would take a new VO in the middle of an
-     * epoch: scaled to fit and centred. Entering PiP keeps the aspect ratio,
-     * so the picture just shrinks. Any thread.
+     * epoch. [picture] is where mpv drew it (MpvPlayerEngine.pictureBounds);
+     * the layer shows it cropped to the view's aspect and scaled to fit
+     * ([relayPlacement]). In "cover" framing PiP keeps the relay's aspect and
+     * the whole frame just shrinks; in "fit" framing the PiP window takes the
+     * picture's aspect and shows the picture without mpv's bars. Any thread.
      */
-    fun fitTo(viewWidth: Int, viewHeight: Int) {
-        val scale = minOf(viewWidth.toFloat() / width, viewHeight.toFloat() / height)
-        val x = (viewWidth - width * scale) / 2
-        val y = (viewHeight - height * scale) / 2
+    fun fitTo(viewWidth: Int, viewHeight: Int, picture: IntArray?) {
+        val placement = relayPlacement(width, height, picture, viewWidth, viewHeight)
         handler.post {
             if (hidden) return@post
             runCatching {
-                SurfaceControl.Transaction().setScale(layer, scale, scale).setPosition(layer, x, y).apply()
+                SurfaceControl.Transaction()
+                    .setCrop(layer, Rect(placement.left, placement.top, placement.right, placement.bottom))
+                    .setScale(layer, placement.scale, placement.scale)
+                    .setPosition(layer, placement.x, placement.y)
+                    .apply()
             }.onFailure { Log.w(TAG, "HDR layer could not be fitted: $it") }
         }
     }
@@ -93,6 +102,7 @@ internal class HdrSurfaceRelay private constructor(
         handler.post {
             reader.close()
             thread.quitSafely()
+            fenceThread.quitSafely()
         }
     }
 
@@ -132,10 +142,16 @@ internal class HdrSurfaceRelay private constructor(
             image.fence.use { fence ->
                 SurfaceControl.Transaction()
                     .setBuffer(layer, buffer, fence) { release ->
-                        // Once the relay has quit (close), its reader is
-                        // closed and nothing presents any more.
-                        if (!handler.post { recycle(image, buffer, release, relayNext = true) }) {
-                            recycle(image, buffer, release, relayNext = false)
+                        // SurfaceFlinger may read the buffer until its
+                        // release fence signals: only then may mpv draw into
+                        // it again, however long that takes.
+                        val waiting = fences.post {
+                            release.use { it.awaitForever() }
+                            if (!handler.post { recycle(image, buffer) }) closeAfterRelay(image, buffer)
+                        }
+                        if (!waiting) {
+                            release.close()
+                            closeAfterRelay(image, buffer)
                         }
                     }
                     .setDataSpace(layer, DataSpace.DATASPACE_BT2020_PQ)
@@ -150,17 +166,17 @@ internal class HdrSurfaceRelay private constructor(
         }
     }
 
-    /**
-     * Gives a frame SurfaceFlinger let go of back to mpv. The compositor may
-     * read the buffer until its release fence signals, so this waits for that
-     * however long it takes: a buffer returned early is one mpv may draw the
-     * next frame into while it is still on screen.
-     */
-    private fun recycle(image: Image, buffer: HardwareBuffer, release: SyncFence, relayNext: Boolean) {
-        release.use { it.awaitForever() }
+    /** Gives a frame SurfaceFlinger is done with back to mpv, and presents what waits. Relay thread. */
+    private fun recycle(image: Image, buffer: HardwareBuffer) {
         buffer.close()
         image.close()
-        if (relayNext) relayLatest()
+        relayLatest()
+    }
+
+    /** After [close]: the reader is closed, and nothing draws into the buffer again. */
+    private fun closeAfterRelay(image: Image, buffer: HardwareBuffer) {
+        buffer.close()
+        image.close()
     }
 
     companion object {
@@ -172,6 +188,7 @@ internal class HdrSurfaceRelay private constructor(
         /** A relay of [width]x[height] under [parent], the `SurfaceView`'s layer. Main thread. */
         fun create(parent: SurfaceControl, width: Int, height: Int): HdrSurfaceRelay {
             val thread = HandlerThread("relay-hdr-output").apply { start() }
+            val fenceThread = HandlerThread("relay-hdr-release").apply { start() }
             var reader: ImageReader? = null
             var layer: SurfaceControl? = null
             try {
@@ -202,7 +219,7 @@ internal class HdrSurfaceRelay private constructor(
                     .setDataSpace(layer, DataSpace.DATASPACE_BT2020_PQ)
                     .setVisibility(layer, true)
                     .apply()
-                val relay = HdrSurfaceRelay(width, height, reader, layer, thread)
+                val relay = HdrSurfaceRelay(width, height, reader, layer, thread, fenceThread)
                 reader.setOnImageAvailableListener({ relay.relayLatest() }, relay.handler)
                 Log.i(TAG, "HDR relay ${width}x$height started")
                 return relay
@@ -210,6 +227,7 @@ internal class HdrSurfaceRelay private constructor(
                 runCatching { layer?.release() }
                 runCatching { reader?.close() }
                 thread.quitSafely()
+                fenceThread.quitSafely()
                 throw error
             }
         }

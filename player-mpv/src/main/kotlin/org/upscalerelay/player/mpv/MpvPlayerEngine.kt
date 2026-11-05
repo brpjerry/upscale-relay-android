@@ -70,6 +70,12 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * next load asks the view for one at the view's size.
      */
     private var attachedCoversView = true
+    /**
+     * A PQ load had to play on the SDR surface: no HDR relay could be made.
+     * Until a new Surface, the app names an SDR display again, so the server
+     * maps Dolby Vision and HDR10+ for what is really shown.
+     */
+    private var hdrUnavailable = false
     /** mpv's start-up values of the options the outputs change. */
     private var outputDefaults: Map<String, String> = emptyMap()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -181,6 +187,27 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     /** The output the current or pending load asks for. */
     fun requestedOutput(): VideoOutput = synchronized(lock) { requested }
+
+    /** False once a PQ load had to play on the SDR surface, until [resetHdrAvailability]. */
+    fun canPresentHdr(): Boolean = synchronized(lock) { !hdrUnavailable }
+
+    /** A new Surface: the next PQ load may try an HDR relay again. */
+    fun resetHdrAvailability() = synchronized(lock) { hdrUnavailable = false }
+
+    /**
+     * Where mpv draws the picture inside the attached Surface, as left, top,
+     * right and bottom in its pixels (`osd-dimensions` less mpv's own bars).
+     * Null before mpv knows: no Surface, or no picture yet.
+     */
+    fun pictureBounds(): IntArray? = synchronized(lock) {
+        if (!initialized || closed || attachedSurface == null) return@synchronized null
+        val values = listOf("w", "h", "ml", "mt", "mr", "mb").map {
+            MPVLib.getPropertyInt("osd-dimensions/$it") ?: return@synchronized null
+        }
+        val (width, height, left, top) = values
+        val (right, bottom) = values.drop(4)
+        intArrayOf(left, top, width - right, height - bottom).takeIf { width > 0 && height > 0 }
+    }
 
     /**
      * Whether a load waits for a Surface: mpv is stopped, so the view may
@@ -353,6 +380,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         coversView: Boolean = true,
     ) = synchronized(lock) {
         check(initialized && !closed)
+        // Loads and the view both run on the main thread: a PQ request
+        // answered with the SDR surface is a relay that could not be made.
+        if (requested is VideoOutput.Pq && output == VideoOutput.Sdr) hdrUnavailable = true
         attachedCoversView = coversView
         if (attachedSurface === surface && attachedOutput == output) {
             resize(width, height)

@@ -331,15 +331,22 @@ release.yml` builds and publishes the signed APK with those notes.
   does, so `vo` and the EGL format only ever change with mpv stopped. A relay
   that cannot be made leaves the load on the SDR surface rather than
   stranding it, and the check compares what the load *asked* for
-  (`requestedOutput`), so that never turns into a reload loop. The relay is
+  (`requestedOutput`), so that never turns into a reload loop. The engine
+  then reports HDR unavailable (`canPresentHdr`) until a new Surface, and
+  `displayTarget` names `sdr` meanwhile, so the server maps Dolby Vision and
+  HDR10+ for what is really shown. The relay is
   an owner: mpv is detached first (`vo=null`, which returns once the VO is
   gone), then its command queue drained (`afterPendingCommands`), and only
-  then is the reader closed. A relay keeps its size while an epoch plays: a
-  resize (PiP) scales the layer to fit (`fitTo`) instead of giving mpv a new
-  VO in the middle of an epoch. The next load replaces a relay smaller than
-  the view, as one first made in PiP is once the window grows, and keeps a
-  larger one. A frame goes back to mpv only on the relay's thread, after its
-  release fence has signalled, however long that takes.
+  then is the reader closed. A relay keeps its size while an epoch plays. A
+  resize (PiP) does not give mpv a new VO in the middle of an epoch.
+  Instead `fitTo` crops the layer to mpv's picture (`pictureBounds`, widened
+  to the view's aspect, `relayPlacement`) and scales it to fit. In "fit"
+  framing the PiP window has the picture's aspect, not the relay's. The
+  next load replaces a relay smaller than the view, as one first made in PiP
+  is once the window grows, and keeps a larger one. A frame goes back to mpv
+  only once its release fence has signalled, however long that takes. The
+  wait runs on its own thread, so neither the binder callback nor the relay
+  thread blocks on it.
 - **"Use passthrough for 4K or higher resolution videos" swaps the model a
   session sends, never the model the user chose.** `ModelChoice` (in
   `relay-client`) decides at the open, as the desktop's

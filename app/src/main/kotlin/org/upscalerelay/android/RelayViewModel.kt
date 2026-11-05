@@ -464,12 +464,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         // toggle decides from the state once an open finishes.
                         // An import applies its value itself (importData).
                         passthrough4k = if (firstLoad) value.passthrough4k else state.passthrough4k,
+                        // The same for "Show HDR videos in HDR": an older
+                        // snapshot must not turn back a switch whose reload
+                        // is under way.
+                        hdrOutput = if (firstLoad) value.hdrOutput else state.hdrOutput,
                         qualityTier = value.qualityTier,
                         fitMode = value.fitMode,
                         resizeAlgorithm = value.resizeAlgorithm,
                         debandEnabled = value.debandEnabled,
                         tenBitVideo = value.tenBitVideo,
-                        hdrOutput = value.hdrOutput,
                         subtitlesEnabled = value.subtitlesEnabled,
                         preferredSubtitle = value.preferredSubtitle,
                         diagnosticsVisible = value.diagnosticsVisible,
@@ -738,10 +741,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
     }
 
-    /** "Show HDR videos in HDR": an HDR video playing switches at its current position. */
+    /**
+     * "Show HDR videos in HDR": an HDR video playing switches at its current
+     * position. Saved from the main thread, so quick toggles reach DataStore
+     * in the order they were made (DataStore does its own IO).
+     */
     fun setHdrOutput(value: Boolean) {
         mutableUi.update { it.copy(hdrOutput = value) }
-        persist { preferences.setHdrOutput(value) }
+        viewModelScope.launch(actionErrors) { preferences.setHdrOutput(value) }
         reloadIfHdrStale()
     }
 
@@ -910,6 +917,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         fileLoggingEnabled = restored.fileLoggingEnabled,
                         passthrough4k = restored.passthrough4k,
+                        hdrOutput = restored.hdrOutput,
                         backupStatus = BackupStatus(
                             "Restored all settings and ${restored.playbackPositions.size} " +
                                 "watch-history ${entryWord(restored.playbackPositions.size)}. " +
@@ -2979,7 +2987,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (state.busy || state.seeking || state.reconnecting != null) return
         if (state.playerState != MpvPlaybackState.PLAYING) return
         if (seekJob?.isActive == true || restartJob?.isActive == true || reconnectJob?.isActive == true) return
-        if (closingJob?.isActive == true || openingJob?.isActive == true) return
+        if (closingJob?.isActive == true || openingJob?.isActive == true || autoAdvanceJob?.isActive == true) return
         val target = displayTarget(state, session.hdrSource)
         if (!hdrPresentationStale(target, session, playerEngine.requestedOutput())) return
         val now = SystemClock.elapsedRealtime()
@@ -3001,7 +3009,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * shown on, as the desktop does.
      */
     private fun displayTarget(state: RelayUiState, sourceHdr: Boolean? = null): DisplayTarget =
-        displayTargetFor(sourceHdr, state.displayHdr, state.hdrOutput, Build.VERSION.SDK_INT, state.powerSave)
+        // A relay that could not be made shows HDR tone-mapped on the SDR
+        // surface: name an SDR display, so the server maps for what is shown.
+        displayTargetFor(
+            sourceHdr,
+            state.displayHdr,
+            state.hdrOutput && playerEngine.canPresentHdr(),
+            Build.VERSION.SDK_INT,
+            state.powerSave,
+        )
 
     /** Persists the watch position (throttled); near the end it clears it. */
     private fun maybeSaveProgress(mpv: MpvMetrics) {
@@ -3331,6 +3347,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("deband_enabled", state.debandEnabled)
                 put("ten_bit_video", state.tenBitVideo)
                 put("hdr_output_setting", state.hdrOutput)
+                put("hdr_output_available", playerEngine.canPresentHdr())
                 put("display_hdr", state.displayHdr.hdr)
                 put("display_peak_nits", state.displayHdr.peakNits)
                 put("power_save", state.powerSave)
