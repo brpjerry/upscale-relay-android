@@ -86,6 +86,35 @@ class Passthrough4kTest {
     }
 
     @Test
+    fun `a model change while an open is in flight always restarts`() {
+        val standingIn = state(session(PASSTHROUGH_MODEL, uhd))
+        assertFalse(standingIn.modelChangeRestarts("2x_Other", inFlight = false))
+        // Next/previous: the 4K session on screen is the file being left.
+        assertTrue(standingIn.modelChangeRestarts("2x_Other", inFlight = true))
+        assertTrue(state(session("2x_Model", fhd)).modelChangeRestarts("2x_Other", inFlight = false))
+    }
+
+    @Test
+    fun `passthrough stands in only for a model the user chose`() {
+        assertTrue(state(session(PASSTHROUGH_MODEL, uhd)).passthroughStandsIn)
+        assertFalse(state(session(PASSTHROUGH_MODEL, uhd), chosen = PASSTHROUGH_MODEL).passthroughStandsIn)
+        assertFalse(state(session("2x_Model", fhd)).passthroughStandsIn)
+        assertFalse(state(session(PASSTHROUGH_MODEL, uhd), fallback = true).passthroughStandsIn)
+    }
+
+    @Test
+    fun `the rebuffer warning names the model the stream really runs`() {
+        assertEquals(
+            "The server is not keeping up with passthrough at hevc-qp4. A lower quality should play smoothly.",
+            sustainWarning(PASSTHROUGH_MODEL, "hevc-qp4"),
+        )
+        assertEquals(
+            "The server is not keeping up with 2x_Model at hevc-qp4. A smaller model or lower quality should play smoothly.",
+            sustainWarning("2x_Model", "hevc-qp4"),
+        )
+    }
+
+    @Test
     fun `a restart reuses only the size read for its own file`() {
         val sizes = SourceSizeMemo<String>()
         assertNull(sizes.sizeOf("Show/E01.mkv"))

@@ -60,6 +60,17 @@ class HttpRangeReaderTest {
                 released.await(10, TimeUnit.SECONDS)
                 return exchange.sendResponseHeaders(503, -1)
             }
+            "wrong range" -> {
+                exchange.responseHeaders.add("Content-Range", "bytes 0-9/${file.size}")
+                exchange.sendResponseHeaders(206, 10)
+                exchange.responseBody.write(file, 0, 10)
+                return
+            }
+            "no range" -> {
+                exchange.sendResponseHeaders(206, 10)
+                exchange.responseBody.write(file, 0, 10)
+                return
+            }
         }
         val (start, requestedEnd) = Regex("""bytes=(\d+)-(\d+)""").matchEntire(requireNotNull(range))!!
             .destructured.let { (a, b) -> a.toLong() to b.toLong() }
@@ -126,6 +137,19 @@ class HttpRangeReaderTest {
         HttpRangeReader(url, chunkBytes = 100, maxBytes = 150).use { reader ->
             reader.read(0, 10)
             assertThrows(IOException::class.java) { reader.read(500, 10) }
+        }
+    }
+
+    @Test
+    fun `a ranged reply for other bytes, or one that does not say which, fails the read`() {
+        // A demuxer handed bytes from the wrong offset would parse garbage.
+        mode = "wrong range"
+        HttpRangeReader(url, chunkBytes = 100).use { reader ->
+            assertThrows(IOException::class.java) { reader.read(500, 10) }
+        }
+        mode = "no range"
+        HttpRangeReader(url, chunkBytes = 100).use { reader ->
+            assertThrows(IOException::class.java) { reader.read(0, 10) }
         }
     }
 

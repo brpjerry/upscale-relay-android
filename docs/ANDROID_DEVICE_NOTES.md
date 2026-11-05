@@ -12,7 +12,9 @@ FLAC).mkv`:
 - The 2160p file's size was read through `/media` in 581 ms: 1.33 MB in six
   256 KiB range requests. It opened with `model=passthrough
   chosen=2x_AnimeJaNai_HD_V3_Compact source=3840x2160`, and kept passthrough
-  through a seek to 5:00 and a quality restart (`hevc-qp4` to `hevc-qp14`).
+  through a seek to 5:00 and a quality restart (`hevc-qp4` to `hevc-qp14`;
+  that first version of the test set `hevc-qp18` before connecting, and the
+  connect replaced it with a tier the server offers Android).
   The restart passed the known size and read nothing. The saved model stayed
   `2x_AnimeJaNai_HD_V3_Compact`.
 - The 1080p file's size took 436 ms: 4.0 MB in 17 requests. MediaExtractor
@@ -32,6 +34,17 @@ restarted neither the 2160p library stream nor a local 4K one. The saved
 model followed each choice. The local file was `dv81.mkv`, the 20 s 3840x2160
 Dolby Vision fixture. It opened with `model=passthrough source=3840x2160`
 from its own MediaExtractor, and kept passthrough through a quality restart.
+
+After the second round it passed again (32 s). It now picks its two quality
+tiers after the connect, from the ones the server offers Android.
+`ServerVideoSizeDeviceTest` passed too (3 s). It serves files through the
+app's `LocalDocumentHttpServer` instead of the relay:
+- `dv81.mkv` read as 3840x2160 through Samsung's `SMKVExtractor`.
+- `hdr10-boxes-only.mp4` read as 1920x1080 through `SECMPEG4Extractor`.
+- A text file was refused: "FAILED to autodetect media content".
+- A probe of a server that never answers was cancelled at 3 s. The
+  extractor's blocked read failed with "Socket closed" at the same
+  millisecond, so the probe's thread does not outlive the cancel.
 
 Turning the option off on the 4K file was not tried on the device: it opens
 the 2x model on 4K frames, well below realtime, on a GPU shared with the

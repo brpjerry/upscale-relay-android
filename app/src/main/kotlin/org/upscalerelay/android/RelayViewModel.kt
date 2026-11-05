@@ -427,7 +427,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         port = value.port.toString(),
                         autoPlayNext = value.autoPlayNext,
                         selectedModel = value.model,
-                        passthrough4k = value.passthrough4k,
+                        // Restored once, like fileLoggingEnabled: the switch's own
+                        // writes can come back behind older snapshots, and the
+                        // toggle decides from the state once an open finishes.
+                        // An import applies its value itself (importData).
+                        passthrough4k = if (firstLoad) value.passthrough4k else state.passthrough4k,
                         qualityTier = value.qualityTier,
                         fitMode = value.fitMode,
                         resizeAlgorithm = value.resizeAlgorithm,
@@ -728,11 +732,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutableUi.value = before.copy(selectedModel = value)
         persist { preferences.setModel(value) }
         // A 4K source the option put on passthrough stays on it under the new
-        // model: nothing to restart, unless a restart running read the old one.
-        if (changed && (restartJob?.isActive == true || !before.modelChangeKeepsStream(value))) {
+        // model: nothing to restart, unless an open in flight read the old one.
+        if (changed && before.modelChangeRestarts(value, inFlight = playbackOpenInFlight())) {
             maybeRestartActiveSession()
         }
     }
+
+    /** An open, reconnect, file advance or settings restart that has not published its session yet. */
+    private fun playbackOpenInFlight(): Boolean =
+        listOfNotNull(openingJob, reconnectJob, autoAdvanceJob, restartJob).any { it.isActive }
 
     fun setSubtitlesEnabled(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(subtitlesEnabled = value)
@@ -853,6 +861,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 mutableUi.update {
                     it.copy(
                         fileLoggingEnabled = restored.fileLoggingEnabled,
+                        passthrough4k = restored.passthrough4k,
                         backupStatus = BackupStatus(
                             "Restored all settings and ${restored.playbackPositions.size} " +
                                 "watch-history ${entryWord(restored.playbackPositions.size)}. " +
@@ -3133,13 +3142,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (steadyState && mpv.pausedForCache && !lastPausedForCache) {
             rebufferTimestamps = (rebufferTimestamps + now).filter { now - it < 90_000 }
             if (rebufferTimestamps.size >= 2 && state.performanceWarning == null && !warningDismissed) {
-                AppLog.w(TAG, "sustain warning: repeated rebuffers with ${state.selectedModel}/${state.qualityTier}")
+                val sessionModel = state.relaySession?.model ?: state.selectedModel
+                AppLog.w(TAG, "sustain warning: repeated rebuffers with $sessionModel/${state.qualityTier}")
                 mutableUi.update {
-                    it.copy(
-                        performanceWarning =
-                            "The server is not keeping up with ${state.selectedModel} at " +
-                                "${state.qualityTier}. A smaller model or lower quality should play smoothly.",
-                    )
+                    it.copy(performanceWarning = sustainWarning(sessionModel, state.qualityTier))
                 }
             }
         }

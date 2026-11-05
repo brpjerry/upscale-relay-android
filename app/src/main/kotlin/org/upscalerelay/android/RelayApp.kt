@@ -2444,8 +2444,13 @@ private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
         ) {
             Text("Model", style = MaterialTheme.typography.headlineSmall)
             Text(
-                if (state.directLocalFallback) "The model applies to the next relay video."
-                else "Changing the model restarts this video at the current position.",
+                when {
+                    state.directLocalFallback -> "The model applies to the next relay video."
+                    // modelChangeKeepsStream: another model restarts nothing here.
+                    state.passthrough4k && state.passthroughStandsIn ->
+                        "This 4K video plays with passthrough. The model applies to smaller videos."
+                    else -> "Changing the model restarts this video at the current position."
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))

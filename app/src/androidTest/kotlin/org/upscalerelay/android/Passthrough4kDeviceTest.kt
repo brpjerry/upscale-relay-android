@@ -14,6 +14,7 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.upscalerelay.client.PASSTHROUGH_MODEL
+import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
 import org.upscalerelay.client.is4kOrHigher
 import org.upscalerelay.player.mpv.MpvPlaybackState
@@ -62,15 +63,24 @@ class Passthrough4kDeviceTest {
                 model.setHost(arguments.getString("auditHost") ?: "192.168.0.115")
                 model.setPort(arguments.getString("auditPort") ?: "8590")
                 model.setAutoPlayNext(false)
-                model.setQualityTier("hevc-qp18")
                 model.setPassthrough4k(true)
                 model.connect()
             }
             await("connect", model, 30_000) { it.sessionState == SessionState.BROWSING && !it.busy }
             onMain { model.setModel(chosen) }
             assertEquals("the server does not advertise $chosen", chosen, model.ui.value.selectedModel)
-            val other = model.ui.value.capabilities?.models.orEmpty().map { it.name }
-                .first { it != chosen && it != PASSTHROUGH_MODEL }
+            val other = checkNotNull(
+                model.ui.value.capabilities?.models.orEmpty().map { it.name }
+                    .firstOrNull { it != chosen && it != PASSTHROUGH_MODEL },
+            ) { "the server needs a second upscaling model besides $chosen" }
+            // The two smallest tiers the server offers Android, set after the
+            // connect, which replaces a tier it does not offer.
+            val tiers = model.ui.value.capabilities?.qualityOptions.orEmpty()
+                .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
+                .map { it.id }
+            check(tiers.size >= 2) { "the server offers Android fewer than two quality tiers: $tiers" }
+            val (restartTier, openTier) = tiers.takeLast(2)
+            onMain { model.setQualityTier(openTier) }
 
             open(model, uhd!!)
             assertPassthroughFor4k(model, chosen)
@@ -78,7 +88,7 @@ class Passthrough4kDeviceTest {
             awaitPlaying(model, "the seek") { !it.seeking && it.seekTargetSeconds == null }
             assertPassthroughFor4k(model, chosen)
             val opened = model.ui.value.session?.sessionId
-            onMain { model.setQualityTier("hevc-qp14") }
+            onMain { model.setQualityTier(restartTier) }
             awaitPlaying(model, "the restart for a new quality") {
                 it.session?.sessionId != opened && it.reconnecting == null
             }
@@ -105,7 +115,7 @@ class Passthrough4kDeviceTest {
             if (!fixture.isNullOrBlank()) {
                 onMain {
                     model.setPassthrough4k(true)
-                    model.setQualityTier("hevc-qp18")
+                    model.setQualityTier(openTier)
                 }
                 val file = File(context.filesDir, fixture)
                 check(file.isFile) { "push $fixture to the debug app's files first" }
@@ -114,7 +124,7 @@ class Passthrough4kDeviceTest {
                 assertPassthroughFor4k(model, chosen)
                 assertModelChangeKeepsStream(model, other, chosen)
                 val local = model.ui.value.session?.sessionId
-                onMain { model.setQualityTier("hevc-qp14") }
+                onMain { model.setQualityTier(restartTier) }
                 awaitPlaying(model, "the local restart for a new quality") {
                     it.session?.sessionId != local && it.reconnecting == null
                 }

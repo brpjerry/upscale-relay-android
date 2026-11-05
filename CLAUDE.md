@@ -313,7 +313,11 @@ release.yml` builds and publishes the signed APK with those notes.
   passthrough for good. Toggling restarts only a stream it changes
   (`passthrough4kChangesStream`), decided after any open in flight has
   published its session; another upscaling model leaves a 4K passthrough
-  stream alone (`modelChangeKeepsStream`).
+  stream alone (`modelChangeKeepsStream`) unless an open is in flight,
+  whose old session may still be on screen. After the first load, only the
+  switch and an import set `passthrough4k` in the UI state, as with
+  `fileLoggingEnabled`: its own DataStore writes can come back behind older
+  ones.
 - **An uplink sends `video.color` only with a transfer it knows**
   (`platformColor`). The server decides the depth from that colour and reads
   an HEVC uplink's own parameter sets only where it is absent, so an

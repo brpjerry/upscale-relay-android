@@ -125,6 +125,11 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   cut `HdrUplinkDeviceTest` uses) adds the same checks for a local uplink.
   The probe's cost is in logcat: `read the video size (...) through /media
   in N ms`.
+- `ServerVideoSizeDeviceTest` needs no relay. It probes `dv81.mkv` and
+  `hdr10-boxes-only.mp4` (`HdrUplinkDeviceTest`'s fixtures) through the
+  app's `LocalDocumentHttpServer`, plus a file that is not media. It also
+  checks that cancelling a probe of a server that never answers drops the
+  connection at once.
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby
