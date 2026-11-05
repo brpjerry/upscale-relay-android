@@ -2991,9 +2991,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Applies a stored resume point to a freshly opened session by seeking
      * before mpv attaches. Points near the end (credits) or too close to the
-     * start are ignored.
+     * start are ignored. Returns the endpoint to play and where it starts.
      */
-    /** The endpoint to play, seeked to the saved position if there is one, and where it starts. */
     private suspend fun applyResumePoint(
         controller: RelaySessionController,
         endpoint: PlaybackEndpoint,
