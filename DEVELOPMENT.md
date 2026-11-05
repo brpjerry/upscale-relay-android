@@ -117,7 +117,11 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby
-  Vision) and, against the real relay, what comes back.
+  Vision) and, against the real relay, what comes back. For the HDR10
+  container fixtures it also reads the server's `GET /status`
+  `sessions[].pipeline.hdr_metadata.static`, the static metadata written
+  into the downlink: the server prefers the frames' SEI, per half, to what
+  the uplink sends.
   `tenBitVideoWidensAnSdrSourceAndTurningItOffRestarts` plays the first
   fixture, which should be a 10-bit SDR one, under "Use 10 bit video".
   `anMp4StartingBeforeZeroPlaysInSync` needs `-e editListFixture` with an MP4
@@ -126,8 +130,13 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   (`-c copy` for `dv81.mkv`/`.mp4`, `sdr10-hevc.mkv`, `sdr10-h264.mkv` and
   `hdr10-card.mkv`). `hlg.mkv` and `hdr10-container.mkv` are re-encoded with
   `libx265` and `setparams` (the frames' tags win over `-color_trc`), and
-  `hdr10-container.mp4` is that file remuxed. docs/ANDROID_DEVICE_NOTES.md
-  records what the tablet's MediaExtractor reports for each.
+  `hdr10-container.mp4` is that file remuxed. Their HEVC SEI (1000 nits,
+  MaxCLL 1000) differs from their container (10000 nits, MaxCLL 10000).
+  `hdr10-boxes-only.mp4` is that MP4 with every SEI removed, from the
+  samples and from `hvcC`, so only its `mdcv` and `clli` boxes carry the
+  metadata (`tools/make_boxes_only_hdr10.py`).
+  docs/ANDROID_DEVICE_NOTES.md records what the tablet's MediaExtractor
+  reports for each.
 - `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
   fails without it.
 

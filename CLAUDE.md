@@ -373,9 +373,12 @@ release.yml` builds and publishes the signed APK with those notes.
 - MediaExtractor hides most container HDR metadata (Tab S9 Ultra, Android
   16). From Matroska it keeps MaxCLL and MaxFALL but zeroes the mastering
   display, which `MatroskaHdrStatic` reads from the Colour element instead.
-  From MP4 it reports nothing of `mdcv` or `clli`, and that stays unread.
-  HEVC sources lose nothing either way, since the server copies the
-  bitstream's SEI; an MP4 whose HDR10 metadata lives only in its boxes does.
+  From MP4 it reports nothing of `mdcv` or `clli`, which `Mp4HdrStatic`
+  reads from the sample entry of the track MediaExtractor reads (matched by
+  its track-id, the `tkhd` track_ID). The VP9 binding's older `SmDm` and
+  `CoLL` boxes stay unread. Whatever MediaExtractor does report wins, per
+  half, and the server prefers a frame's SEI to anything the uplink sends,
+  so an HEVC source whose SEI carries the metadata is unaffected.
   A Dolby Vision MP4 is two video tracks of the same samples
   (`video/dolby-vision` with the record in `csd-2`, then its base layer). A
   Matroska one is plain `video/hevc`, its record left to
