@@ -1,5 +1,32 @@
 # Android device validation notes
 
+## Settings changed while a file opens — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, over the keyguard, the relay at
+192.168.0.115:8590 on `passthrough`, Bad Girl S01E01 and E02 (1080p SDR).
+`SettingsRestartDeviceTest` makes each change once the controller reports
+OPENING, after the open has sent its settings. It passed 3/3, twice:
+
+- **Quality during an open.** The open published with `hevc-qp18`, which it
+  had read. 40 ms later came one restart, with the chosen tier.
+- **Model during an open.** The open published `passthrough`. The selection
+  and the saved model stayed on `2x_AnimeJaNai_HD_V3_Compact` throughout,
+  and one restart followed onto it.
+- **Quality during auto-play's advance to E02.** E01's session was never on
+  screen under E02's name. The advance published with the old tier, and one
+  restart followed, 5.5 s after the advance began.
+
+No reconnect and no controller failure in any of them.
+`PlayerSeekDeviceTest` and `Passthrough4kDeviceTest` passed as before: the
+4K stand-in kept its session through both model changes, and the quality
+change was one restart.
+
+The same test on main's app code failed 3/3. The quality change was never
+applied, and the open put `passthrough` back over the chosen model. During
+the advance, E01's session stayed on screen under E02's name, and a settings
+restart started 200 ms in at E01's position (1421.6 s), beside the advance's
+own open.
+
 ## HDR output — 2026-11-04
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on

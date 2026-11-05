@@ -226,6 +226,30 @@ release.yml` builds and publishes the signed APK with those notes.
   reload until the new epoch plays mpv's reported position is the stale old
   one and then zero. Reading it turned a second "back 1:25" into a jump to
   0:00. Only end-of-file checks want mpv's real position.
+- **A playback setting reaches the stream only through
+  `applyStreamSettings`, once nothing is opening.** Model, quality, fit,
+  resize algorithm, "Use 10 bit video" and the 4K passthrough option can
+  change while an open, reconnect or file advance runs. That work may or may
+  not have read the new value, and until it publishes, the session on screen
+  may be the file being left. So the decision waits for `openingJob`,
+  `reconnectJob` and `autoAdvanceJob`, then compares what the published
+  session was opened with (`streamOpenedWith`, `StreamSettings.carrying`)
+  to the settings now (`settingsRestartNeeded`, whose per-setting gates
+  judge that session): any number of changes make one restart, none if they
+  cancel out. A settings restart still running is replaced, and a reconnect
+  or advance that starts cancels it, since each reads the latest settings.
+  An open's write-back of the model and tier it resolved (`settledChoice`)
+  keeps a choice made while it ran, and saves the model only when it adopts
+  the server's. A new setting a relay open reads belongs in
+  `StreamSettings`, and a new path that publishes a relay session sets
+  `streamOpenedWith`. Until 2026-11-04 a change during a reconnect or an
+  open from the library was lost, a change during an advance started a
+  restart at the old file's position beside the advance's open, and an open
+  put the model it had read back over a newer choice
+  (`SettingsRestartDeviceTest` fails on that code). An advance also clears
+  `session` and `sessionDescription` until the next file publishes, and
+  progress saves and the end-of-file mark skip it: `activeOrigin` is the
+  next file by then, while mpv still reports the old one.
 - **The picture always runs full size under a display cutout.** Never shrink
   the player, pad the picture, or reduce the size negotiated with the server
   for one: on the tablet that costs 28 rows, and the owner rejected it
@@ -365,16 +389,15 @@ release.yml` builds and publishes the signed APK with those notes.
   last open read for that file (`SourceSizeMemo`, as `knownSourceSize`)
   instead of probing again, so a resume whose network is not back yet
   cannot put a 4K file on the model. Never take it from `state.session`:
-  next/previous and auto-play move `activeOrigin` to the next file while
-  the old file's session is still on screen. `PlaybackEndpoint.model` and
+  next/previous and auto-play move `activeOrigin` to the next file before
+  that file has a session. `PlaybackEndpoint.model` and
   `SessionInfo.model` are what was sent; `chosenModel` is what the app
   stores as `selectedModel` and saves. Storing `endpoint.model` instead, as
   every open did before, would make one 4K file switch the user's model to
   passthrough for good. Toggling restarts only a stream it changes
-  (`passthrough4kChangesStream`), decided after any open in flight has
-  published its session; another upscaling model leaves a 4K passthrough
-  stream alone (`modelChangeKeepsStream`) unless an open is in flight,
-  whose old session may still be on screen. After the first load, only the
+  (`passthrough4kChangesStream`), and another upscaling model leaves a 4K
+  passthrough stream alone (`modelChangeKeepsStream`); both are decided as
+  every playback setting is (`applyStreamSettings`, below). After the first load, only the
   switch and an import set `passthrough4k` in the UI state, as with
   `fileLoggingEnabled`: its own DataStore writes can come back behind older
   ones.

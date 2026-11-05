@@ -125,6 +125,17 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   cut `HdrUplinkDeviceTest` uses) adds the same checks for a local uplink.
   The probe's cost is in logcat: `read the video size (...) through /media
   in N ms`.
+- `SettingsRestartDeviceTest` needs the real relay and `-e auditMediaPath`
+  with a library file that has a next file in its folder, plus `-e model`
+  when the server lacks `2x_AnimeJaNai_HD_V3_Compact`. It changes the
+  quality, then the model, while a file opens, and the quality again during
+  auto-play's advance to the next file. Each change comes once the
+  controller reports OPENING, after the open has sent the old value. It
+  checks that one restart follows the open with the new setting, that the
+  open never puts the old model back, and that the file being left's session
+  is never shown as the next file's. It marks the file it plays to the end
+  as watched. This test, `PlayerSeekDeviceTest` and `Passthrough4kDeviceTest`
+  wake the tablet and show over its keyguard (`launchOverKeyguard`).
 - `ServerVideoSizeDeviceTest` needs no relay. It probes `dv81.mkv` and
   `hdr10-boxes-only.mp4` (`HdrUplinkDeviceTest`'s fixtures) through the
   app's `LocalDocumentHttpServer`, plus a file that is not media. It also
