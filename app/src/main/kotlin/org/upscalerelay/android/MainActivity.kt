@@ -36,6 +36,11 @@ class MainActivity : ComponentActivity() {
     private val viewModel: RelayViewModel by viewModels()
     private var inPictureInPicture by mutableStateOf(false)
 
+    // The picture size of the last session shown. A file advance clears the
+    // session until the next file opens; the PiP window keeps its shape
+    // meanwhile instead of jumping to 16:9 and back.
+    private var pipPictureSize = 16 to 9
+
     private val pipActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_PIP_PLAY_PAUSE) {
@@ -181,8 +186,8 @@ class MainActivity : ComponentActivity() {
     private fun pictureInPictureParams(state: RelayUiState): PictureInPictureParams {
         val videoActive = state.playingPath != null && state.error == null &&
             state.reconnecting == null
-        val width = state.session?.downlinkWidth ?: 16
-        val height = state.session?.downlinkHeight ?: 9
+        state.session?.let { pipPictureSize = it.downlinkWidth to it.downlinkHeight }
+        val (width, height) = pipPictureSize
         val ratio = if (width > 0 && height > 0) Rational(width, height) else Rational(16, 9)
         val clamped = when {
             ratio.toFloat() > 2.35f -> Rational(235, 100)
