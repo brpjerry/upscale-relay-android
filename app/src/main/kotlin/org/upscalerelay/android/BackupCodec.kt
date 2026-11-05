@@ -64,6 +64,7 @@ object BackupCodec {
                 put("resizeAlgorithm", preferences.resizeAlgorithm)
                 put("debandEnabled", preferences.debandEnabled)
                 put("tenBitVideo", preferences.tenBitVideo)
+                put("hdrOutput", preferences.hdrOutput)
                 put("subtitlesEnabled", preferences.subtitlesEnabled)
                 put("preferredSubtitle", preferences.preferredSubtitle)
             }
@@ -151,6 +152,7 @@ object BackupCodec {
             resizeAlgorithm = playback?.string("resizeAlgorithm") ?: current.resizeAlgorithm,
             debandEnabled = playback?.bool("debandEnabled") ?: current.debandEnabled,
             tenBitVideo = playback?.bool("tenBitVideo") ?: current.tenBitVideo,
+            hdrOutput = playback?.bool("hdrOutput") ?: current.hdrOutput,
             subtitlesEnabled = playback?.bool("subtitlesEnabled") ?: current.subtitlesEnabled,
             preferredSubtitle = playback?.string("preferredSubtitle") ?: current.preferredSubtitle,
             gesturesEnabled = player?.bool("gesturesEnabled") ?: current.gesturesEnabled,

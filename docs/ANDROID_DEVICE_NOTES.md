@@ -1,5 +1,55 @@
 # Android device validation notes
 
+## HDR output — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
+`passthrough`, `hevc-qp4`, 2960x1848 cover, "Show HDR videos in HDR" on.
+`HdrOutputDeviceTest` passed all five tests in one run, mostly over the
+keyguard (PiP with the tablet unlocked). The display reported HDR at a
+540-nit peak, and every HDR open named `pq` at 540.
+
+- **HDR test card** (`HDR test card - 10000 nits.mkv`, HDR10). mpv took
+  `vo=gpu-next`, `egl-output-format=rgb10_a2`, `target-trc=pq`,
+  `target-prim=bt.2020`, `target-peak=540`, and `sub-hdr-peak` and
+  `image-subs-hdr-peak` at 540. SurfaceFlinger composed the relay layer as a
+  `DEVICE` overlay: 2960x1848, format `0x2b` (RGBA_1010102),
+  `dataspace=BT2020_PQ`, opaque, `whitePointNits=-1`, no HDR metadata.
+  `mIsHdrLayerPresent=true`. 0 drops over 20 s, and 0 over 8 s after a seek,
+  which kept PQ on the same relay.
+- **SDR episode** (Bad Girl S01E01, 1080p HEVC 10-bit SDR, 8-bit downlink):
+  `vo=gpu` with the start-up values (`egl-output-format=auto`, `target-*`
+  `auto`, `sub-hdr-peak=sdr`, `image-subs-hdr-peak=1000`), no relay layer, no
+  HDR layer, 0 drops over 15 s.
+- **Battery saver** (`cmd battery unplug`, `cmd power set-mode 1`). The
+  broadcast arrived, and the card reloaded at its position (31.1 → 32.1 s)
+  on the SDR output in 9.0 s (the card's usual start: it streams at
+  0.67 Mbps). No HDR layer, 0 drops. Battery saver off: back to PQ in 9.0 s,
+  with the HDR layer. "Show HDR videos in HDR" off and on did the same, in
+  9.0 and 9.9 s.
+- **Dolby Vision 8.1 + HDR10** (Cyberpunk Edgerunners S02E01). Named `pq`,
+  the server streamed the HDR10 base (`downlink_mapping.transfer` `pq`,
+  nothing applied), shown as PQ. With the battery saver on, the reload's seek
+  named `sdr` and the server applied the RPU: `10-bit SDR (Dolby Vision
+  mapped)` on the SDR output, 3.6 s after the change. Off again, PQ.
+- **PiP** (unlocked). No reload, still PQ, 0 drops over 15 s. The relay
+  layer kept mpv's 2960x1848 buffer, scaled into the ~1018x635 window (the
+  whole source crop in the small display frame). The panel dropped its boost
+  there (`mIsHdrLayerPresent=false`), as in the spike.
+- **gpu-next** logged `[aimagereader] Waiting for frame timed out!` /
+  `acquireLatestImage failed: -30001` once per load, with no drops, as in the
+  spike. The relay passed over 1-2 frames per load (`superseded`) and failed
+  none.
+- **Regressions.** These passed: `NativeLifecycleDeviceTest`,
+  `PlayerSeekDeviceTest` (the SDR episode), `AuditPlaybackDeviceTest` (local
+  relay and seeks, the hand-over to the original, and a paused seek and
+  settings restart on the HDR card, which stayed PQ through both), and
+  `HdrUplinkDeviceTest`'s `localHdrStreamsAsTheServerShouldSendIt`. That
+  one now switches HDR output off, since it checks the downlink for an SDR
+  display.
+- **Not checked:** subtitles against the controls by eye (the options match
+  what the owner matched by eye in the spike), background and return, DeX
+  or an external monitor, HLG and HDR10+ sources shown as HDR.
+
 ## HDR output spike — 2026-11-03
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on

@@ -5,7 +5,7 @@ HLG with its metadata (PROTOCOL §3.5), and the client names its display
 (§3.6). This document covers what is still missing: showing that signal as
 HDR on the Galaxy Tab S9 Ultra's panel instead of mpv tone-mapping it to SDR.
 It is the result of a spike (2026-11-03, with an eye check on 2026-11-04).
-Nothing here is shipped yet: `PLAYER_DISPLAY` on main is still `sdr`.
+Approach 3 is what shipped (2026-11-04): see "Approach 3 as built" below.
 
 ## Recommendation
 
@@ -356,18 +356,37 @@ reload. Not worth carrying.
     PQ. This is the clean fix and worth offering upstream. Until upstream
     ships it, it means a custom libmpv build instead of the pinned APK's.
 
-### Shipping approach 3 (sketch, not built)
+### Approach 3 as built
 
-- **Surface.** `MpvSurfaceView` owns the relay: reader, child layer and
-  handler thread, all at the Surface's size. It gives mpv the reader's
-  Surface only while the output is PQ. API 33 or later, else stay SDR.
+The sketch the spike left, and what became of each part:
+
+
+- **Surface.** `MpvSurfaceView` owns the relay (`HdrSurfaceRelay`: reader,
+  child layer and handler thread), made at the Surface's size. It gives mpv
+  the reader's Surface only while the load asks for PQ
+  (`MpvPlayerEngine.requestedOutput`). API 33 or later, else stay SDR. A
+  relay that cannot be made leaves the load on the SDR surface.
+  - **Built differently:** a relay keeps its size for as long as its Surface
+    lives. A resize (entering PiP) scales the child layer to fit instead
+    (`fitTo`). Giving mpv a new reader would have meant a new VO in the
+    middle of an epoch, which today's path never does in PiP. The prototype
+    did neither: its relay ignored the resize.
+  - The reader declares its format the non-legacy way
+    (`setDefaultHardwareBufferFormat(RGBA_1010102)` with the dataspace). The
+    prototype's `setImageFormat` followed by `setDefaultDataSpace` leaves
+    the reader's default at RGBA_8888, which is why `Image.getFormat()`
+    reported 1; the buffers were 10-bit only because mpv's EGL config asked.
 - **Mode switches.** `vo`, `egl-output-format` and the `target-*` options
   take effect when the VO is re-created. Switch them only between loads, the
   way the desktop moves its render context. Each relay seek is already a
-  reload.
+  reload. As built: each `RelayLoad` carries its `VideoOutput`, and a load
+  whose output the attached Surface does not carry waits until the view
+  attaches the one that does (`loadOn`), as a load waits for any Surface.
 - **Teardown.** The reader is a new owner under the hard rule on retiring
   owners: detach mpv (`vo=null`) and await the command queue before closing
-  the reader and releasing the child layer.
+  the reader and releasing the child layer. As built: the layer is hidden at
+  once, and the reader closes after `afterPendingCommands`; everything that
+  touches either runs on the relay's thread.
 - **Subtitles and OSD.** Set `sub-hdr-peak` and `image-subs-hdr-peak` to the
   level where the interface's white lands:
   - the display peak here, where nothing dims SDR layers;
@@ -375,7 +394,8 @@ reload. Not worth carrying.
     shows up as a real `whitePointNits` on the layers.
 - **The SDR path.** Whether the SDR path moves to gpu-next too is a separate
   decision. `profile=fast`, `dither`, `deband` and the interpolation options
-  all exist there, but gpu-next was measured here on HDR output only.
+  all exist there, but gpu-next was measured here on HDR output only. As
+  built, the SDR output is today's `gpu` with the values mpv started with.
 
 ## Upgrading mpv-android (2026-04-25 → 2026-09-17)
 
@@ -398,13 +418,20 @@ condition flips, go back to `sdr` (and to the 8-bit tone-mapped surface)
 through the same reload at the current position that the desktop uses. A
 seek took 4.3-7.6 s on this link.
 
+As built: `displayTargetFor` and `hdrPresentationStale` in
+`HdrPresentation.kt`, with `RelayViewModel.reloadIfHdrStale` doing the reload.
+
 **`pq`, with the peak from `Display.getHdrCapabilities().desiredMaxLuminance`
 (540 here), when all of these hold:**
 
-- The source is HDR (`SessionInfo.hdrSource`).
+- The source is HDR (`SessionInfo.hdrSource`). An open does not know yet,
+  and names the display an HDR video would be shown on, as the desktop does:
+  the server maps only HDR sources. The epoch then plays as PQ only when its
+  own `downlink_color` is HDR (`videoOutputFor`).
 - The Activity's current display (`Activity.display`) lists HDR10 or HLG in
   its supported HDR types, and the user has not disabled them
-  (`userDisabledHdrTypes`).
+  (`userDisabledHdrTypes`). `Display.getHdrCapabilities().supportedHdrTypes`
+  already leaves those out (the mode's own list, API 34, does not).
 - The device runs API 33 or later (the relay).
 - A "Show HDR videos in HDR" setting is on, as on the desktop.
 
@@ -416,7 +443,10 @@ anchors SDR white to 203 nits under the slider. mpv takes the same peak as
 
 - **Battery saver** (`PowerManager.isPowerSaveMode`, and its broadcast). The
   HDR boost is disabled there (`allowInLowPowerMode false`), so highlights
-  would not get the headroom. Unmeasured.
+  would not get the headroom. Measured as built (2026-11-04): the broadcast
+  arrives, and the test card reloads at its position on the SDR output, with
+  no HDR layer and no drops; a Dolby Vision 8.1 episode is remapped by the
+  server for SDR. Off again, both go back to PQ.
 - **The window moves to a display without HDR**, such as DeX on an SDR
   monitor or a cast. Re-check on `DisplayManager.DisplayListener` /
   `onConfigurationChanged` and on each open and seek. An HDR monitor keeps
@@ -432,9 +462,17 @@ the PQ layer still played with no drops and in sync, and it looked fine
 
 - **Not measured** (fixtures or hardware):
   - background and return;
-  - battery saver;
-  - DeX;
-  - HLG and HDR10+ through each path.
+  - DeX and external monitors, HDR or SDR;
+  - HLG and HDR10+ shown as HDR.
+- **Not built:**
+  - static HDR metadata on the relay's layer (NDK only);
+  - HDR for the original file playing directly (`loadDirect`), which stays
+    tone-mapped;
+  - a reload when mpv finds PQ in a stream whose colour the server did not
+    report (the desktop does this);
+  - a subtitle peak for platforms that dim SDR layers under HDR (a real
+    `whitePointNits`): the app always uses the display's peak, which is right
+    for the tablet.
 - **Background stall, unconfirmed and not HDR-related.** Under the test
   with the keyguard up, today's path showed it too. With background playback
   on, the drift watchdog reloaded the epoch ("resyncing playback: 4.7s A/V

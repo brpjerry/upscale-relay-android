@@ -1,6 +1,8 @@
 package org.upscalerelay.player.mpv
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
@@ -55,6 +57,28 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private var subtitleChoiceMade = false
     private var defaultSubtitleFontsDirectory = ""
 
+    // HDR output (VideoOutput). The surface view gives mpv the Surface for
+    // the output a load asks for; a load whose output the attached Surface
+    // does not carry waits for that, as a load waits for any Surface.
+    /** What the current or pending load asks for. */
+    private var requested: VideoOutput = VideoOutput.Sdr
+    /** What the attached Surface carries, and mpv's options are set for. */
+    private var attachedOutput: VideoOutput = VideoOutput.Sdr
+    /** mpv's start-up values of the options the outputs change. */
+    private var outputDefaults: Map<String, String> = emptyMap()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mutablePresentedOutput = MutableStateFlow<VideoOutput>(VideoOutput.Sdr)
+
+    /** The output mpv renders to now: Pq only while it draws into an HDR relay. */
+    val presentedOutput: StateFlow<VideoOutput> = mutablePresentedOutput.asStateFlow()
+
+    /**
+     * Called on the main thread when a load asks for an output the attached
+     * Surface does not carry. The surface view answers with [attachSurface].
+     */
+    @Volatile
+    var outputRequestListener: (() -> Unit)? = null
+
     /** Blocking: callers initialize on IO while the preceding owner retires. */
     fun initialize() {
         synchronized(lock) {
@@ -76,6 +100,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 setInitialOptions()
                 MPVLib.init()
                 defaultSubtitleFontsDirectory = MPVLib.getPropertyString("sub-fonts-dir").orEmpty()
+                outputDefaults = OUTPUT_OPTIONS.mapNotNull { name ->
+                    MPVLib.getPropertyString(name)?.let { name to it }
+                }.toMap()
                 observeMetrics()
                 MPVLib.addObserver(this)
                 MPVLib.addLogObserver(this)
@@ -112,10 +139,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         }
         val load = MpvLoadRequest(request.streamUrl, request, null)
         mutableState.value = MpvPlaybackState.LOADING
-        if (attachedSurface == null) {
-            loadGeneration += 1
-            pendingLoad = load
-        } else loadNow(load)
+        loadOn(request.output, load)
     }
 
     fun loadDirect(url: String, startSeconds: Double = 0.0) = synchronized(lock) {
@@ -123,10 +147,39 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         require(url.startsWith("http://127.0.0.1:")) { "direct local input must use the private HTTP bridge" }
         val request = MpvLoadRequest(url, null, startSeconds.coerceAtLeast(0.0))
         mutableState.value = MpvPlaybackState.LOADING
-        if (attachedSurface == null) {
-            loadGeneration += 1
-            pendingLoad = request
-        } else loadNow(request)
+        loadOn(VideoOutput.Sdr, request)
+    }
+
+    /**
+     * Loads now if the attached Surface carries [output]. Otherwise the load
+     * waits, and the surface view is asked for the Surface that does: the
+     * output changes between loads only, with mpv stopped, and each relay
+     * seek is a load.
+     */
+    private fun loadOn(output: VideoOutput, load: MpvLoadRequest) {
+        requested = output
+        if (attachedSurface != null && attachedOutput == output) {
+            loadNow(load)
+            return
+        }
+        loadGeneration += 1
+        pendingLoad = load
+        if (attachedSurface != null) mainHandler.post { outputRequestListener?.invoke() }
+    }
+
+    /** The output the current or pending load asks for. */
+    fun requestedOutput(): VideoOutput = synchronized(lock) { requested }
+
+    /**
+     * Runs [action] once every command queued so far has run: how an owner
+     * of something mpv used (the HDR relay) waits before it lets go. Right
+     * away once the player is closed, since mpv is gone by then.
+     */
+    fun afterPendingCommands(action: () -> Unit) {
+        val queued = synchronized(lock) {
+            !closed && runCatching { commands.execute(action) }.isSuccess
+        }
+        if (!queued) action()
     }
 
     /** Stop the old live Matroska demuxer before its localhost socket closes. */
@@ -256,6 +309,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         audioChoiceMade = false
         chosenSubtitle = null
         subtitleChoiceMade = false
+        // Idle, nothing needs HDR. The Surface stays as it is: the next load
+        // says what it needs.
+        requested = VideoOutput.Sdr
         MPVLib.setPropertyString("sub-fonts-dir", defaultSubtitleFontsDirectory)
         MPVLib.setPropertyBoolean("pause", false)
         commands.execute { MPVLib.command(arrayOf("stop")) }
@@ -263,23 +319,47 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         mutableState.value = MpvPlaybackState.IDLE
     }
 
-    fun attachSurface(surface: Surface, width: Int, height: Int) = synchronized(lock) {
+    /**
+     * Gives mpv [surface], which carries [output]: the `SurfaceView`'s own for
+     * SDR, an HDR relay's for PQ. A load waiting for a Surface runs on it,
+     * also when it asked for another output the view could not provide (mpv
+     * then tone-maps).
+     */
+    fun attachSurface(
+        surface: Surface,
+        width: Int,
+        height: Int,
+        output: VideoOutput = VideoOutput.Sdr,
+    ) = synchronized(lock) {
         check(initialized && !closed)
-        if (attachedSurface === surface) {
+        if (attachedSurface === surface && attachedOutput == output) {
             resize(width, height)
-            return@synchronized
+        } else {
+            if (attachedSurface != null) detachSurfaceLocked(attachedSurface)
+            MPVLib.attachSurface(surface)
+            attachedSurface = surface
+            attachedOutput = output
+            MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+            // The options take effect as the VO is created, just below.
+            mpvOutputOptions(output, outputDefaults).forEach { (name, value) ->
+                MPVLib.setPropertyString(name, value)
+            }
+            MPVLib.setPropertyString("force-window", "yes")
+            MPVLib.setPropertyString("vo", mpvVideoOutput(output))
+            mutablePresentedOutput.value = output
+            Log.i(TAG, "video output ${describeOutputLocked()}")
         }
-        if (attachedSurface != null) detachSurfaceLocked(attachedSurface)
-        MPVLib.attachSurface(surface)
-        attachedSurface = surface
-        MPVLib.setPropertyString("android-surface-size", "${width}x$height")
-        MPVLib.setPropertyString("force-window", "yes")
-        MPVLib.setPropertyString("vo", VIDEO_OUTPUT)
         pendingLoad?.let {
             pendingLoad = null
             loadNow(it)
         }
     }
+
+    /** What mpv reads back for the output options, for the log: what it really took. */
+    private fun describeOutputLocked(): String =
+        (listOf("vo") + OUTPUT_OPTIONS).joinToString(" ") { name ->
+            "$name=${MPVLib.getPropertyString(name) ?: "?"}"
+        }
 
     fun resize(width: Int, height: Int) = synchronized(lock) {
         if (initialized && !closed && attachedSurface != null && width > 0 && height > 0) {
@@ -312,7 +392,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             // algorithm, to the depth the surface reports.
             "dither" to "fruit",
             "dither-depth" to "auto",
-            "vo" to VIDEO_OUTPUT,
+            "vo" to mpvVideoOutput(VideoOutput.Sdr),
             "gpu-context" to "android",
             "opengl-es" to "yes",
             "hwdec" to "mediacodec,mediacodec-copy",
@@ -570,12 +650,14 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         MPVLib.observeProperty("core-idle", MPVLib.MpvFormat.FLAG)
     }
 
+    /** Synchronous: once `vo=null` returns, mpv's VO is gone and renders into [surface] no more. */
     private fun detachSurfaceLocked(surface: Surface?) {
         if (surface == null || attachedSurface !== surface) return
         MPVLib.setPropertyString("vo", "null")
         MPVLib.setPropertyString("force-window", "no")
         MPVLib.detachSurface()
         attachedSurface = null
+        mutablePresentedOutput.value = VideoOutput.Sdr
     }
 
     /** A property that went unavailable: the picture's description must not outlive its frames. */
@@ -719,7 +801,6 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
 
     companion object {
         private const val TAG = "RelayMpv"
-        private const val VIDEO_OUTPUT = "gpu"
 
         /** Cap on the pause hold, so a silent file can never strand playback. */
         private const val AUDIO_READY_TIMEOUT_NANOS = 5_000_000_000L
@@ -754,6 +835,8 @@ data class RelayLoad(
     val externalMediaUrl: String?,
     val subtitleFontsDirectory: String?,
     val auxMode: RelayAuxMode,
+    /** How this epoch is presented: PQ for an HDR epoch shown as HDR. */
+    val output: VideoOutput = VideoOutput.Sdr,
 )
 
 /**

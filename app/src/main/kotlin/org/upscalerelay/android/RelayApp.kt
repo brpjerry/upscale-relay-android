@@ -1112,6 +1112,7 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                             }
                         }
                     TenBitVideoToggle(viewModel, state)
+                    HdrOutputToggle(viewModel, state)
                     Text("Framing", style = MaterialTheme.typography.labelLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RelaySessionController.FIT_MODES.forEach { mode ->
@@ -1403,6 +1404,30 @@ private fun TenBitVideoToggle(viewModel: RelayViewModel, state: RelayUiState) {
         supporting = "Where the server and this device support it, HDR videos stream with 10-bit colour. " +
             "On, every other video does too: smoother gradients and a smaller stream, for more work on the server.",
     )
+}
+
+/** "Show HDR videos in HDR" (docs/HDR_OUTPUT.md), in Settings and the player's sheet. */
+@Composable
+private fun HdrOutputToggle(viewModel: RelayViewModel, state: RelayUiState) {
+    SettingToggle(
+        "Show HDR videos in HDR",
+        state.hdrOutput,
+        viewModel::setHdrOutput,
+        supporting = hdrOutputHint(state),
+    )
+}
+
+/** What "Show HDR videos in HDR" does here and now (displayTargetFor's conditions). */
+private fun hdrOutputHint(state: RelayUiState): String {
+    val toneMapped = "HDR videos play tone-mapped to SDR"
+    return when {
+        Build.VERSION.SDK_INT < HDR_OUTPUT_MIN_SDK -> "Needs Android 13 or later. $toneMapped."
+        !state.displayHdr.hdr -> "This display does not show HDR. $toneMapped."
+        !state.hdrOutput -> "Off: $toneMapped."
+        state.powerSave -> "The battery saver is on: $toneMapped until it is off."
+        else -> "HDR videos play as HDR on this display" +
+            (state.displayHdr.peakNits?.let { ", up to ${it.roundToInt()} nits" } ?: "") + "."
+    }
 }
 
 @Composable
@@ -2488,6 +2513,7 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
                         }
                     }
                 TenBitVideoToggle(viewModel, state)
+                HdrOutputToggle(viewModel, state)
                 Text("Framing", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RelaySessionController.FIT_MODES.forEach { mode ->

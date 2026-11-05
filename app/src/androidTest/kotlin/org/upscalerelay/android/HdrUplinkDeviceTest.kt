@@ -171,6 +171,9 @@ class HdrUplinkDeviceTest {
             model.setModel("passthrough")
             model.setQualityTier("hevc-qp4")
             model.setTenBitVideo(tenBitVideo)
+            // What `expected` says comes back is for an SDR display; on an HDR
+            // panel the app would otherwise name pq (HdrOutputDeviceTest).
+            model.setHdrOutput(false)
         }
     }
 

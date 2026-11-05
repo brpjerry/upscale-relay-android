@@ -491,8 +491,13 @@ class RelaySessionController internal constructor(
     /**
      * Switches the persistent downlink to a fresh queue/localhost stream and
      * asks the server to begin the new epoch at an absolute source PTS.
+     *
+     * [displayTarget] is the display the new epoch is shown on (§3.6). On a
+     * session that negotiated one, it replaces it from this epoch on, and the
+     * server remaps when its transfer differs; a session that negotiated none
+     * ignores it, as open_session would have. Null keeps the current one.
      */
-    suspend fun seek(targetPts: Long): PlaybackEndpoint = seekMutex.withLock {
+    suspend fun seek(targetPts: Long, displayTarget: DisplayTarget? = null): PlaybackEndpoint = seekMutex.withLock {
         synchronized(playbackStateLock) {
             check(
                 state.value in setOf(
@@ -529,6 +534,7 @@ class RelaySessionController internal constructor(
             // The endpoint goes out only after seek_ready: on a mapped session
             // that reply is what says the epoch's colour (§3.6), so mpv never
             // loads an epoch the session cannot describe yet.
+            if (displayTarget != null && negotiatedDisplayTarget != null) negotiatedDisplayTarget = displayTarget
             val ready = requireNotNull(control).seek(
                 targetPts.coerceAtLeast(0), epoch, negotiatedDisplayTarget,
             )

@@ -36,7 +36,8 @@ Modules:
 - `relay-client` — control WebSocket, session state machine, downlink
   receiver, uplink sender, bounded media queue, localhost media server,
   verified attachment cache and failure taxonomy.
-- `player-mpv` — lifecycle-checked libmpv wrapper and `SurfaceView` host.
+- `player-mpv` — lifecycle-checked libmpv wrapper and `SurfaceView` host,
+  with the HDR relay that shows mpv's PQ output as HDR (docs/HDR_OUTPUT.md).
 - `relay-demux` — SAF browsing, MediaExtractor access-unit source, and the
   local HTTP bridge for repeated document access.
 

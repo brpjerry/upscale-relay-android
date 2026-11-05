@@ -128,6 +128,17 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   `libx265` and `setparams` (the frames' tags win over `-color_trc`), and
   `hdr10-container.mp4` is that file remuxed. docs/ANDROID_DEVICE_NOTES.md
   records what the tablet's MediaExtractor reports for each.
+- `HdrOutputDeviceTest` needs a device with an HDR display (API 33+, the
+  battery saver off) and the real relay: `-e hdrPath` (an HDR10 server
+  file; the HDR test card does) and `-e sdrPath`, plus `-e mappedHdrPath`
+  (a Dolby Vision 8.1 file) for the remapping test. It plays on
+  `passthrough`, checks mpv's output options, the relay's layer in
+  `dumpsys SurfaceFlinger` and `mIsHdrLayerPresent` in `dumpsys display`,
+  and counts drops. The fallback tests switch the battery saver on with
+  `cmd battery unplug` and `cmd power set-mode 1`, and always switch it back
+  off and reset the battery. What SurfaceFlinger and DisplayManager showed
+  goes to `files/hdr-output-*.txt`. Whether subtitles match the interface's
+  white is checked by eye only (docs/HDR_OUTPUT.md).
 - `Phase4PtsDeviceTest` is a manual diagnostic. It needs `-e phase4Uri` and
   fails without it.
 

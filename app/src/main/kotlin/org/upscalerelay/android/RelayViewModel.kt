@@ -1,7 +1,10 @@
 package org.upscalerelay.android
 
 import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -11,6 +14,7 @@ import android.media.session.PlaybackState
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
+import android.os.PowerManager
 import android.os.SystemClock
 import android.net.Uri
 import android.util.Log
@@ -19,6 +23,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -67,6 +72,7 @@ import org.upscalerelay.player.mpv.MpvPlayerEngine
 import org.upscalerelay.player.mpv.MpvTrack
 import org.upscalerelay.player.mpv.RelayAuxMode
 import org.upscalerelay.player.mpv.RelayLoad
+import org.upscalerelay.player.mpv.VideoOutput
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.DisplayTarget
@@ -206,6 +212,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var lastReceiveChangeAt = 0L
     private var lastPausedForCache = false
     private var lastDriftResyncAt = 0L
+    private var lastHdrReloadAt = 0L
+    private var powerSaveReceiver: BroadcastReceiver? = null
     private var rebufferTimestamps: List<Long> = emptyList()
     private var metricsStartedAt = 0L
     private var playbackPositions: Map<String, PlaybackProgress> = emptyMap()
@@ -376,6 +384,30 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         runPlaybackCatching { connectivity.registerDefaultNetworkCallback(networkCallback) }
             .onSuccess { connectivityCallback = networkCallback }
+        // The battery saver turns the panel's HDR boost off, so HDR videos go
+        // back to SDR while it is on (displayTargetFor).
+        val power = application.getSystemService(Context.POWER_SERVICE) as PowerManager
+        mutableUi.update { it.copy(powerSave = power.isPowerSaveMode) }
+        val powerSaveChanged = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val powerSave = power.isPowerSaveMode
+                if (powerSave == mutableUi.value.powerSave) return
+                AppLog.i(TAG, "battery saver ${if (powerSave) "on" else "off"}")
+                mutableUi.update { it.copy(powerSave = powerSave) }
+                reloadIfHdrStale()
+            }
+        }
+        runPlaybackCatching {
+            ContextCompat.registerReceiver(
+                application,
+                powerSaveChanged,
+                IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.onSuccess { powerSaveReceiver = powerSaveChanged }
+        viewModelScope.launch(actionErrors) {
+            playerEngine.presentedOutput.collect { output -> mutableUi.update { it.copy(videoOutput = output) } }
+        }
         discovery.start()
         PlaybackBridge.controls = bridgeControls
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
@@ -424,6 +456,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         resizeAlgorithm = value.resizeAlgorithm,
                         debandEnabled = value.debandEnabled,
                         tenBitVideo = value.tenBitVideo,
+                        hdrOutput = value.hdrOutput,
                         subtitlesEnabled = value.subtitlesEnabled,
                         preferredSubtitle = value.preferredSubtitle,
                         diagnosticsVisible = value.diagnosticsVisible,
@@ -642,6 +675,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutableUi.value = mutableUi.value.copy(display = DisplaySize(width, height))
     }
 
+    /** What the Activity's display can show as HDR, read by MainActivity whenever it may have changed. */
+    fun updateDisplayHdr(value: DisplayHdr) {
+        if (value == mutableUi.value.displayHdr) return
+        AppLog.i(TAG, "display ${if (value.hdr) "shows HDR, peak ${value.peakNits ?: "unknown"} nits" else "is SDR"}")
+        mutableUi.update { it.copy(displayHdr = value) }
+        reloadIfHdrStale()
+    }
+
     fun setQualityTier(value: String) {
         if (value in RelaySessionController.ANDROID_HEVC_TIERS) {
             val changed = mutableUi.value.qualityTier != value
@@ -682,6 +723,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         persist { preferences.setTenBitVideo(value) }
         val state = mutableUi.value
         if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
+    }
+
+    /** "Show HDR videos in HDR": an HDR video playing switches at its current position. */
+    fun setHdrOutput(value: Boolean) {
+        mutableUi.update { it.copy(hdrOutput = value) }
+        persist { preferences.setHdrOutput(value) }
+        reloadIfHdrStale()
     }
 
     fun setModel(value: String) {
@@ -1593,7 +1641,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(landscape),
-                        displayTarget = PLAYER_DISPLAY,
+                        displayTarget = displayTarget(landscape),
                     )
                     pendingSource = null // controller now owns the source
                     applyResumePoint(currentController, endpoint, "local:$uriValue") to
@@ -1689,7 +1737,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         fitMode = landscape.fitMode,
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(landscape),
-                        displayTarget = PLAYER_DISPLAY,
+                        displayTarget = displayTarget(landscape),
                     )
                 }
                 openRetryPending = true
@@ -1976,7 +2024,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 currentController.expectPlayerReload()
                 playerEngine.prepareReload()
                 playerEngine.awaitIdle()
-                val endpoint = currentController.seek(targetPts)
+                val endpoint = currentController.seek(targetPts, displayTarget(mutableUi.value))
                 // stop -> retire old loopback/queue -> settle -> loadfile.
                 // Never pass start=: absolute Matroska PTS remain authoritative.
                 delay(150)
@@ -2432,7 +2480,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 fitMode = state.fitMode,
                 resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
                 highBitDepth = downlinkDepth(state),
-                displayTarget = PLAYER_DISPLAY,
+                displayTarget = displayTarget(state),
             )
             is PlaybackOrigin.LocalDocument -> {
                 val uri = origin.uriValue.toUri()
@@ -2460,7 +2508,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         fitMode = state.fitMode,
                         resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(state),
-                        displayTarget = PLAYER_DISPLAY,
+                        displayTarget = displayTarget(state),
                     ).also { pendingSource = null }
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -2836,6 +2884,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 "manifestBytes=$manifestBytes cacheHits=${cache.hits} cacheMisses=${cache.misses} " +
                 "verifiedBytes=${cache.verifiedBytes} evictions=${cache.evictions}",
         )
+        val output = videoOutputFor(displayTarget(mutableUi.value, endpoint.session.hdrSource), endpoint.session)
+        AppLog.i(TAG, "epoch ${endpoint.session.epoch} ${endpoint.session.pictureDiagnostics()} plays as ${output.describe()}")
         playerEngine.load(
             RelayLoad(
                 streamUrl = endpoint.localUrl,
@@ -2847,9 +2897,50 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     endpoint.session.sourceHasAudio == false -> RelayAuxMode.EXTERNAL_SUBTITLES
                     else -> RelayAuxMode.EXTERNAL
                 },
+                output = output,
             ),
         )
     }
+
+    /**
+     * Replaces an epoch that no longer fits the display (hdrPresentationStale)
+     * with a reload at the current position, the way a seek does: the battery
+     * saver, the display or "Show HDR videos in HDR" changed while an HDR
+     * video played. Never while a load, seek or restart is under way, since
+     * each of those decides for itself, and never in the background: without a
+     * Surface the load would wait out the player's connect window.
+     */
+    private fun reloadIfHdrStale() {
+        val state = mutableUi.value
+        val session = state.relaySession ?: return
+        if (!session.hdrSource || state.playingPath == null || !appInForeground) return
+        if (state.busy || state.seeking || state.reconnecting != null) return
+        if (state.playerState != MpvPlaybackState.PLAYING) return
+        if (seekJob?.isActive == true || restartJob?.isActive == true || reconnectJob?.isActive == true) return
+        if (closingJob?.isActive == true || openingJob?.isActive == true) return
+        val target = displayTarget(state, session.hdrSource)
+        val presented = playerEngine.requestedOutput()
+        if (!hdrPresentationStale(target, session, presented)) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHdrReloadAt < HDR_RELOAD_COOLDOWN_MILLIS) return
+        lastHdrReloadAt = now
+        val position = state.userPositionSeconds()
+        AppLog.i(
+            TAG,
+            "display now calls for ${target.transfer} (${presented.describe()} playing, epoch made for " +
+                "${session.downlinkMapping?.transfer ?: "any display"}): reloading at %.1fs".format(position),
+        )
+        seekTo(position)
+    }
+
+    /**
+     * The display named to the server (displayTargetFor) as things stand. An
+     * open does not know its source yet, nor does a seek need to: the server
+     * maps only HDR sources, so this names the display an HDR video would be
+     * shown on, as the desktop does.
+     */
+    private fun displayTarget(state: RelayUiState, sourceHdr: Boolean? = null): DisplayTarget =
+        displayTargetFor(sourceHdr, state.displayHdr, state.hdrOutput, Build.VERSION.SDK_INT, state.powerSave)
 
     /** Persists the watch position (throttled); near the end it clears it. */
     private fun maybeSaveProgress(mpv: MpvMetrics) {
@@ -2980,7 +3071,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 updateMediaSession(metrics)
                 maybeSaveProgress(metrics)
-                if (value != null) handleWatchdogs(value.stats.value, metrics)
+                if (value != null) {
+                    handleWatchdogs(value.stats.value, metrics)
+                    // Catches a change that came while a load was under way.
+                    reloadIfHdrStale()
+                }
                 writeDiagnostics(value?.stats?.value ?: TransportStats(), metrics)
                 delay(1_000)
             }
@@ -3173,6 +3268,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("resize_algorithm", state.session?.resizeAlgorithm ?: "server-default")
                 put("deband_enabled", state.debandEnabled)
                 put("ten_bit_video", state.tenBitVideo)
+                put("hdr_output_setting", state.hdrOutput)
+                put("display_hdr", state.displayHdr.hdr)
+                put("display_peak_nits", state.displayHdr.peakNits)
+                put("power_save", state.powerSave)
+                put("display_target", displayTarget(state, session?.hdrSource).toJson())
+                put("video_output", state.videoOutput.describe())
                 put("gestures_enabled", state.gesturesEnabled)
                 put("auto_resume_count", resumeCount)
                 put("auto_play_next_enabled", state.autoPlayNext)
@@ -3276,6 +3377,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             runPlaybackCatching { connectivity.unregisterNetworkCallback(callback) }
         }
+        powerSaveReceiver?.let { receiver ->
+            runPlaybackCatching { getApplication<Application>().unregisterReceiver(receiver) }
+        }
         // Native/network owners may take seconds to stop. Keep the main
         // thread responsive while cleanup outlives the cancelled ViewModel scope.
         CoroutineScope(Dispatchers.IO).launch {
@@ -3324,6 +3428,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Keeps a gap that survives one reload from reloading on a loop. */
         private const val DRIFT_RESYNC_COOLDOWN_MILLIS = 15_000L
+
+        /** Keeps a display that flips back and forth (or a reload that fails) from reloading on a loop. */
+        private const val HDR_RELOAD_COOLDOWN_MILLIS = 10_000L
         private const val SEEK_TARGET_TIMEOUT_MILLIS = 15_000L
         private const val AUTO_ADVANCE_END_WINDOW_SECONDS = 60.0
         private const val AUTO_ADVANCE_MAX_PAGES = 20
@@ -3334,16 +3441,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         /** The deep colour to ask for at the player's size (downlinkDepthFor). */
         private fun downlinkDepth(state: RelayUiState): HighBitDepth? =
             downlinkDepthFor(state.tenBitVideo, decodesHevcMain10(state.display))
-
-        /**
-         * The display named to a server that maps Dolby Vision and HDR10+
-         * (§3.6). mpv here shows SDR only, whatever the panel can do: its
-         * Android GL output cannot tag the surface as HDR, so it tone-maps.
-         * For SDR the server tone-maps Dolby Vision (fixing profile 5's
-         * colours) and HDR10+ by their own metadata; HDR10 and HLG still
-         * arrive as HDR, and mpv tone-maps them from 10 bits.
-         */
-        private val PLAYER_DISPLAY = DisplayTarget.SDR
     }
 
     private fun persist(block: suspend () -> Unit) {
@@ -3382,6 +3479,13 @@ data class RelayUiState(
     val resizeAlgorithm: String = "",
     val debandEnabled: Boolean = false,
     val tenBitVideo: Boolean = false,
+    // "Show HDR videos in HDR", and the two other things that decide it
+    // (displayTargetFor): the Activity's display, the battery saver.
+    val hdrOutput: Boolean = true,
+    val displayHdr: DisplayHdr = DisplayHdr.SDR,
+    val powerSave: Boolean = false,
+    // How mpv presents the picture now.
+    val videoOutput: VideoOutput = VideoOutput.Sdr,
     val paused: Boolean = false,
     val seeking: Boolean = false,
     val seekPreviewSeconds: Double? = null,

@@ -3,6 +3,7 @@ package org.upscalerelay.android
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.upscalerelay.player.mpv.VideoOutput
 import org.upscalerelay.protocol.DownlinkMapping
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.VideoColor
@@ -48,8 +49,11 @@ class PictureFormatTest {
 
     @Test
     fun `deep colour and HDR are named by depth and transfer`() {
-        // mpv tone-maps every HDR stream here, and the top bar says so.
+        // Where mpv tone-maps an HDR stream, the top bar says so.
         assertEquals("10-bit HDR, shown as SDR", session(10, pq).pictureSummary())
+        assertEquals("10-bit HDR", session(10, pq).pictureSummary(shownAsHdr = true))
+        // An SDR epoch is no HDR, whatever the output.
+        assertEquals("10-bit", session(10, bt709).pictureSummary(shownAsHdr = true))
         assertEquals("10-bit PQ", session(10, pq).pictureDiagnostics())
         assertEquals("10-bit HLG", session(10, hlg).pictureDiagnostics())
         assertEquals("10-bit", session(10, bt709).pictureSummary())
@@ -88,6 +92,10 @@ class PictureFormatTest {
             RelayUiState(sessionDescription = "passthrough · hevc-qp4 · 2960×1848", session = hdr).playerDescription(),
         )
         assertEquals("10-bit HDR, shown as SDR", RelayUiState(session = hdr).playerDescription())
+        assertEquals(
+            "10-bit HDR",
+            RelayUiState(session = hdr, videoOutput = VideoOutput.Pq(540.0)).playerDescription(),
+        )
         assertEquals("passthrough", RelayUiState(sessionDescription = "passthrough", session = session()).playerDescription())
         assertEquals("", RelayUiState().playerDescription())
     }
