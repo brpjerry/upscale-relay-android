@@ -59,6 +59,7 @@ object BackupCodec {
             }
             putJsonObject("playbackDefaults") {
                 put("model", preferences.model)
+                put("passthrough4k", preferences.passthrough4k)
                 put("qualityTier", preferences.qualityTier)
                 put("fitMode", preferences.fitMode)
                 put("resizeAlgorithm", preferences.resizeAlgorithm)
@@ -144,6 +145,7 @@ object BackupCodec {
             host = connection?.string("host")?.trim()?.takeIf(String::isNotEmpty) ?: current.host,
             port = connection?.int("port")?.takeIf { it in 1..65535 } ?: current.port,
             model = playback?.string("model") ?: current.model,
+            passthrough4k = playback?.bool("passthrough4k") ?: current.passthrough4k,
             qualityTier = playback?.string("qualityTier")?.takeIf(String::isNotEmpty)
                 ?: current.qualityTier,
             fitMode = playback?.string("fitMode")?.takeIf { it in RelaySessionController.FIT_MODES }

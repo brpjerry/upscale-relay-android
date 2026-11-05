@@ -22,6 +22,8 @@ data class AppPreferences(
     val port: Int = 8590,
     val autoPlayNext: Boolean = true,
     val model: String = "",
+    // Open sources 3840 wide or 2160 tall and up with the passthrough model.
+    val passthrough4k: Boolean = false,
     val qualityTier: String = "lossless-hevc",
     val fitMode: String = "fit",
     val resizeAlgorithm: String = "",
@@ -84,6 +86,7 @@ class AppPreferencesStore(context: Context) {
     suspend fun setResizeAlgorithm(value: String) = set(Keys.RESIZE_ALGORITHM, value)
     suspend fun setDebandEnabled(value: Boolean) = set(Keys.DEBAND_ENABLED, value)
     suspend fun setTenBitVideo(value: Boolean) = set(Keys.TEN_BIT_VIDEO, value)
+    suspend fun setPassthrough4k(value: Boolean) = set(Keys.PASSTHROUGH_4K, value)
     suspend fun setSubtitlesEnabled(value: Boolean) = set(Keys.SUBTITLES_ENABLED, value)
     suspend fun setPreferredSubtitle(value: String) = set(Keys.PREFERRED_SUBTITLE, value)
     suspend fun setDiagnosticsVisible(value: Boolean) = set(Keys.DIAGNOSTICS_VISIBLE, value)
@@ -120,6 +123,7 @@ class AppPreferencesStore(context: Context) {
             preferences[Keys.RESIZE_ALGORITHM] = value.resizeAlgorithm
             preferences[Keys.DEBAND_ENABLED] = value.debandEnabled
             preferences[Keys.TEN_BIT_VIDEO] = value.tenBitVideo
+            preferences[Keys.PASSTHROUGH_4K] = value.passthrough4k
             preferences[Keys.SUBTITLES_ENABLED] = value.subtitlesEnabled
             preferences[Keys.PREFERRED_SUBTITLE] = value.preferredSubtitle
             preferences[Keys.DIAGNOSTICS_VISIBLE] = value.diagnosticsVisible
@@ -236,6 +240,7 @@ class AppPreferencesStore(context: Context) {
         resizeAlgorithm = preferences[Keys.RESIZE_ALGORITHM].orEmpty(),
         debandEnabled = preferences[Keys.DEBAND_ENABLED] ?: false,
         tenBitVideo = preferences[Keys.TEN_BIT_VIDEO] ?: false,
+        passthrough4k = preferences[Keys.PASSTHROUGH_4K] ?: false,
         subtitlesEnabled = preferences[Keys.SUBTITLES_ENABLED] ?: true,
         preferredSubtitle = preferences[Keys.PREFERRED_SUBTITLE].orEmpty(),
         diagnosticsVisible = preferences[Keys.DIAGNOSTICS_VISIBLE] ?: false,
@@ -272,6 +277,7 @@ class AppPreferencesStore(context: Context) {
         val RESIZE_ALGORITHM = stringPreferencesKey("resize_algorithm")
         val DEBAND_ENABLED = booleanPreferencesKey("deband_enabled")
         val TEN_BIT_VIDEO = booleanPreferencesKey("ten_bit_video")
+        val PASSTHROUGH_4K = booleanPreferencesKey("passthrough_4k")
         val SUBTITLES_ENABLED = booleanPreferencesKey("subtitles_enabled")
         val PREFERRED_SUBTITLE = stringPreferencesKey("preferred_subtitle")
         val DIAGNOSTICS_VISIBLE = booleanPreferencesKey("diagnostics_visible")

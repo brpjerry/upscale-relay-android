@@ -54,11 +54,13 @@ import org.upscalerelay.client.PlayerBufferSnapshot
 import org.upscalerelay.client.RelayServerException
 import org.upscalerelay.client.RelaySessionController
 import org.upscalerelay.client.SessionState
+import org.upscalerelay.client.SourceSizeProbe
 import org.upscalerelay.client.TeardownUnconfirmedException
 import org.upscalerelay.client.TransportStats
 import org.upscalerelay.client.classifyFailure
 import org.upscalerelay.demux.AndroidMediaSource
 import org.upscalerelay.demux.LocalDocumentHttpServer
+import org.upscalerelay.demux.ServerVideoSize
 import org.upscalerelay.demux.LocalDocumentBrowser
 import org.upscalerelay.demux.LocalDocumentEntry
 import org.upscalerelay.player.mpv.MpvMetrics
@@ -197,6 +199,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val discovery = ServerDiscovery(application)
     private var reconnectJob: Job? = null
     private var restartJob: Job? = null
+
+    /** Decides whether a passthrough4k toggle restarts the stream, once any open in flight has published its own. */
+    private var passthroughToggleJob: Job? = null
+
+    /** What the last relay open read of its file's size (passthrough4k); a restart of that file reuses it. */
+    private val sourceSizes = SourceSizeMemo<PlaybackOrigin>()
     private var reconnectExhausted = false
     private var activeOrigin: PlaybackOrigin? = null
     private val networkEpoch = MutableStateFlow(0L)
@@ -419,6 +427,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         port = value.port.toString(),
                         autoPlayNext = value.autoPlayNext,
                         selectedModel = value.model,
+                        // Restored once, like fileLoggingEnabled: the switch's own
+                        // writes can come back behind older snapshots, and the
+                        // toggle decides from the state once an open finishes.
+                        // An import applies its value itself (importData).
+                        passthrough4k = if (firstLoad) value.passthrough4k else state.passthrough4k,
                         qualityTier = value.qualityTier,
                         fitMode = value.fitMode,
                         resizeAlgorithm = value.resizeAlgorithm,
@@ -684,14 +697,50 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (changed && state.tenBitVideoChangesStream(decodesHevcMain10(state.display))) maybeRestartActiveSession()
     }
 
+    /**
+     * "Use passthrough for 4K or higher resolution videos": restarts only a
+     * stream whose model it changes (passthrough4kChangesStream), or a
+     * restart still running, which may have read the old value. An open,
+     * reconnect or file advance in flight may have read it too, so the
+     * decision waits for it to publish its session and then reads the
+     * latest value.
+     */
+    fun setPassthrough4k(value: Boolean) {
+        val changed = mutableUi.value.passthrough4k != value
+        mutableUi.value = mutableUi.value.copy(passthrough4k = value)
+        persist { preferences.setPassthrough4k(value) }
+        if (!changed) return
+        passthroughToggleJob?.cancel()
+        passthroughToggleJob = viewModelScope.launch(actionErrors) {
+            while (true) {
+                val opening = listOfNotNull(openingJob, reconnectJob, autoAdvanceJob)
+                    .firstOrNull { it.isActive } ?: break
+                opening.join()
+            }
+            val state = mutableUi.value
+            if (restartJob?.isActive == true || state.passthrough4kChangesStream(state.passthrough4k)) {
+                maybeRestartActiveSession()
+            }
+        }
+    }
+
     fun setModel(value: String) {
         val advertised = mutableUi.value.capabilities?.models.orEmpty().map { it.name }
         if (advertised.isNotEmpty() && value !in advertised) return
-        val changed = mutableUi.value.selectedModel != value
-        mutableUi.value = mutableUi.value.copy(selectedModel = value)
+        val before = mutableUi.value
+        val changed = before.selectedModel != value
+        mutableUi.value = before.copy(selectedModel = value)
         persist { preferences.setModel(value) }
-        if (changed) maybeRestartActiveSession()
+        // A 4K source the option put on passthrough stays on it under the new
+        // model: nothing to restart, unless an open in flight read the old one.
+        if (changed && before.modelChangeRestarts(value, inFlight = playbackOpenInFlight())) {
+            maybeRestartActiveSession()
+        }
     }
+
+    /** An open, reconnect, file advance or settings restart that has not published its session yet. */
+    private fun playbackOpenInFlight(): Boolean =
+        listOfNotNull(openingJob, reconnectJob, autoAdvanceJob, restartJob).any { it.isActive }
 
     fun setSubtitlesEnabled(value: Boolean) {
         mutableUi.value = mutableUi.value.copy(subtitlesEnabled = value)
@@ -812,6 +861,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 mutableUi.update {
                     it.copy(
                         fileLoggingEnabled = restored.fileLoggingEnabled,
+                        passthrough4k = restored.passthrough4k,
                         backupStatus = BackupStatus(
                             "Restored all settings and ${restored.playbackPositions.size} " +
                                 "watch-history ${entryWord(restored.playbackPositions.size)}. " +
@@ -1594,17 +1644,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(landscape),
                         displayTarget = PLAYER_DISPLAY,
+                        passthrough4k = landscape.passthrough4k,
                     )
                     pendingSource = null // controller now owns the source
                     applyResumePoint(currentController, endpoint, "local:$uriValue") to
                         source.videoInfo.name
                 }.onSuccess { (endpoint, displayName) ->
-                    AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
+                    AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     withContext(Dispatchers.IO) { localDocumentServer?.close() }
                     localDocumentServer = bridge
                     bridge = null
                     localDocumentUri = uriValue
                     activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
+                    sourceSizes.remember(PlaybackOrigin.LocalDocument(uriValue), endpoint.session.sourceSize)
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
@@ -1613,14 +1665,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
                         playingPath = displayName,
-                        selectedModel = endpoint.model,
+                        selectedModel = endpoint.chosenModel,
                         sessionDescription =
-                            "${endpoint.model} · ${endpoint.qualityTier} · " +
+                            "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
                                 "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
                     )
                     subtitlePreferenceAppliedSession = null
                     persist {
-                        preferences.setModel(endpoint.model)
+                        preferences.setModel(endpoint.chosenModel)
                         preferences.addRecentLocalUri(uriValue)
                     }
                     playerEngine.setPanscan(0.0)
@@ -1690,6 +1742,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         resizeAlgorithm = landscape.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(landscape),
                         displayTarget = PLAYER_DISPLAY,
+                        passthrough4k = landscape.passthrough4k,
+                        sourceSizeProbe = serverFileSizeProbe,
                     )
                 }
                 openRetryPending = true
@@ -1717,8 +1771,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 Triple(applyResumePoint(currentController, endpoint, progressKey(origin)), currentController, origin)
             }
                 .onSuccess { (endpoint, currentController, origin) ->
-                    AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
+                    AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     activeOrigin = origin
+                    sourceSizes.remember(origin, endpoint.session.sourceSize)
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
@@ -1726,14 +1781,14 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         busy = false,
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
-                        selectedModel = endpoint.model,
+                        selectedModel = endpoint.chosenModel,
                         sessionDescription =
-                            "${endpoint.model} · ${endpoint.qualityTier} · " +
+                            "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
                                 "${endpoint.session.downlinkWidth}×${endpoint.session.downlinkHeight}",
                     )
                     subtitlePreferenceAppliedSession = null
                     persist {
-                        preferences.setModel(endpoint.model)
+                        preferences.setModel(endpoint.chosenModel)
                         preferences.addRecent(progressKey(origin))
                     }
                     playerEngine.setPanscan(0.0)
@@ -2433,6 +2488,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
                 highBitDepth = downlinkDepth(state),
                 displayTarget = PLAYER_DISPLAY,
+                passthrough4k = state.passthrough4k,
+                sourceSizeProbe = serverFileSizeProbe,
+                // Only a restart of the file the last open read: next and
+                // previous move activeOrigin before the session changes.
+                knownSourceSize = sourceSizes.sizeOf(origin),
             )
             is PlaybackOrigin.LocalDocument -> {
                 val uri = origin.uriValue.toUri()
@@ -2461,6 +2521,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         resizeAlgorithm = state.resizeAlgorithm.ifEmpty { null },
                         highBitDepth = downlinkDepth(state),
                         displayTarget = PLAYER_DISPLAY,
+                        passthrough4k = state.passthrough4k,
                     ).also { pendingSource = null }
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -2469,6 +2530,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        sourceSizes.remember(origin, endpoint.session.sourceSize)
         var finalEndpoint = endpoint
         val timeBase = endpoint.session.timeBase
         if (positionSeconds > 0.5 && timeBase != null) {
@@ -2483,7 +2545,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 endpoint = finalEndpoint.localUrl,
                 session = finalEndpoint.session,
-                selectedModel = finalEndpoint.model,
+                selectedModel = finalEndpoint.chosenModel,
                 qualityTier = finalEndpoint.qualityTier,
                 paused = pauseIntent,
                 seeking = false,
@@ -2493,7 +2555,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 error = null,
                 performanceWarning = null,
                 sessionDescription =
-                    "${finalEndpoint.model} · ${finalEndpoint.qualityTier} · " +
+                    "${finalEndpoint.modelDescription()} · ${finalEndpoint.qualityTier} · " +
                         "${finalEndpoint.session.downlinkWidth}×${finalEndpoint.session.downlinkHeight}",
             )
         }
@@ -3080,13 +3142,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (steadyState && mpv.pausedForCache && !lastPausedForCache) {
             rebufferTimestamps = (rebufferTimestamps + now).filter { now - it < 90_000 }
             if (rebufferTimestamps.size >= 2 && state.performanceWarning == null && !warningDismissed) {
-                AppLog.w(TAG, "sustain warning: repeated rebuffers with ${state.selectedModel}/${state.qualityTier}")
+                val sessionModel = state.relaySession?.model ?: state.selectedModel
+                AppLog.w(TAG, "sustain warning: repeated rebuffers with $sessionModel/${state.qualityTier}")
                 mutableUi.update {
-                    it.copy(
-                        performanceWarning =
-                            "The server is not keeping up with ${state.selectedModel} at " +
-                                "${state.qualityTier}. A smaller model or lower quality should play smoothly.",
-                    )
+                    it.copy(performanceWarning = sustainWarning(sessionModel, state.qualityTier))
                 }
             }
         }
@@ -3168,6 +3227,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("queue_packets", transport.queuedPackets)
                 put("reported_buffer_ms", transport.reportedBufferMillis)
                 put("selected_model", state.selectedModel)
+                put("session_model", session?.model)
+                put("passthrough_4k", state.passthrough4k)
+                put("source_width", session?.sourceSize?.width)
+                put("source_height", session?.sourceSize?.height)
                 put("quality_tier", state.qualityTier)
                 put("fit_mode", state.fitMode)
                 put("resize_algorithm", state.session?.resizeAlgorithm ?: "server-default")
@@ -3331,6 +3394,36 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         private const val NETWORK_WAIT_MILLIS = 10_000L
         private const val LIBRARY_CACHE_WRITE_DELAY_MILLIS = 500L
 
+        /**
+         * Reads a library file's size for passthrough4k through /media
+         * (ServerVideoSize), saying in the log what it found and cost. A
+         * failure, or the controller's timeout, keeps the chosen model.
+         */
+        private val serverFileSizeProbe = SourceSizeProbe { url ->
+            val started = System.nanoTime()
+            try {
+                val probed = ServerVideoSize.probe(url)
+                AppLog.i(
+                    TAG,
+                    "read the video size (%s) through /media in %d ms, %d bytes in %d requests".format(
+                        probed.size ?: "no video track",
+                        (System.nanoTime() - started) / 1_000_000,
+                        probed.bytesRead,
+                        probed.requests,
+                    ),
+                )
+                probed.size
+            } catch (cancelled: CancellationException) {
+                if (cancelled is TimeoutCancellationException) {
+                    AppLog.w(TAG, "reading the video size timed out; opening with the chosen model")
+                }
+                throw cancelled
+            } catch (error: Exception) {
+                AppLog.w(TAG, "could not read the video size (${error.message}); opening with the chosen model")
+                null
+            }
+        }
+
         /** The deep colour to ask for at the player's size (downlinkDepthFor). */
         private fun downlinkDepth(state: RelayUiState): HighBitDepth? =
             downlinkDepthFor(state.tenBitVideo, decodesHevcMain10(state.display))
@@ -3382,6 +3475,7 @@ data class RelayUiState(
     val resizeAlgorithm: String = "",
     val debandEnabled: Boolean = false,
     val tenBitVideo: Boolean = false,
+    val passthrough4k: Boolean = false,
     val paused: Boolean = false,
     val seeking: Boolean = false,
     val seekPreviewSeconds: Double? = null,

@@ -23,6 +23,21 @@ data class DisplaySize(val width: Int, val height: Int) {
     }
 }
 
+/** A source's stored video size in pixels, as its demuxer reads it (before any display aspect). */
+data class VideoSize(val width: Int, val height: Int) {
+    init {
+        require(width > 0 && height > 0)
+    }
+
+    override fun toString(): String = "${width}x$height"
+
+    companion object {
+        /** A size when both sides are positive; null for a demuxer that did not say. */
+        fun of(width: Int?, height: Int?): VideoSize? =
+            if (width != null && height != null && width > 0 && height > 0) VideoSize(width, height) else null
+    }
+}
+
 data class Rational(val numerator: Int, val denominator: Int) {
     init {
         require(denominator != 0) { "rational denominator must not be zero" }
@@ -432,6 +447,17 @@ data class SessionInfo(
      * (§3.6); null on a session it never maps.
      */
     val downlinkMapping: DownlinkMapping? = null,
+    /**
+     * The model sent in open_session: the chosen one, or "passthrough" in its
+     * place for a 4K source. Set by the client; session_opened does not say.
+     */
+    val model: String? = null,
+    /**
+     * The source's stored size when the client read it: always for an
+     * uplink, and for a server file only when "Use passthrough for 4K or
+     * higher resolution videos" probed it through /media. Set by the client.
+     */
+    val sourceSize: VideoSize? = null,
 ) {
     /**
      * An HDR source: an HDR downlink, or a mapped one, whose epoch may be SDR
