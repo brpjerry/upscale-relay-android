@@ -19,20 +19,35 @@ import tempfile
 from pathlib import Path
 
 PATH = [b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"hvc1", b"hvcC"]
+# hvc1 stands for either HEVC sample entry; they differ only in where the parameter sets may live.
+SAMPLE_ENTRIES = (b"hvc1", b"hev1")
 FIELDS_BEFORE_CHILDREN = {b"stsd": 8, b"hvc1": 78}
 SEI_PREFIX = 39
 
 
 def find(data: bytes, start: int, end: int, box_type: bytes) -> tuple[int, int]:
+    accepted = SAMPLE_ENTRIES if box_type == b"hvc1" else (box_type,)
     position = start
     while position + 8 <= end:
         size, found = struct.unpack(">I4s", data[position:position + 8])
         if size < 8:
             break
-        if found == box_type:
+        if found in accepted:
             return position, size
         position += size
     sys.exit(f"no {box_type.decode()} box")
+
+
+def find_video_trak(data: bytes, start: int, end: int) -> tuple[int, int]:
+    """The first trak whose mdia/hdlr handler_type is vide: an audio track may come first."""
+    while start + 8 <= end:
+        position, size = find(data, start, end, b"trak")
+        mdia, mdia_size = find(data, position + 8, position + size, b"mdia")
+        hdlr, _ = find(data, mdia + 8, mdia + mdia_size, b"hdlr")
+        if data[hdlr + 16:hdlr + 20] == b"vide":
+            return position, size
+        start = position + size
+    sys.exit("no video trak box")
 
 
 def strip_hvcc_sei(data: bytearray) -> int:
@@ -40,7 +55,10 @@ def strip_hvcc_sei(data: bytearray) -> int:
     ancestors = []
     start, end = 0, len(data)
     for box_type in PATH:
-        position, size = find(data, start, end, box_type)
+        if box_type == b"trak":
+            position, size = find_video_trak(data, start, end)
+        else:
+            position, size = find(data, start, end, box_type)
         ancestors.append(position)
         start, end = position + 8 + FIELDS_BEFORE_CHILDREN.get(box_type, 0), position + size
     if find(data, 0, len(data), b"mdat")[0] > ancestors[0]:
@@ -86,4 +104,6 @@ def main(source: str, destination: str) -> None:
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    main(sys.argv[1], sys.argv[2])

@@ -7,6 +7,7 @@ import org.upscalerelay.protocol.ContentLightLevel
 import org.upscalerelay.protocol.MasteringDisplay
 import org.upscalerelay.protocol.StaticHdrMetadata
 import java.nio.ByteBuffer
+import java.nio.channels.SeekableByteChannel
 
 /** Synthetic MP4 box layouts for [Mp4HdrStatic]. */
 class Mp4HdrStaticTest {
@@ -109,6 +110,45 @@ class Mp4HdrStaticTest {
     }
 
     @Test
+    fun `a QuickTime movie, with mhlr in mdia and a data handler in minf`() {
+        val entry = sampleEntry(box("mdcv", fixtureMdcv), box("clli", fixtureClli))
+        val tkhd = box("tkhd", ByteArray(4 + 8 + 4 + 72).also { ByteBuffer.wrap(it).putInt(12, 1) })
+        fun hdlr(component: String, subtype: String) =
+            box("hdlr", ByteArray(4) + component.toByteArray() + subtype.toByteArray() + ByteArray(12) + byteArrayOf(0))
+        val stbl = box("stbl", box("stsd", ByteBuffer.allocate(8).putInt(0).putInt(1).array() + entry))
+        val minf = box("minf", box("vmhd", ByteArray(12)) + hdlr("dhlr", "alis") + box("dinf", ByteArray(0)) + stbl)
+        val trak = box("trak", tkhd + box("mdia", box("mdhd", ByteArray(24)) + hdlr("mhlr", "vide") + minf))
+        val movie = box("wide", ByteArray(0)) + mdat() + box("moov", box("mvhd", ByteArray(100)) + trak)
+        assertEquals(fixtureHdr, parse(movie))
+        assertEquals(fixtureHdr, parse(movie, trackId = null))
+    }
+
+    @Test
+    fun `a size of zero runs to the end of its parent`() {
+        // The last child of the sample entry, and the file's last box.
+        val entry = sampleEntryOf(box("clli", fixtureClli) + header(0, "mdcv") + fixtureMdcv)
+        assertEquals(fixtureHdr, parse(mp4(moov(videoTrak(1, entry)), header(0, "mdat") + ByteArray(64))))
+        // A box before the moov that runs to the end swallows it.
+        val moov = moov(videoTrak(1, sampleEntry(box("mdcv", fixtureMdcv))))
+        assertNull(parse(mp4(header(0, "mdat") + ByteArray(64), moov)))
+    }
+
+    @Test
+    fun `a moov behind media data larger than 4 GiB`() {
+        // A long film without faststart: ftyp, a 64-bit mdat, then the moov.
+        val ftyp = box("ftyp", "isom".toByteArray() + ByteArray(4))
+        val mdatSize = 5L shl 30
+        val mdat = header(1, "mdat") + ByteBuffer.allocate(8).putLong(mdatSize).array()
+        val moov = moov(videoTrak(1, sampleEntry(box("mdcv", fixtureMdcv), box("clli", fixtureClli))))
+        val moovAt = ftyp.size + mdatSize
+        val file = sparseChannel(moovAt + moov.size, mapOf(0L to ftyp + mdat, moovAt to moov))
+        assertEquals(fixtureHdr, Mp4HdrStatic.parse(file, 1))
+        // The same mdat a byte too long for the file.
+        val tooLong = header(1, "mdat") + ByteBuffer.allocate(8).putLong(mdatSize + moov.size + 1).array()
+        assertNull(Mp4HdrStatic.parse(sparseChannel(moovAt + moov.size, mapOf(0L to ftyp + tooLong, moovAt to moov)), 1))
+    }
+
+    @Test
     fun `a file cut anywhere reads nothing it cannot see, and never throws`() {
         val file = mp4(moov(videoTrak(1, sampleEntry(box("hvcC", ByteArray(40)), box("mdcv", fixtureMdcv), box("clli", fixtureClli)))))
         assertEquals(fixtureHdr, parse(file))
@@ -195,6 +235,38 @@ class Mp4HdrStaticTest {
 
     private fun header(size: Long, type: String): ByteArray =
         ByteBuffer.allocate(8).putInt(size.toInt()).put(type.toByteArray()).array()
+
+    /** A file of [size] bytes holding [parts] at their offsets and zeros elsewhere. */
+    private fun sparseChannel(size: Long, parts: Map<Long, ByteArray>): SeekableByteChannel =
+        object : SeekableByteChannel {
+            private var position = 0L
+
+            override fun isOpen(): Boolean = true
+
+            override fun close() = Unit
+
+            override fun read(dst: ByteBuffer): Int {
+                if (position >= size) return -1
+                val count = minOf(dst.remaining().toLong(), size - position).toInt()
+                repeat(count) {
+                    val at = position + it
+                    val part = parts.entries.firstOrNull { (offset, bytes) -> at >= offset && at < offset + bytes.size }
+                    dst.put(part?.let { (offset, bytes) -> bytes[(at - offset).toInt()] } ?: 0)
+                }
+                position += count
+                return count
+            }
+
+            override fun write(src: ByteBuffer): Int = throw UnsupportedOperationException()
+
+            override fun position(): Long = position
+
+            override fun position(newPosition: Long): SeekableByteChannel = apply { position = newPosition }
+
+            override fun size(): Long = size
+
+            override fun truncate(size: Long): SeekableByteChannel = throw UnsupportedOperationException()
+        }
 
     private fun hex(text: String): ByteArray = ByteArray(text.length / 2) { text.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
 }

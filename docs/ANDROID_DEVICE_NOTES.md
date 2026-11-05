@@ -23,8 +23,8 @@ with values that differ from their container's, so they show only that the
 server prefers a frame's SEI. `hdr10-boxes-only.mp4` is the case this change
 is for: before it, that file's downlink would have carried no static
 metadata at all (inferred, since MediaExtractor reports none and the file
-has no SEI; the old build was not run on it). Every other fixture sent and received what the 2026-11-03
-entry below records.
+has no SEI; the old build was not run on it). Every other fixture sent and
+received what the 2026-11-03 entry below records.
 
 ## HDR output spike — 2026-11-03
 

@@ -15,7 +15,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -132,11 +131,7 @@ class HdrUplinkDeviceTest {
             assertEquals(file.name, want.color, info.color)
             assertEquals(file.name, want.bitDepth, info.bitDepth)
             assertEquals(file.name, want.dolbyVision, info.dolbyVision)
-            if (want.staticHdr != null) {
-                assertEquals(file.name, want.staticHdr, info.staticHdr)
-            } else {
-                assertNull(file.name, info.staticHdr?.masteringDisplay)
-            }
+            assertEquals(file.name, want.staticHdr, info.staticHdr)
         }
     }
 
@@ -245,7 +240,9 @@ class HdrUplinkDeviceTest {
      */
     private fun writtenStaticHdr(model: RelayViewModel, sessionId: String): JsonObject? {
         val ui = model.ui.value
-        val connection = URL("http://${ui.host}:${ui.port}/status").openConnection() as HttpURLConnection
+        // As the app connects: trimmed host (an IPv6 literal is bracketed here), default port.
+        val connection = URL("http", ui.host.trim(), ui.port.toIntOrNull() ?: 8590, "/status")
+            .openConnection() as HttpURLConnection
         val status = try {
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
