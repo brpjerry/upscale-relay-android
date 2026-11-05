@@ -47,6 +47,7 @@ class HttpRangeReader(
 
     /** The resource's length, read with the first chunk if no response has said yet; -1 if the server does not say. */
     fun size(): Long = synchronized(lock) {
+        checkOpen()
         if (totalSize < 0 && requests == 0) fill(0)
         totalSize
     }
@@ -58,6 +59,8 @@ class HttpRangeReader(
      */
     fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = synchronized(lock) {
         require(position >= 0 && offset >= 0 && length >= 0 && offset + length <= buffer.size)
+        // Cached bytes too: a cancelled probe must stop at its next read, not its next miss.
+        checkOpen()
         if (length == 0) return 0
         if (totalSize in 0..position) return -1
         if (position < chunkStart || position >= chunkStart + chunk.size) {
@@ -74,9 +77,13 @@ class HttpRangeReader(
         inFlight.getAndSet(null)?.cancel()
     }
 
+    private fun checkOpen() {
+        if (closed.get()) throw IOException("the media reader is closed")
+    }
+
     /** Fetches the chunk at [position]; false at the end of the resource. Holds [lock]. */
     private fun fill(position: Long): Boolean {
-        if (closed.get()) throw IOException("the media reader is closed")
+        checkOpen()
         val want = if (totalSize >= 0) minOf(chunkBytes.toLong(), totalSize - position) else chunkBytes.toLong()
         if (want <= 0) return false
         if (fetched + want > maxBytes) throw IOException("stopped reading the media after $maxBytes bytes")

@@ -17,6 +17,10 @@ const val PASSTHROUGH_MODEL = "passthrough"
 /** 3840 wide or 2160 tall and up: UHD, DCI 4K and scope crops of either. */
 fun VideoSize.is4kOrHigher(): Boolean = width >= 3840 || height >= 2160
 
+/** Passthrough was [sent] in place of another [chosen] model: the one rule for [ModelChoice] and [PlaybackEndpoint]. */
+internal fun passthroughStoodIn(sent: String, chosen: String): Boolean =
+    sent == PASSTHROUGH_MODEL && chosen != PASSTHROUGH_MODEL
+
 /**
  * Reads a server-library file's stored video size through its /media URL
  * before the session opens. Null when the file has no video track the
@@ -36,7 +40,7 @@ fun interface SourceSizeProbe {
 data class ModelChoice(val chosen: String, val sent: String, val sourceSize: VideoSize?) {
     /** Passthrough replaced another model because the source is 4K or larger. */
     val passthroughFor4k: Boolean
-        get() = sent == PASSTHROUGH_MODEL && chosen != PASSTHROUGH_MODEL
+        get() = passthroughStoodIn(sent, chosen)
 
     companion object {
         /** [requested] when the server advertises it, else the server's first upscaling model. */

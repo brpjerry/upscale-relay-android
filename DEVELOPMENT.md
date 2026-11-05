@@ -119,9 +119,12 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   when the server lacks `2x_AnimeJaNai_HD_V3_Compact`. Under "Use
   passthrough for 4K or higher resolution videos" it checks that the 2160p
   file plays with passthrough through a seek and a quality restart, the
-  chosen model staying the saved one, and that the 1080p file plays with the
-  model and does not restart when the option goes off. The probe's cost is
-  in logcat: `read the video size (...) through /media in N ms`.
+  chosen model staying the saved one, that another model restarts nothing,
+  and that the 1080p file plays with the model and does not restart when
+  the option goes off. `-e uhdLocalFixture dv81.mkv` (the 4K Dolby Vision
+  cut `HdrUplinkDeviceTest` uses) adds the same checks for a local uplink.
+  The probe's cost is in logcat: `read the video size (...) through /media
+  in N ms`.
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby

@@ -862,7 +862,7 @@ data class PlaybackEndpoint(
 ) {
     /** Passthrough replaced [chosenModel] because the source is 4K or larger. */
     val passthroughFor4k: Boolean
-        get() = model == PASSTHROUGH_MODEL && chosenModel != PASSTHROUGH_MODEL
+        get() = passthroughStoodIn(model, chosenModel)
 }
 
 data class PlayerBufferSnapshot(

@@ -144,6 +144,18 @@ class HttpRangeReaderTest {
     }
 
     @Test
+    fun `closing ends reads the cached chunk could still have served`() {
+        val reader = HttpRangeReader(url, chunkBytes = 100)
+        assertEquals(1000L, reader.size())
+        assertArrayEquals(file.copyOfRange(0, 10), reader.read(0, 10))
+        reader.close()
+        // Bytes 10..19 are in the chunk already fetched.
+        assertThrows(IOException::class.java) { reader.read(10, 10) }
+        assertThrows(IOException::class.java) { reader.size() }
+        assertEquals(1, reader.requestCount)
+    }
+
+    @Test
     fun `Content-Range is read as the relay and the RFC write it`() {
         assertEquals(HttpRangeReader.ContentRange(0, 1000), HttpRangeReader.ContentRange.parse("bytes 0-99/1000"))
         assertEquals(HttpRangeReader.ContentRange(null, 1000), HttpRangeReader.ContentRange.parse("bytes */1000"))

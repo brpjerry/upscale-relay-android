@@ -26,6 +26,13 @@ FLAC).mkv`:
   `phase4-latest.json` had `session_model: passthrough`, `selected_model:
   2x_AnimeJaNai_HD_V3_Compact`, `source_width/height: 3840/2160`.
 
+After the first review round the test passed again (34 s) with two more
+checks. Choosing another upscaling model and then the first one again
+restarted neither the 2160p library stream nor a local 4K one. The saved
+model followed each choice. The local file was `dv81.mkv`, the 20 s 3840x2160
+Dolby Vision fixture. It opened with `model=passthrough source=3840x2160`
+from its own MediaExtractor, and kept passthrough through a quality restart.
+
 Turning the option off on the 4K file was not tried on the device: it opens
 the 2x model on 4K frames, well below realtime, on a GPU shared with the
 server's owner. `Passthrough4kTest` covers which toggles restart.

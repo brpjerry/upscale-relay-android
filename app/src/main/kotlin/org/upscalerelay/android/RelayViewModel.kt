@@ -199,6 +199,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val discovery = ServerDiscovery(application)
     private var reconnectJob: Job? = null
     private var restartJob: Job? = null
+
+    /** Decides whether a passthrough4k toggle restarts the stream, once any open in flight has published its own. */
+    private var passthroughToggleJob: Job? = null
+
+    /** What the last relay open read of its file's size (passthrough4k); a restart of that file reuses it. */
+    private val sourceSizes = SourceSizeMemo<PlaybackOrigin>()
     private var reconnectExhausted = false
     private var activeOrigin: PlaybackOrigin? = null
     private val networkEpoch = MutableStateFlow(0L)
@@ -690,25 +696,42 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * "Use passthrough for 4K or higher resolution videos": restarts only a
      * stream whose model it changes (passthrough4kChangesStream), or a
-     * restart still running, which may have read the old value.
+     * restart still running, which may have read the old value. An open,
+     * reconnect or file advance in flight may have read it too, so the
+     * decision waits for it to publish its session and then reads the
+     * latest value.
      */
     fun setPassthrough4k(value: Boolean) {
         val changed = mutableUi.value.passthrough4k != value
         mutableUi.value = mutableUi.value.copy(passthrough4k = value)
         persist { preferences.setPassthrough4k(value) }
         if (!changed) return
-        if (restartJob?.isActive == true || mutableUi.value.passthrough4kChangesStream(value)) {
-            maybeRestartActiveSession()
+        passthroughToggleJob?.cancel()
+        passthroughToggleJob = viewModelScope.launch(actionErrors) {
+            while (true) {
+                val opening = listOfNotNull(openingJob, reconnectJob, autoAdvanceJob)
+                    .firstOrNull { it.isActive } ?: break
+                opening.join()
+            }
+            val state = mutableUi.value
+            if (restartJob?.isActive == true || state.passthrough4kChangesStream(state.passthrough4k)) {
+                maybeRestartActiveSession()
+            }
         }
     }
 
     fun setModel(value: String) {
         val advertised = mutableUi.value.capabilities?.models.orEmpty().map { it.name }
         if (advertised.isNotEmpty() && value !in advertised) return
-        val changed = mutableUi.value.selectedModel != value
-        mutableUi.value = mutableUi.value.copy(selectedModel = value)
+        val before = mutableUi.value
+        val changed = before.selectedModel != value
+        mutableUi.value = before.copy(selectedModel = value)
         persist { preferences.setModel(value) }
-        if (changed) maybeRestartActiveSession()
+        // A 4K source the option put on passthrough stays on it under the new
+        // model: nothing to restart, unless a restart running read the old one.
+        if (changed && (restartJob?.isActive == true || !before.modelChangeKeepsStream(value))) {
+            maybeRestartActiveSession()
+        }
     }
 
     fun setSubtitlesEnabled(value: Boolean) {
@@ -1624,6 +1647,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     bridge = null
                     localDocumentUri = uriValue
                     activeOrigin = PlaybackOrigin.LocalDocument(uriValue)
+                    sourceSizes.remember(PlaybackOrigin.LocalDocument(uriValue), endpoint.session.sourceSize)
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
@@ -1740,6 +1764,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess { (endpoint, currentController, origin) ->
                     AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     activeOrigin = origin
+                    sourceSizes.remember(origin, endpoint.session.sourceSize)
                     warningDismissed = false
                     reconnectExhausted = false
                     sessionStartedAt = Instant.now()
@@ -2456,9 +2481,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 displayTarget = PLAYER_DISPLAY,
                 passthrough4k = state.passthrough4k,
                 sourceSizeProbe = serverFileSizeProbe,
-                // The session being replaced is this file's when the origin
-                // is the active one: its size, once read, needs no new probe.
-                knownSourceSize = state.session?.sourceSize?.takeIf { activeOrigin == origin },
+                // Only a restart of the file the last open read: next and
+                // previous move activeOrigin before the session changes.
+                knownSourceSize = sourceSizes.sizeOf(origin),
             )
             is PlaybackOrigin.LocalDocument -> {
                 val uri = origin.uriValue.toUri()
@@ -2496,6 +2521,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        sourceSizes.remember(origin, endpoint.session.sourceSize)
         var finalEndpoint = endpoint
         val timeBase = endpoint.session.timeBase
         if (positionSeconds > 0.5 && timeBase != null) {

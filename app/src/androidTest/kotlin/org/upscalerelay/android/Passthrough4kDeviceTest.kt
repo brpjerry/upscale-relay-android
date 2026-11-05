@@ -1,6 +1,7 @@
 package org.upscalerelay.android
 
 import android.os.SystemClock
+import android.net.Uri
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -8,7 +9,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -18,14 +18,18 @@ import org.upscalerelay.client.SessionState
 import org.upscalerelay.client.is4kOrHigher
 import org.upscalerelay.player.mpv.MpvPlaybackState
 import org.upscalerelay.protocol.LibraryNode
+import java.io.File
 
 /**
  * "Use passthrough for 4K or higher resolution videos" against the real
  * relay. A 2160p library file, whose size is read through /media before the
  * open, plays with passthrough in place of the chosen model, and keeps it
  * through a seek and a restart for another setting; the chosen model stays
- * the one saved. A 1080p file plays with the chosen model, and turning the
- * option off leaves its stream alone.
+ * the one saved; another upscaling model leaves that stream alone. A 1080p
+ * file plays with the chosen model, and turning the option off leaves its
+ * stream alone. With `-e uhdLocalFixture <4K file in the app's files>`
+ * (`dv81.mkv`, cut from the 2160p file), a local 4K uplink plays with
+ * passthrough too, through a quality restart.
  *
  * Needs `-e uhdMediaPath <2160p library file>`, `-e fhdMediaPath <1080p
  * library file>`, and `-e model <an upscaling model the server has>` when not
@@ -49,6 +53,7 @@ class Passthrough4kDeviceTest {
         val fhd = arguments.getString("fhdMediaPath")
         assumeTrue("pass -e uhdMediaPath and -e fhdMediaPath <library files>", !uhd.isNullOrBlank() && !fhd.isNullOrBlank())
         val chosen = arguments.getString("model") ?: "2x_AnimeJaNai_HD_V3_Compact"
+        check(chosen != PASSTHROUGH_MODEL) { "-e model must name an upscaling model, not $chosen" }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             lateinit var model: RelayViewModel
             scenario.onActivity { model = ViewModelProvider(it)[RelayViewModel::class.java] }
@@ -64,6 +69,8 @@ class Passthrough4kDeviceTest {
             await("connect", model, 30_000) { it.sessionState == SessionState.BROWSING && !it.busy }
             onMain { model.setModel(chosen) }
             assertEquals("the server does not advertise $chosen", chosen, model.ui.value.selectedModel)
+            val other = model.ui.value.capabilities?.models.orEmpty().map { it.name }
+                .first { it != chosen && it != PASSTHROUGH_MODEL }
 
             open(model, uhd!!)
             assertPassthroughFor4k(model, chosen)
@@ -76,6 +83,8 @@ class Passthrough4kDeviceTest {
                 it.session?.sessionId != opened && it.reconnecting == null
             }
             assertPassthroughFor4k(model, chosen)
+            // Another upscaling model cannot change a stream on passthrough.
+            assertModelChangeKeepsStream(model, other, chosen)
             close(model)
 
             open(model, fhd!!)
@@ -91,6 +100,40 @@ class Passthrough4kDeviceTest {
             assertEquals(session.sessionId, model.ui.value.session?.sessionId)
             assertEquals(null, model.ui.value.reconnecting)
             close(model)
+
+            val fixture = arguments.getString("uhdLocalFixture")
+            if (!fixture.isNullOrBlank()) {
+                onMain {
+                    model.setPassthrough4k(true)
+                    model.setQualityTier("hevc-qp18")
+                }
+                val file = File(context.filesDir, fixture)
+                check(file.isFile) { "push $fixture to the debug app's files first" }
+                onMain { model.openLocalDocument(Uri.fromFile(file).toString()) }
+                awaitPlaying(model, "playback of $fixture") { it.mpvMetrics.positionSeconds > 0.5 }
+                assertPassthroughFor4k(model, chosen)
+                assertModelChangeKeepsStream(model, other, chosen)
+                val local = model.ui.value.session?.sessionId
+                onMain { model.setQualityTier("hevc-qp14") }
+                awaitPlaying(model, "the local restart for a new quality") {
+                    it.session?.sessionId != local && it.reconnecting == null
+                }
+                assertPassthroughFor4k(model, chosen)
+                close(model)
+            }
+        }
+    }
+
+    /** Choosing [other] and then [chosen] again restarts nothing, and both are saved. */
+    private fun assertModelChangeKeepsStream(model: RelayViewModel, other: String, chosen: String) {
+        val playing = model.ui.value.session?.sessionId
+        for (next in listOf(other, chosen)) {
+            onMain { model.setModel(next) }
+            SystemClock.sleep(2_000)
+            assertEquals(next, model.ui.value.selectedModel)
+            assertEquals(next, runBlocking { preferences.snapshot() }.model)
+            assertEquals("a model change restarted a stream it could not change", playing, model.ui.value.session?.sessionId)
+            assertEquals(null, model.ui.value.reconnecting)
         }
     }
 
@@ -104,7 +147,6 @@ class Passthrough4kDeviceTest {
         // The swap is the session's, never the user's choice.
         assertEquals(chosen, state.selectedModel)
         assertEquals(chosen, runBlocking { preferences.snapshot() }.model)
-        assertNotEquals(PASSTHROUGH_MODEL, chosen)
     }
 
     private fun open(model: RelayViewModel, path: String) {
