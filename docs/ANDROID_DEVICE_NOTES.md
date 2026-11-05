@@ -1,5 +1,35 @@
 # Android device validation notes
 
+## "Use passthrough for 4K or higher resolution videos" — 2026-11-04
+
+Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 over
+Wi-Fi, chosen model `2x_AnimeJaNai_HD_V3_Compact`, 2960x1848 cover.
+`Passthrough4kDeviceTest` passed (41.6 s) with
+`Cyberpunk.Edgerunners.S02E01.MULTi.2160p…H265-YiLongMa.mkv` (HEVC, Dolby
+Vision 8.1) and `BOCCHI THE ROCK! - S01E01 … (BD Remux 1080p H.264
+FLAC).mkv`:
+
+- The 2160p file's size was read through `/media` in 581 ms: 1.33 MB in six
+  256 KiB range requests. It opened with `model=passthrough
+  chosen=2x_AnimeJaNai_HD_V3_Compact source=3840x2160`, and kept passthrough
+  through a seek to 5:00 and a quality restart (`hevc-qp4` to `hevc-qp14`).
+  The restart passed the known size and read nothing. The saved model stayed
+  `2x_AnimeJaNai_HD_V3_Compact`.
+- The 1080p file's size took 436 ms: 4.0 MB in 17 requests. MediaExtractor
+  reads further into this Matroska file (H.264, FLAC, fonts) before it
+  describes its tracks. The file opened with the model, which took 19 s from
+  the probe to the first frame on the server. Turning the option off left
+  that stream alone.
+- By hand: the player's top line read `passthrough (4K source) · hevc-qp14 ·
+  2960×1848 · 10-bit · Dolby Vision applied by the server`. The Model sheet
+  showed the switch on and the chosen model still selected.
+  `phase4-latest.json` had `session_model: passthrough`, `selected_model:
+  2x_AnimeJaNai_HD_V3_Compact`, `source_width/height: 3840/2160`.
+
+Turning the option off on the 4K file was not tried on the device: it opens
+the 2x model on 4K frames, well below realtime, on a GPU shared with the
+server's owner. `Passthrough4kTest` covers which toggles restart.
+
 ## HDR output spike — 2026-11-03
 
 Galaxy Tab S9 Ultra, Android 16, the relay at 192.168.0.115:8590 on
