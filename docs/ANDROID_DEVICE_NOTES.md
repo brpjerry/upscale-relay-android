@@ -16,10 +16,10 @@ FLAC).mkv`:
   The restart passed the known size and read nothing. The saved model stayed
   `2x_AnimeJaNai_HD_V3_Compact`.
 - The 1080p file's size took 436 ms: 4.0 MB in 17 requests. MediaExtractor
-  reads further into this Matroska file (H.264, FLAC, fonts) before it
-  describes its tracks. The file opened with the model, which took 19 s from
-  the probe to the first frame on the server. Turning the option off left
-  that stream alone.
+  reads further into this Matroska file (H.264, FLAC) before it describes
+  its tracks. The file opened with the model; the session was open 19 s
+  after the probe, while the server loaded the model. Turning the option off
+  left that stream alone.
 - By hand: the player's top line read `passthrough (4K source) · hevc-qp14 ·
   2960×1848 · 10-bit · Dolby Vision applied by the server`. The Model sheet
   showed the switch on and the chosen model still selected.
