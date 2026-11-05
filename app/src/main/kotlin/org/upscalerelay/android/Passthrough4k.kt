@@ -45,8 +45,17 @@ internal fun RelayUiState.passthrough4kChangesStream(enabled: Boolean): Boolean 
  * so the player stops calling it a stand-in.
  */
 internal fun RelayUiState.modelChangeKeepsStream(next: String): Boolean =
-    passthrough4k && next != PASSTHROUGH_MODEL && passthroughStandsIn &&
-        relaySession?.sourceSize?.is4kOrHigher() == true
+    next != PASSTHROUGH_MODEL && passthroughHoldsFor4k
+
+/**
+ * The option keeps this stream on passthrough whatever upscaling model is
+ * chosen: it stands in for one, on a source known to be 4K. What the Model
+ * sheet says, and what [modelChangeKeepsStream] relies on. A session opened
+ * with passthrough chosen never read a library file's size, so right after
+ * the user picks a model it does not count, while its restart runs.
+ */
+internal val RelayUiState.passthroughHoldsFor4k: Boolean
+    get() = passthrough4k && passthroughStandsIn && relaySession?.sourceSize?.is4kOrHigher() == true
 
 /**
  * Whether choosing [next] restarts the stream. With an open, reconnect, file

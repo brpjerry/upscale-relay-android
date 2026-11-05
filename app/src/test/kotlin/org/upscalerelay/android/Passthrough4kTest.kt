@@ -103,6 +103,16 @@ class Passthrough4kTest {
     }
 
     @Test
+    fun `the Model sheet calls a stream a 4K stand-in only when its size says so`() {
+        assertTrue(state(session(PASSTHROUGH_MODEL, uhd)).passthroughHoldsFor4k)
+        // Passthrough was chosen, so the library file's size was never read;
+        // the user has just picked a model and the restart is running.
+        assertFalse(state(session(PASSTHROUGH_MODEL, null), chosen = "2x_Other").passthroughHoldsFor4k)
+        assertFalse(state(session(PASSTHROUGH_MODEL, fhd), chosen = "2x_Other").passthroughHoldsFor4k)
+        assertFalse(state(session(PASSTHROUGH_MODEL, uhd), passthrough4k = false).passthroughHoldsFor4k)
+    }
+
+    @Test
     fun `the rebuffer warning names the model the stream really runs`() {
         assertEquals(
             "The server is not keeping up with passthrough at hevc-qp4. A lower quality should play smoothly.",

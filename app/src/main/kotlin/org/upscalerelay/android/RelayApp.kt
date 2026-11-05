@@ -2447,7 +2447,7 @@ private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
                 when {
                     state.directLocalFallback -> "The model applies to the next relay video."
                     // modelChangeKeepsStream: another model restarts nothing here.
-                    state.passthrough4k && state.passthroughStandsIn ->
+                    state.passthroughHoldsFor4k ->
                         "This 4K video plays with passthrough. The model applies to smaller videos."
                     else -> "Changing the model restarts this video at the current position."
                 },
