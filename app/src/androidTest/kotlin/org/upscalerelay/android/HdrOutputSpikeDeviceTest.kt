@@ -86,6 +86,12 @@ class HdrOutputSpikeDeviceTest {
                 }
                 SystemClock.sleep(3_000)
                 snapshot("start", model, ::record)
+                if (arguments.getString("spikeInteractive") == "true") {
+                    interactive(model, ::record)
+                    onMain { model.closePlayback() }
+                    await("close", model, 60_000) { it.playingPath == null && !it.busy }
+                    return@use
+                }
                 surfaceState(label, "steady", ::record)
                 val before = model.ui.value.mpvMetrics
                 SystemClock.sleep(hold * 1000)
@@ -170,6 +176,63 @@ class HdrOutputSpikeDeviceTest {
                 preferences.setFitMode(original.fitMode)
                 preferences.setBackgroundPlayback(original.backgroundPlayback)
             }
+        }
+    }
+
+    /**
+     * Commands from files/spike-cmd.txt, one per write: `seek <s>`, `pause`,
+     * `play`, `osd <text>`, `status`, `quit`. Each answer goes to
+     * files/spike-ack.txt.
+     */
+    private fun interactive(model: RelayViewModel, record: (String) -> Unit) {
+        val commandFile = File(context.filesDir, "spike-cmd.txt")
+        val ackFile = File(context.filesDir, "spike-ack.txt")
+        commandFile.delete()
+        var count = 0
+        fun status(): String {
+            val state = model.ui.value
+            val m = state.mpvMetrics
+            val hdr = shell("dumpsys display").lines().firstOrNull { "mIsHdrLayerPresent" in it }?.trim()
+            return "pos=${"%.2f".format(m.positionSeconds)} paused=${state.paused} state=${state.playerState} " +
+                "drops=${m.outputDroppedFrames}/${m.decoderDroppedFrames} $hdr"
+        }
+        ackFile.writeText("0 ready ${status()}" + System.lineSeparator())
+        val deadline = SystemClock.elapsedRealtime() + 60 * 60_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(200)
+            if (!commandFile.isFile) continue
+            val command = commandFile.readText().trim()
+            commandFile.delete()
+            if (command.isEmpty()) continue
+            count += 1
+            val verb = command.substringBefore(' ')
+            val argument = command.substringAfter(' ', "")
+            val result = runCatching {
+                when (verb) {
+                    "seek" -> {
+                        val target = argument.toDouble()
+                        val wasPaused = model.ui.value.paused
+                        if (wasPaused) onMain { model.togglePaused() }
+                        val started = SystemClock.elapsedRealtime()
+                        onMain { model.seekTo(target) }
+                        val latency = awaitPlaying(model, started, target, 60_000)
+                        if (wasPaused) {
+                            onMain { model.togglePaused() }
+                            SystemClock.sleep(300)
+                        }
+                        "latency_ms=$latency"
+                    }
+                    "pause" -> { if (!model.ui.value.paused) onMain { model.togglePaused() }; SystemClock.sleep(300); "" }
+                    "play" -> { if (model.ui.value.paused) onMain { model.togglePaused() }; SystemClock.sleep(300); "" }
+                    "osd" -> { `is`.xyz.mpv.MPVLib.setPropertyString("osd-msg1", argument); "" }
+                    "status", "quit" -> ""
+                    else -> "unknown command"
+                }
+            }.getOrElse { "failed: $it" }
+            val line = "$count $command -> $result ${status()}"
+            record("cmd $line")
+            ackFile.writeText(line + System.lineSeparator())
+            if (verb == "quit") return
         }
     }
 
