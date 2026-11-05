@@ -78,10 +78,21 @@ keyguard (PiP with the tablet unlocked). The display reported HDR at a
     entering "PiP" left a portrait full screen while
     `isInPictureInPictureMode` said true. The first run of this round fell
     into that, so the PiP tests now refuse a locked tablet.
+- **After the third review round** (all seven tests, 253 s, tablet
+  unlocked). Every fit is now logged (`HDR relay WxH shows l,t-r,b in
+  WxH`), so the test can check it in full screen as well, where
+  SurfaceFlinger's layer table has no line for the relay.
+  - Replacing the PiP-sized relay, the new 2960x1848 one showed all of
+    itself (`0,0-2960,1848`). It was not cropped by the 1018x635
+    dimensions mpv still reported for the old relay.
+  - In fit-mode PiP the crop was `0,92-2960,1756` and `sub-use-margins` was
+    `no`. In cover-mode PiP the relay showed all of itself, with
+    `sub-use-margins` `yes`.
 - **Not checked:** subtitles against the controls by eye (the options match
   what the owner matched by eye in the spike), background and return, DeX
   or an external monitor, HLG and HDR10+ sources shown as HDR, frame pacing
-  of 50/60 fps HDR sources.
+  of 50/60 fps HDR sources, SRT subtitles in fit-mode PiP (the HDR files at
+  hand carry none).
 
 ## "Use passthrough for 4K or higher resolution videos" — 2026-11-04
 

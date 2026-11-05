@@ -76,6 +76,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      * maps Dolby Vision and HDR10+ for what is really shown.
      */
     private var hdrUnavailable = false
+    /** mpv's start-up `sub-use-margins`, and whether it is switched off now. */
+    private var subUseMarginsDefault = "yes"
+    private var subtitlesInPicture = false
     /** mpv's start-up values of the options the outputs change. */
     private var outputDefaults: Map<String, String> = emptyMap()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -96,6 +99,14 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
      */
     @Volatile
     var outputRequestListener: (() -> Unit)? = null
+
+    /**
+     * Called on the main thread once a load's picture is on screen
+     * (PLAYBACK_RESTART), when [pictureBounds] describes it: the surface view
+     * fits an HDR relay's layer to it again.
+     */
+    @Volatile
+    var pictureListener: (() -> Unit)? = null
 
     /** Blocking: callers initialize on IO while the preceding owner retires. */
     fun initialize() {
@@ -118,6 +129,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
                 setInitialOptions()
                 MPVLib.init()
                 defaultSubtitleFontsDirectory = MPVLib.getPropertyString("sub-fonts-dir").orEmpty()
+                subUseMarginsDefault = MPVLib.getPropertyString("sub-use-margins") ?: subUseMarginsDefault
                 outputDefaults = OUTPUT_OPTIONS.mapNotNull { name ->
                     MPVLib.getPropertyString(name)?.let { name to it }
                 }.toMap()
@@ -195,18 +207,35 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     fun resetHdrAvailability() = synchronized(lock) { hdrUnavailable = false }
 
     /**
-     * Where mpv draws the picture inside the attached Surface, as left, top,
-     * right and bottom in its pixels (`osd-dimensions` less mpv's own bars).
-     * Null before mpv knows: no Surface, or no picture yet.
+     * Where mpv draws the picture inside the attached Surface of
+     * [width]x[height], as left, top, right and bottom in its pixels
+     * (`osd-dimensions` less mpv's own bars). Null before mpv knows: no
+     * Surface, no picture yet, or one last drawn at another size.
+     * `osd-dimensions` changes only once a VO draws, so right after a new
+     * Surface it still describes the old one ([pictureListener] follows).
      */
-    fun pictureBounds(): IntArray? = synchronized(lock) {
+    fun pictureBounds(width: Int, height: Int): IntArray? = synchronized(lock) {
         if (!initialized || closed || attachedSurface == null) return@synchronized null
         val values = listOf("w", "h", "ml", "mt", "mr", "mb").map {
             MPVLib.getPropertyInt("osd-dimensions/$it") ?: return@synchronized null
         }
-        val (width, height, left, top) = values
+        val (drawnWidth, drawnHeight, left, top) = values
         val (right, bottom) = values.drop(4)
-        intArrayOf(left, top, width - right, height - bottom).takeIf { width > 0 && height > 0 }
+        intArrayOf(left, top, drawnWidth - right, drawnHeight - bottom)
+            .takeIf { drawnWidth == width && drawnHeight == height }
+    }
+
+    /**
+     * While an HDR relay's layer is cropped to the picture (PiP in "fit"
+     * framing), mpv's bars are off screen, and plain-text subtitles, which
+     * mpv places in them (`sub-use-margins`), would go with them. So they
+     * stay inside the picture meanwhile, as they do on the SDR surface, whose
+     * PiP window has no bars. Back to mpv's own placement otherwise.
+     */
+    fun keepSubtitlesInPicture(keep: Boolean) = synchronized(lock) {
+        if (!initialized || closed || keep == subtitlesInPicture) return@synchronized
+        subtitlesInPicture = keep
+        MPVLib.setPropertyString("sub-use-margins", if (keep) "no" else subUseMarginsDefault)
     }
 
     /**
@@ -784,6 +813,7 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             if (awaitingStart) return
             if (eventId == MPVLib.MpvEvent.END_FILE && reloading) return@synchronized
             if (eventId == MPVLib.MpvEvent.PLAYBACK_RESTART) {
+                mainHandler.post { pictureListener?.invoke() }
                 // Only the first restart owns auxiliary setup; later restarts
                 // (underruns and track switches) cannot duplicate or release it.
                 when (pendingRelayMode) {

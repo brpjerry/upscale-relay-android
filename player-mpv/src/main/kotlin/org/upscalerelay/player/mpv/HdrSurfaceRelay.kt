@@ -53,6 +53,7 @@ internal class HdrSurfaceRelay private constructor(
 
     // Relay thread only.
     private var hidden = false
+    private var placed: RelayPlacement? = null
     private var relayed = 0L
     private var superseded = 0L
     private var failed = 0L
@@ -66,19 +67,30 @@ internal class HdrSurfaceRelay private constructor(
      * the whole frame just shrinks; in "fit" framing the PiP window takes the
      * picture's aspect and shows the picture without mpv's bars. Any thread.
      */
-    fun fitTo(viewWidth: Int, viewHeight: Int, picture: IntArray?) {
+    fun fitTo(viewWidth: Int, viewHeight: Int, picture: IntArray?): RelayPlacement {
         val placement = relayPlacement(width, height, picture, viewWidth, viewHeight)
         handler.post {
-            if (hidden) return@post
+            if (hidden || placement == placed) return@post
             runCatching {
                 SurfaceControl.Transaction()
                     .setCrop(layer, Rect(placement.left, placement.top, placement.right, placement.bottom))
                     .setScale(layer, placement.scale, placement.scale)
                     .setPosition(layer, placement.x, placement.y)
                     .apply()
+                placed = placement
+                Log.i(
+                    TAG,
+                    "HDR relay ${width}x$height shows ${placement.left},${placement.top}-" +
+                        "${placement.right},${placement.bottom} in ${viewWidth}x$viewHeight",
+                )
             }.onFailure { Log.w(TAG, "HDR layer could not be fitted: $it") }
         }
+        return placement
     }
+
+    /** Whether [placement] leaves part of this relay, mpv's bars, off screen. */
+    fun crops(placement: RelayPlacement) =
+        placement.right - placement.left < width || placement.bottom - placement.top < height
 
     /** Takes the picture off screen; frames still queued are dropped. Any thread. */
     fun hide() {

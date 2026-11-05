@@ -376,6 +376,14 @@ The sketch the spike left, and what became of each part:
       the picture's aspect (`MainActivity`), not the relay's 1.6. Scaling the
       whole relay showed the picture at about 80% of the window, with bars on
       every side and strips the layer did not cover.
+    - mpv's `osd-dimensions` describe the last frame drawn, so right after a
+      new relay they still describe the old Surface. Bounds count only when
+      measured at the relay's size, and the layer is fitted again at each
+      `PLAYBACK_RESTART`.
+    - While the crop leaves mpv's bars off screen, `sub-use-margins` is off,
+      so plain-text subtitles stay inside the picture as they do on the SDR
+      surface, whose PiP window has no bars; mpv's own value comes back with
+      the whole frame.
     - Between loads mpv is stopped, so a load gets a new relay at the view's
       size when the old one is smaller than the view (`coversView`,
       `MpvPlayerEngine.awaitsSurface`): one first made in PiP, or in split

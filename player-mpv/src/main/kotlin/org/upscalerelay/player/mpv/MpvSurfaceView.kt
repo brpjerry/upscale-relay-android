@@ -31,15 +31,24 @@ class MpvSurfaceView @JvmOverloads constructor(
             field?.let { previous ->
                 // A newer view may already have taken the engine over.
                 if (previous.outputRequestListener === requestOutput) previous.outputRequestListener = null
+                if (previous.pictureListener === refit) previous.pictureListener = null
                 unbind(previous)
             }
             field = value
             value?.outputRequestListener = requestOutput
+            value?.pictureListener = refit
             value?.resetHdrAvailability()
             bind()
         }
 
     private val requestOutput: () -> Unit = { bind() }
+
+    /** A load's picture is on screen: fit the relay's layer to it. */
+    private val refit: () -> Unit = {
+        val engine = engine
+        val current = relay
+        if (engine != null && current != null && given === current.surface) place(current, engine)
+    }
 
     private var relay: HdrSurfaceRelay? = null
 
@@ -105,7 +114,7 @@ class MpvSurfaceView @JvmOverloads constructor(
             val next = old?.takeIf { it.coversView() || !engine.awaitsSurface() } ?: newRelay() ?: old
             if (next != null) {
                 engine.attachSurface(next.surface, next.width, next.height, wanted, coversView = next.coversView())
-                next.fitTo(surfaceWidth, surfaceHeight, engine.pictureBounds())
+                place(next, engine)
                 given = next.surface
                 relay = next
                 // Attaching the new relay detached mpv from the old one.
@@ -114,9 +123,19 @@ class MpvSurfaceView @JvmOverloads constructor(
             }
         }
         engine.attachSurface(holder.surface, surfaceWidth, surfaceHeight, VideoOutput.Sdr)
+        engine.keepSubtitlesInPicture(false)
         given = holder.surface
         relay?.let { retire(it, engine) }
         relay = null
+    }
+
+    /**
+     * Fits [relay]'s layer to this view, cropped to the picture when mpv has
+     * drawn one at the relay's size (until then, the whole relay).
+     */
+    private fun place(relay: HdrSurfaceRelay, engine: MpvPlayerEngine) {
+        val placement = relay.fitTo(surfaceWidth, surfaceHeight, engine.pictureBounds(relay.width, relay.height))
+        engine.keepSubtitlesInPicture(relay.crops(placement))
     }
 
     /** A relay at this view's size, or null if none can be made for this Surface. */

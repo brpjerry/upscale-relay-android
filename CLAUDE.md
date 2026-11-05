@@ -341,7 +341,13 @@ release.yml` builds and publishes the signed APK with those notes.
   resize (PiP) does not give mpv a new VO in the middle of an epoch.
   Instead `fitTo` crops the layer to mpv's picture (`pictureBounds`, widened
   to the view's aspect, `relayPlacement`) and scales it to fit. In "fit"
-  framing the PiP window has the picture's aspect, not the relay's. The
+  framing the PiP window has the picture's aspect, not the relay's. mpv's
+  `osd-dimensions` change only once a VO draws, so bounds count only when
+  measured at the relay's own size, and the layer is fitted again at each
+  `PLAYBACK_RESTART` (`pictureListener`). While the crop leaves mpv's bars
+  off screen, plain-text subtitles stay inside the picture
+  (`keepSubtitlesInPicture`: `sub-use-margins=no`), as on the SDR surface,
+  whose PiP window has no bars. The
   next load replaces a relay smaller than the view, as one first made in PiP
   is once the window grows, and keeps a larger one. A frame goes back to mpv
   only once its release fence has signalled, however long that takes. The

@@ -154,6 +154,8 @@ class HdrOutputDeviceTest {
         // The layer keeps mpv's full-size buffer, scaled into the window:
         // its HWC line shows the whole source crop in a small display frame.
         assertTrue("the relay layer stays", relayLayerPresent("pip"))
+        // The whole frame is shown: subtitles where mpv puts them.
+        assertEquals("yes", MPVLib.getPropertyString("sub-use-margins"))
         hdrLayerPresent("pip")
         assertEquals(0L, after.mpvMetrics.outputDroppedFrames - before.outputDroppedFrames)
         assertEquals(0L, after.mpvMetrics.decoderDroppedFrames - before.decoderDroppedFrames)
@@ -189,6 +191,8 @@ class HdrOutputDeviceTest {
         assertEquals("the layer fills the window's height", viewHeight.toDouble(), (frame[3] - frame[1]).toDouble(), 3.0)
         assertEquals("no reload in PiP", epoch, epochOf(model))
         assertEquals(VideoOutput.Pq(peak), model.ui.value.videoOutput)
+        // mpv's bars are off screen: plain-text subtitles stay in the picture.
+        assertEquals("no", MPVLib.getPropertyString("sub-use-margins"))
     }
 
     /**
@@ -223,6 +227,9 @@ class HdrOutputDeviceTest {
             awaitPlaying(model, "seek to $target") { epochOf(model) > epoch && it.videoOutput == VideoOutput.Pq(peak) }
             assertEquals("a relay at the window's size", full, mpvSurfaceSize("after the seek"))
             SystemClock.sleep(3_000)
+            // The new relay shows all of itself: not cropped by what mpv
+            // reported for the old, small one before its new VO drew.
+            assertEquals("0,0-${full.replace('x', ',')} in $full", lastPlacement(full))
             assertTrue("the new relay layer tagged BT2020_PQ", relayLayerIsPq("grown"))
             assertNoDrops(model, "after the seek", 8_000)
         } finally {
@@ -418,6 +425,16 @@ class HdrOutputDeviceTest {
         is MpvSurfaceView -> view
         is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { findPlayerView(view.getChildAt(it)) }
         else -> null
+    }
+
+    /**
+     * How the relay of [size] was last fitted to its view, as it logged it:
+     * the part of it shown and the view, "left,top-right,bottom in WxH".
+     */
+    private fun lastPlacement(size: String): String {
+        val prefix = "HDR relay $size shows "
+        val line = shell("logcat -d -s RelayMpv:I").lines().lastOrNull { prefix in it }.orEmpty()
+        return line.substringAfter(prefix).trim().also { log("placement[$size] $it") }
     }
 
     /** The size mpv draws at: the relay's, for PQ. */
