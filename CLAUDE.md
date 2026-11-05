@@ -214,8 +214,8 @@ release.yml` builds and publishes the signed APK with those notes.
   stays open for the next connection. Any new place that opens a session must
   call `confirmPriorRelease` first.
 - Stop and await the player's command queue before retiring loopback,
-  external-media or font owners. Native initialize/destroy run off Main and
-  preserve the process-global JNI ownership barrier.
+  external-media, font or HDR relay owners. Native initialize/destroy run off
+  Main and preserve the process-global JNI ownership barrier.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
   the current epoch. `seek_ready` acknowledges the flush, not playable media.
 
@@ -280,19 +280,79 @@ release.yml` builds and publishes the signed APK with those notes.
   the bars hidden on the sheet's own window (`dialogWindow()`). Anything new
   that opens over the player does the same.
 
-- **Name an SDR display until the player can show HDR.** Every open asks a
-  capable server for `high_bit_depth: "hdr"` and `display_target: sdr`
-  (`DOWNLINK_DEPTH`, `PLAYER_DISPLAY` in `RelayViewModel`; the controller
-  sends only what `capabilities` advertise), on a device whose hardware
-  decoder takes HEVC Main 10 at the display's size (`decodesHevcMain10`);
-  elsewhere it asks for nothing and stays 8-bit. mpv tone-maps everything to SDR
-  here (known issues), and for an SDR display the server tone-maps Dolby
-  Vision and HDR10+ by their own metadata, which mpv's `gpu` renderer would
-  ignore. A `pq` target would stop that and fix nothing. Each epoch's colour
-  and mapping come from its own `seek_ready` (`SessionInfo.describedBy`),
-  which arrives before the endpoint is handed to mpv. "Use 10 bit video"
-  (`tenBitVideo`) asks for `"all"` instead, and toggling it restarts only an
-  SDR stream (`SessionInfo.hdrSource`).
+- **Name `pq` only while the picture is shown as HDR.** Every open asks a
+  capable server for `high_bit_depth: "hdr"` (`downlinkDepth`) on a device
+  whose hardware decoder takes HEVC Main 10 at the display's size
+  (`decodesHevcMain10`); elsewhere it asks for nothing and stays 8-bit, and
+  names no display. With deep colour goes `display_target`
+  (`displayTargetFor` in `HdrPresentation.kt`; the controller sends only what
+  `capabilities` advertise): `pq` at the display's `desiredMaxLuminance`,
+  with no `sdr_white_nits`, while the Activity's display shows HDR10 or HLG
+  (`MainActivity.reportDisplayHdr`; `getHdrCapabilities` already leaves out
+  the types the user turned off), "Show HDR videos in HDR" (`hdrOutput`,
+  default on) is on, the API is 33 or later, and the battery saver is off
+  (it turns the panel's HDR boost off). `sdr` anywhere else, so the server
+  maps Dolby Vision and HDR10+ for SDR. An open does not know its source yet
+  and names the display an HDR video would be shown on, as the desktop does;
+  the server maps only HDR sources. Every seek names it again
+  (`RelaySessionController.seek(displayTarget)`), so a seek after a change
+  remaps a mapped session from that epoch on. An epoch plays on the PQ output
+  only when the target is `pq` and its own `downlink_color` is HDR
+  (`videoOutputFor`); every other epoch, an unknown colour included, plays on
+  the 8-bit `gpu` surface as before, where mpv tone-maps. When a condition
+  changes during an HDR video (`hdrPresentationStale`: a mapped epoch made for
+  the other display, or an output that no longer fits), `reloadIfHdrStale`
+  reloads at the current position through a relay seek. Never in the
+  background (no Surface: the load would wait out the connect window), and
+  bounded by a cooldown. Picture-in-picture is not a condition: the PQ layer
+  plays on in the small window, though the panel drops its boost, and a switch
+  would cost a reload as the window shrinks. Each epoch's colour and mapping
+  come from its own `seek_ready` (`SessionInfo.describedBy`), which arrives
+  before the endpoint is handed to mpv. "Use 10 bit video" (`tenBitVideo`)
+  asks for `"all"` instead, and toggling it restarts only an SDR stream
+  (`SessionInfo.hdrSource`).
+- **mpv's PQ output reaches the screen only through the HDR relay, and the
+  output changes only between loads.** mpv's Android GL context creates its
+  EGL surface with no colour space, so SurfaceFlinger shows PQ as sRGB, and
+  Java cannot retag the `SurfaceView`'s buffer layer (a `setDataSpace` on
+  `SurfaceView.getSurfaceControl()` lands on the container, and BLAST
+  overwrites the dataspace per buffer anyway). For a `VideoOutput.Pq` load
+  `MpvSurfaceView` gives mpv the Surface of an `HdrSurfaceRelay`: an
+  `ImageReader` (RGBA_1010102, default dataspace BT2020_PQ) whose images go to
+  a child `SurfaceControl` with `setBuffer` + `setDataSpace` (API 33), each
+  closed only once its release fence signals. mpv renders it with
+  `vo=gpu-next`, `egl-output-format=rgb10_a2`, `target-trc=pq`,
+  `target-prim=bt.2020`, and `target-peak`, `sub-hdr-peak` and
+  `image-subs-hdr-peak` all at the display's peak (`mpvOutputOptions`): the
+  tablet boosts the interface with the picture, and subtitles at `gpu`'s fixed
+  203 nits looked grey beside the controls. The SDR output restores the
+  values mpv started with. A load whose output the attached Surface does not
+  carry waits (`MpvPlayerEngine.loadOn`) until the view attaches the one that
+  does, so `vo` and the EGL format only ever change with mpv stopped. A relay
+  that cannot be made leaves the load on the SDR surface rather than
+  stranding it, and the check compares what the load *asked* for
+  (`requestedOutput`), so that never turns into a reload loop. The engine
+  then reports HDR unavailable (`canPresentHdr`) until a new Surface, and
+  `displayTarget` names `sdr` meanwhile, so the server maps Dolby Vision and
+  HDR10+ for what is really shown. The relay is
+  an owner: mpv is detached first (`vo=null`, which returns once the VO is
+  gone), then its command queue drained (`afterPendingCommands`), and only
+  then is the reader closed. A relay keeps its size while an epoch plays. A
+  resize (PiP) does not give mpv a new VO in the middle of an epoch.
+  Instead `fitTo` crops the layer to mpv's picture (`pictureBounds`, widened
+  to the view's aspect, `relayPlacement`) and scales it to fit. In "fit"
+  framing the PiP window has the picture's aspect, not the relay's. mpv's
+  `osd-dimensions` change only once a VO draws, so bounds count only when
+  measured at the relay's own size, and the layer is fitted again at each
+  `PLAYBACK_RESTART` (`pictureListener`). While the crop leaves mpv's bars
+  off screen, plain-text subtitles stay inside the picture
+  (`keepSubtitlesInPicture`: `sub-use-margins=no`), as on the SDR surface,
+  whose PiP window has no bars. The
+  next load replaces a relay smaller than the view, as one first made in PiP
+  is once the window grows, and keeps a larger one. A frame goes back to mpv
+  only once its release fence has signalled, however long that takes. The
+  wait runs on its own thread, so neither the binder callback nor the relay
+  thread blocks on it.
 - **"Use passthrough for 4K or higher resolution videos" swaps the model a
   session sends, never the model the user chose.** `ModelChoice` (in
   `relay-client`) decides at the open, as the desktop's
@@ -358,20 +418,22 @@ release.yml` builds and publishes the signed APK with those notes.
 
 ## Known issues
 
-- HDR plays as SDR even on the tablet's HDR panel (HDR10, HLG, HDR10+,
-  540 nits). The bundled libmpv (mpv-android 2026-04-25) has `gpu-next` but
-  no Android Vulkan context, and its GL context cannot tag the surface as PQ,
-  so mpv tone-maps, and dithers the result to the 8-bit surface
-  (`dither=fruit`, which `profile=fast` would otherwise turn off). The spike
-  (docs/HDR_OUTPUT.md, 2026-11-03) showed HDR on the panel two ways and
-  recommends mpv's gpu-next on the existing GL context with a 10-bit PQ
-  output that the app tags (an ImageReader relay to a child
-  `SurfaceControl`). `sub-hdr-peak` goes at the display peak: Samsung boosts
-  the interface along with the picture, and subtitles at 203 nits looked
-  grey. It rules out
-  `vo=mediacodec_embed`, which drops mpv's subtitles. It also rules out a
-  Vulkan build: mpv's MediaCodec interop is GL-only, and copy-back delivers
-  8-bit `nv12`. Not implemented yet.
+- HDR output (docs/HDR_OUTPUT.md) leaves these open:
+  - The relay's layer carries no static HDR metadata: Java has no call for
+    it. The spike's eye check found nothing missing without it;
+    `ASurfaceTransaction_setHdrMetadata_*` (NDK) would add it.
+  - The original file playing directly (`loadDirect`, local fallback) stays
+    on the SDR output, tone-mapped, even when it is HDR.
+  - A stream whose colour the server does not report plays on the SDR output
+    even if mpv finds PQ in it (the desktop reloads on mpv's reading).
+  - gpu-next logs `[aimagereader] Waiting for frame timed out` about once
+    per load, with no drops; retest when mpv-android is upgraded.
+  - DeX and external HDR or SDR monitors, HLG and HDR10+ sources are
+    unmeasured. So is anything but the tablet's panel: the subtitle peak
+    assumes a platform that boosts SDR with HDR, as Samsung's does.
+  - Approaches ruled out by the spike: `vo=mediacodec_embed` drops mpv's
+    subtitles, and a Vulkan build cannot keep 10 bits (mpv's MediaCodec
+    interop is GL-only, and copy-back delivers 8-bit `nv12`).
 
 - Seeking while paused reached `SEEKING -> PAUSED`, which `SessionStateMachine`
   rejected, failing the session (fixed 2026-07-26 by allowing it). Any new

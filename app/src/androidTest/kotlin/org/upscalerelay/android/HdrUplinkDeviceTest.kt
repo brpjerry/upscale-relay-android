@@ -9,11 +9,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -209,6 +211,12 @@ class HdrUplinkDeviceTest {
         }
     }
 
+    /** prepare() switches "Show HDR videos in HDR" off: the debug app gets its default back. */
+    @After
+    fun restoreHdrOutput() {
+        runBlocking { AppPreferencesStore(instrumentation.targetContext).setHdrOutput(true) }
+    }
+
     private fun prepare(model: RelayViewModel, tenBitVideo: Boolean) {
         await("preferences", model) { it.preferencesLoaded }
         onMain {
@@ -217,6 +225,9 @@ class HdrUplinkDeviceTest {
             model.setModel("passthrough")
             model.setQualityTier("hevc-qp4")
             model.setTenBitVideo(tenBitVideo)
+            // What `expected` says comes back is for an SDR display; on an HDR
+            // panel the app would otherwise name pq (HdrOutputDeviceTest).
+            model.setHdrOutput(false)
         }
     }
 

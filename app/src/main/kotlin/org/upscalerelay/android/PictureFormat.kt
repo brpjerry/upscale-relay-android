@@ -1,5 +1,6 @@
 package org.upscalerelay.android
 
+import org.upscalerelay.player.mpv.VideoOutput
 import org.upscalerelay.protocol.SessionInfo
 import org.upscalerelay.protocol.VideoColor
 
@@ -24,7 +25,7 @@ internal val RelayUiState.relaySession: SessionInfo?
 
 /** The top bar's line under the title: the session description, then the picture's. */
 internal fun RelayUiState.playerDescription(): String =
-    listOfNotNull(sessionDescription.ifEmpty { null }, relaySession?.pictureSummary())
+    listOfNotNull(sessionDescription.ifEmpty { null }, relaySession?.pictureSummary(videoOutput is VideoOutput.Pq))
         .joinToString(" · ")
 
 /** The dynamic HDR metadata the server applied to this epoch, by name; null when none. */
@@ -35,14 +36,17 @@ internal fun SessionInfo.appliedDynamicHdr(): String? =
 /**
  * The top bar's word on the picture: its depth, whether it is HDR, and what
  * the server applied for this display (the desktop info card's "Dynamic HDR"
- * line). HDR is said to be shown as SDR because mpv tone-maps every HDR
- * stream here (CLAUDE.md, known issues). Null for an 8-bit SDR stream, which
- * is all a server from before deep colour sends.
+ * line). An HDR stream is said to be shown as SDR unless mpv presents it as
+ * HDR ([shownAsHdr]): off an HDR display, with "Show HDR videos in HDR" off
+ * or the battery saver on, mpv tone-maps it. Null for an 8-bit SDR stream,
+ * which is all a server from before deep colour sends.
  */
-internal fun SessionInfo.pictureSummary(): String? {
+internal fun SessionInfo.pictureSummary(shownAsHdr: Boolean = false): String? {
     val hdr = downlinkColor?.isHdr == true
     val parts = buildList {
-        if (downlinkBitDepth > 8 || hdr) add("$downlinkBitDepth-bit" + if (hdr) " HDR, shown as SDR" else "")
+        if (downlinkBitDepth > 8 || hdr) {
+            add("$downlinkBitDepth-bit" + if (hdr && shownAsHdr) " HDR" else if (hdr) " HDR, shown as SDR" else "")
+        }
         appliedDynamicHdr()?.let { add("$it applied by the server") }
     }
     return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")

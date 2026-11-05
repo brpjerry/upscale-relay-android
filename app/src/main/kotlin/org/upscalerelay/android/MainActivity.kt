@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -51,6 +52,15 @@ class MainActivity : ComponentActivity() {
     }
     private val mainHandler = Handler(Looper.getMainLooper())
     private var heldCancel: MotionEvent? = null
+
+    // Whether this Activity's display shows HDR decides how HDR videos play
+    // (displayTargetFor). Read again whenever a display changes: the window
+    // moved to another one (DeX, a cast), or HDR was switched on or off.
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) = reportDisplayHdr()
+    }
     private val deliverHeldCancel = Runnable {
         heldCancel?.let { held ->
             heldCancel = null
@@ -126,6 +136,8 @@ class MainActivity : ComponentActivity() {
             IntentFilter(ACTION_PIP_PLAY_PAUSE),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        getSystemService(DisplayManager::class.java)?.registerDisplayListener(displayListener, mainHandler)
+        reportDisplayHdr()
         setContent { RelayApp(viewModel, inPictureInPicture) }
         lifecycleScope.launch {
             viewModel.ui.collectLatest { state ->
@@ -134,7 +146,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        reportDisplayHdr()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        reportDisplayHdr()
+    }
+
+    /** What this Activity's display can show as HDR, for the ViewModel. */
+    private fun reportDisplayHdr() {
+        val current = runCatching {
+            if (Build.VERSION.SDK_INT >= 30) display else @Suppress("DEPRECATION") windowManager.defaultDisplay
+        }.getOrNull()
+        val capabilities = current?.hdrCapabilities
+        // Display.Mode's own list (API 34) keeps the types the user turned
+        // off; this one leaves them out.
+        @Suppress("DEPRECATION")
+        val types = capabilities?.supportedHdrTypes
+        viewModel.updateDisplayHdr(displayHdrFrom(types, capabilities?.desiredMaxLuminance ?: 0f))
+    }
+
     override fun onDestroy() {
+        runCatching { getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener) }
         mainHandler.removeCallbacks(deliverHeldCancel)
         heldCancel?.recycle()
         heldCancel = null

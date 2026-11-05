@@ -161,7 +161,12 @@ class RelaySessionControllerTest {
 
     @Test(timeout = 20_000)
     fun `deep colour and the display are asked for only as the server advertises them`() = runBlocking {
-        suspend fun session(capabilities: String, opened: String = "", seekReady: String = ""): FakeControl {
+        suspend fun session(
+            capabilities: String,
+            opened: String = "",
+            seekReady: String = "",
+            seekTarget: DisplayTarget? = null,
+        ): FakeControl {
             val media = FakeMedia(ackDelayMillis = 0)
             val control = FakeControl(media.port, capabilities = capabilities, opened = opened, seekReady = seekReady)
             val controller = controller(control)
@@ -174,7 +179,7 @@ class RelaySessionControllerTest {
                 connect(first).use {
                     controller.startServerPlayback()
                     controller.expectPlayerReload()
-                    control.lastSeekSession = controller.seek(targetPts = 90_000).session
+                    control.lastSeekSession = controller.seek(targetPts = 90_000, displayTarget = seekTarget).session
                 }
             } finally {
                 controller.close()
@@ -205,6 +210,17 @@ class RelaySessionControllerTest {
         assertEquals("hdr", deepOnly.sent("open_session")["high_bit_depth"]?.jsonPrimitive?.content)
         assertNull(deepOnly.sent("open_session")["display_target"])
         assertNull(deepOnly.sent("seek")["display_target"])
+
+        // A seek after the display changed names the new one, and the server
+        // remaps from that epoch on. A session that named none names none.
+        val pq = DisplayTarget("pq", 540.0)
+        val remapped = session(
+            capabilities = ""","high_bit_depth":true,"display_mapping":true""",
+            seekTarget = pq,
+        )
+        assertEquals(sdr, remapped.sent("open_session")["display_target"])
+        assertEquals(pq.toJson(), remapped.sent("seek")["display_target"])
+        assertNull(session(capabilities = ""","high_bit_depth":true""", seekTarget = pq).sent("seek")["display_target"])
 
         // A server from before either field streams 8 bits, unasked.
         val older = session(capabilities = "")
