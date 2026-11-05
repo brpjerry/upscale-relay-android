@@ -354,9 +354,16 @@ release.yml` builds and publishes the signed APK with those notes.
   540 nits). The bundled libmpv (mpv-android 2026-04-25) has `gpu-next` but
   no Android Vulkan context, and its GL context cannot tag the surface as PQ,
   so mpv tone-maps, and dithers the result to the 8-bit surface
-  (`dither=fruit`, which `profile=fast` would otherwise turn off). Showing
-  HDR needs a spike: a custom build with Vulkan, `vo=mediacodec_embed` (no
-  mpv subtitles or OSD), or the app tagging the Surface itself.
+  (`dither=fruit`, which `profile=fast` would otherwise turn off). The spike
+  (docs/HDR_OUTPUT.md, 2026-11-03) showed HDR on the panel two ways and
+  recommends mpv's gpu-next on the existing GL context with a 10-bit PQ
+  output that the app tags (an ImageReader relay to a child
+  `SurfaceControl`). `sub-hdr-peak` goes at the display peak: Samsung boosts
+  the interface along with the picture, and subtitles at 203 nits looked
+  grey. It rules out
+  `vo=mediacodec_embed`, which drops mpv's subtitles. It also rules out a
+  Vulkan build: mpv's MediaCodec interop is GL-only, and copy-back delivers
+  8-bit `nv12`. Not implemented yet.
 
 - Seeking while paused reached `SEEKING -> PAUSED`, which `SessionStateMachine`
   rejected, failing the session (fixed 2026-07-26 by allowing it). Any new
