@@ -1103,6 +1103,7 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                         )
                         Text("Change", color = MaterialTheme.colorScheme.primary)
                     }
+                    Passthrough4kToggle(viewModel, state)
                     Text("Quality", style = MaterialTheme.typography.labelLarge)
                     state.capabilities?.qualityOptions.orEmpty()
                         .filter { it.androidSupported && it.id in RelaySessionController.ANDROID_HEVC_TIERS }
@@ -1391,6 +1392,20 @@ private fun SettingToggle(
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+/**
+ * "Use passthrough for 4K or higher resolution videos" (ModelChoice), under
+ * the model in Settings and the player's model sheet, as on the desktop.
+ */
+@Composable
+private fun Passthrough4kToggle(viewModel: RelayViewModel, state: RelayUiState) {
+    SettingToggle(
+        "Use passthrough for 4K or higher resolution videos",
+        state.passthrough4k,
+        viewModel::setPassthrough4k,
+        supporting = "Stream videos 3840 wide or 2160 tall and up without the upscale model.",
+    )
 }
 
 /** "Use 10 bit video" (PROTOCOL.md §3.5 high_bit_depth "all"), in Settings and the player's sheet. */
@@ -2434,6 +2449,9 @@ private fun ModelSheet(viewModel: RelayViewModel, state: RelayUiState, onDismiss
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
+            Passthrough4kToggle(viewModel, state)
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
             LazyColumn(state = listState) {
                 items(models, key = { it.name }) { model ->
                     RadioSetting(

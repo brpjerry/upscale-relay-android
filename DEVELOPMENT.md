@@ -114,6 +114,14 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - `PlayerSeekDeviceTest` needs the real relay and `-e auditMediaPath` with a
   file of 20 minutes or more. It presses the skip buttons back to back and
   checks where playback lands.
+- `Passthrough4kDeviceTest` needs the real relay, `-e uhdMediaPath` with a
+  2160p library file and `-e fhdMediaPath` with a 1080p one, and `-e model`
+  when the server lacks `2x_AnimeJaNai_HD_V3_Compact`. Under "Use
+  passthrough for 4K or higher resolution videos" it checks that the 2160p
+  file plays with passthrough through a seek and a quality restart, the
+  chosen model staying the saved one, and that the 1080p file plays with the
+  model and does not restart when the option goes off. The probe's cost is
+  in logcat: `read the video size (...) through /media in N ms`.
 - `HdrUplinkDeviceTest` needs HDR fixtures in the debug app's files
   directory, `-e hdrFixtures a.mkv,b.mp4,...`. It checks what each local
   source sends in `open_session.video` (colour, depth, HDR10 metadata, Dolby

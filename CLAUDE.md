@@ -293,6 +293,23 @@ release.yml` builds and publishes the signed APK with those notes.
   which arrives before the endpoint is handed to mpv. "Use 10 bit video"
   (`tenBitVideo`) asks for `"all"` instead, and toggling it restarts only an
   SDR stream (`SessionInfo.hdrSource`).
+- **"Use passthrough for 4K or higher resolution videos" swaps the model a
+  session sends, never the model the user chose.** `ModelChoice` (in
+  `relay-client`) decides at the open, as the desktop's
+  `SessionConfig.passthrough_4k` does: 3840 wide or 2160 tall and up
+  (`is4kOrHigher`) opens with `passthrough`. An uplink's size is its own
+  demuxer's; a library file's is read through `/media` before the open
+  (`ServerVideoSize`: MediaExtractor over `HttpRangeReader`, only when the
+  option can change the model), and a probe that fails or takes over 10 s
+  keeps the chosen model. A restart of the same file passes the size its
+  session already read (`knownSourceSize`) instead of probing again, so a
+  resume whose network is not back yet cannot put a 4K file on the model.
+  `PlaybackEndpoint.model` and `SessionInfo.model`
+  are what was sent; `chosenModel` is what the app stores as
+  `selectedModel` and saves. Storing `endpoint.model` instead, as every open
+  did before, would make one 4K file switch the user's model to passthrough
+  for good. Toggling restarts only a stream it changes
+  (`passthrough4kChangesStream`), or one still restarting.
 - **An uplink sends `video.color` only with a transfer it knows**
   (`platformColor`). The server decides the depth from that colour and reads
   an HEVC uplink's own parameter sets only where it is absent, so an
