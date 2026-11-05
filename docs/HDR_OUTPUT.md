@@ -51,8 +51,11 @@ The two other approaches lose more than they gain:
   gpu-next itself runs on the GL context without it. What Vulkan would add
   is a swapchain that mpv tags itself, and the relay already does that.
 
-The panel was checked by eye on 2026-11-04 (see "Eye check"). The test card's
-patch-by-patch comparison is still open.
+The panel was checked by eye on 2026-11-04 (see "Eye check"). On the HDR test
+card the recommended path kept every step from 80 to 10000 nits distinct, with
+a smooth ramp. The panel's own tone mapping (embed) merged 2000-10000. Today's
+SDR path was noticeably dimmer, merged everything above about 1000, and
+banded.
 
 ## What the tablet does with HDR
 
@@ -164,15 +167,54 @@ same picture. It takes 7-9 s to start on any path because it streams at
 The tablet's owner watched each run, with a label in mpv's OSD naming the
 path:
 
-- **The test card**, 75 s each on the relay (`gpu`), on embed and on today's
-  path. Both HDR paths showed an HDR layer with no drops. The
-  patch-by-patch comparison was not reported (see "Still open").
+- **The test card**, a first pass of 75 s each on the relay (`gpu`), on
+  embed and on today's path. Both HDR paths showed an HDR layer with no
+  drops. The patch-by-patch check is below.
 - **Subtitles**, on the episode on the relay with English subtitles:
   - With `gpu`: "controls white was much brighter than the subtitles
     (greyish)". `gpu` maps sRGB subtitle white to `MP_REF_WHITE`, a fixed
     203 nits.
   - With gpu-next and `sub-hdr-peak=540`: "subtitle white matches".
 - **PiP** (relay, embed and today's path): "pip window looks fine".
+
+**The test card, patch by patch** (2026-11-04).
+
+- **The card.** `HDR test card - 10000 nits.mkv` is one static grey scale:
+  - patches at 80, 203, 400, 600, 1000, 1107, 2000, 4000 and 10000 nits;
+  - a PQ ramp with ticks at 100, 203, 1000 and 4000;
+  - a heading drawn at 203 nits.
+- **How it was run.** The prototype's interactive mode
+  (`-e spikeInteractive true`) paused it on each path in turn, at
+  `target-peak=540`, and the owner compared:
+  - the 203 patch with the heading and with the player controls' white;
+  - the steps between patches;
+  - the ramp.
+
+| Check | Relay + gpu-next (recommended) | `mediacodec_embed` (panel tone-maps by the stream's metadata) | Today: SDR, tone-mapped by mpv `gpu` |
+|---|---|---|---|
+| 203 patch vs 203 heading | match | close | (no reference: SDR) |
+| Controls' white | much brighter than 203; matches the **10000** patch | much brighter than 203; between 1107 and 10000 | about as bright as the brightest patches |
+| 80 → 600 | each step brighter | each step brighter | each step brighter, by less |
+| 600 → 10000 | **each step brighter** | 2000-10000 almost identical | 600 maybe a little below 1000; above that identical |
+| Ramp | smooth, cleanly out of black | smooth, cleanly out of black | out of black, but **banding below the 600 level** |
+| Whole picture | | about the same as the relay | **noticeably dimmer** |
+
+What this shows:
+
+- **The recommended path is right on its own terms.**
+  - The card's SDR white (203) sits at ordinary SDR brightness.
+  - The highlights rise above it.
+  - gpu-next's curve fits the whole 10000-nit range under the panel's peak
+    without merging steps. It does slightly better than the panel's own
+    tone mapping (embed), which loses 2000-10000.
+  - The relay's missing static metadata costs nothing visible.
+- **The panel's HDR top is where the interface sits.** In both HDR paths
+  the controls' white matches the top patches, which agrees with the
+  subtitle result: `sub-hdr-peak` belongs at the display peak.
+- **Today's path is what HDR fixes.** It is dimmer overall, it merges
+  everything above about 1000 nits, and it bands in the lower ramp. That
+  last one holds even with `dither=fruit` on, because the 8-bit surface is
+  the limit, where the 10-bit paths showed none.
 
 ## Approach 1: a Vulkan libmpv (gpu-next, `androidvk`)
 
@@ -388,15 +430,6 @@ the PQ layer still played with no drops and in sync, and it looked fine
 
 ## Still open
 
-- **The test card, patch by patch.** On this panel the interface is boosted
-  along with the picture, so the right expectations are:
-  - On the relay and embed, patches from 203 nits up get brighter step by
-    step.
-  - 540 and above match the controls' white, since mpv and the panel
-    tone-map above it.
-  - 203 sits at the brightness of today's tone-mapped white.
-  - The relay without static metadata looks the same as embed with it.
-  The subtitle and PiP checks are done.
 - **Not measured** (fixtures or hardware):
   - background and return;
   - battery saver;

@@ -37,6 +37,13 @@ watching.
   fine". The panel drops its HDR boost there (`mIsHdrLayerPresent=false`),
   though SurfaceFlinger still counts an HDR layer.
 - **Panel peak.** At full brightness the HDR level read 900 nits.
+- **The test card by eye** (80-10000-nit patches and a PQ ramp, each path
+  paused in turn):
+  - Relay + gpu-next: every step distinct up to 10000, the ramp smooth, and
+    the controls' white equal to the 10000 patch.
+  - `mediacodec_embed`: 2000-10000 almost identical.
+  - Today's SDR path: noticeably dimmer, identical above about 1000, and
+    banding in the lower ramp.
 - **Background playback.** Under the keyguard, backgrounding with it on
   stalled today's path and embed alike. The drift watchdog reloaded without a
   Surface, and the controller timed out after 30 s. Embed had also fallen
