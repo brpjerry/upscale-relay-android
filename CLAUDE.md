@@ -242,7 +242,10 @@ release.yml` builds and publishes the signed APK with those notes.
   keeps a choice made while it ran, and saves the model only when it adopts
   the server's. A new setting a relay open reads belongs in
   `StreamSettings`, and a new path that publishes a relay session sets
-  `streamOpenedWith`. Until 2026-11-04 a change during a reconnect or an
+  `streamOpenedWith`, and its start as the seek target (`startTarget`): the
+  waiting restart runs the moment it publishes, before mpv reports any
+  position, and `userPositionSeconds()` would otherwise give it the
+  previous file's position, or zero over a resume point. Until 2026-11-04 a change during a reconnect or an
   open from the library was lost, a change during an advance started a
   restart at the old file's position beside the advance's open, and an open
   put the model it had read back over a newer choice
@@ -397,8 +400,8 @@ release.yml` builds and publishes the signed APK with those notes.
   passthrough for good. Toggling restarts only a stream it changes
   (`passthrough4kChangesStream`), and another upscaling model leaves a 4K
   passthrough stream alone (`modelChangeKeepsStream`); both are decided as
-  every playback setting is (`applyStreamSettings`, below). After the first load, only the
-  switch and an import set `passthrough4k` in the UI state, as with
+  every playback setting is (`applyStreamSettings`, above). After the first
+  load, only the switch and an import set `passthrough4k` in the UI state, as with
   `fileLoggingEnabled`: its own DataStore writes can come back behind older
   ones.
 - **An uplink sends `video.color` only with a transfer it knows**

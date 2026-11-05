@@ -1690,9 +1690,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         passthrough4k = landscape.passthrough4k,
                     )
                     pendingSource = null // controller now owns the source
-                    applyResumePoint(currentController, endpoint, "local:$uriValue") to
-                        source.videoInfo.name
-                }.onSuccess { (endpoint, displayName) ->
+                    val (resumed, start) = applyResumePoint(currentController, endpoint, "local:$uriValue")
+                    Triple(resumed, start, source.videoInfo.name)
+                }.onSuccess { (endpoint, start, displayName) ->
                     AppLog.i(TAG, "opened local file '$displayName' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     withContext(Dispatchers.IO) { localDocumentServer?.close() }
                     localDocumentServer = bridge
@@ -1713,6 +1713,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
                         playingPath = displayName,
+                        seekTargetSeconds = startTarget(start),
                         selectedModel = settledChoice(mutableUi.value.selectedModel, opened.model, endpoint.chosenModel),
                         sessionDescription =
                             "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
@@ -1816,14 +1817,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     prepare(currentController)
                 }
                 openRetryPending = false
-                OpenedServerFile(
-                    applyResumePoint(currentController, endpoint, progressKey(origin)),
-                    currentController,
-                    origin,
-                    landscape.streamSettings,
-                )
+                val (resumed, start) = applyResumePoint(currentController, endpoint, progressKey(origin))
+                OpenedServerFile(resumed, start, currentController, origin, landscape.streamSettings)
             }
-                .onSuccess { (endpoint, currentController, origin, read) ->
+                .onSuccess { (endpoint, start, currentController, origin, read) ->
                     AppLog.i(TAG, "opened server file '${file.path.substringAfterLast('/')}' session=${endpoint.session.sessionId} model=${endpoint.model} chosen=${endpoint.chosenModel} source=${endpoint.session.sourceSize ?: "unread"} tier=${endpoint.qualityTier} out=${endpoint.session.downlinkWidth}x${endpoint.session.downlinkHeight} picture=${endpoint.session.pictureDiagnostics()} epoch=${endpoint.session.epoch}")
                     activeOrigin = origin
                     sourceSizes.remember(origin, endpoint.session.sourceSize)
@@ -1838,6 +1835,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         busy = false,
                         endpoint = endpoint.localUrl,
                         session = endpoint.session,
+                        seekTargetSeconds = startTarget(start),
                         selectedModel = settledChoice(mutableUi.value.selectedModel, read.model, endpoint.chosenModel),
                         sessionDescription =
                             "${endpoint.modelDescription()} · ${endpoint.qualityTier} · " +
@@ -2010,9 +2008,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     private data class AdjacentFile(val origin: PlaybackOrigin, val displayPath: String, val local: Boolean)
 
-    /** A server file's open, and the settings it read. */
+    /** A server file's open, where it starts, and the settings it read. */
     private data class OpenedServerFile(
         val endpoint: PlaybackEndpoint,
+        val startSeconds: Double,
         val controller: RelaySessionController,
         val origin: PlaybackOrigin.ServerFile,
         val read: StreamSettings,
@@ -2522,8 +2521,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Rebuilds the control connection and the active session at the given
-     * position with the current UI settings. Shared by automatic resume and
-     * mid-play model/quality/framing changes.
+     * position with the current UI settings. Shared by automatic resume,
+     * file advances and settings restarts; it takes the published stream
+     * down (streamOpenedWith null) and publishes the next with the settings
+     * it read, as every path that publishes a relay session must.
      */
     private suspend fun restartPlayback(
         origin: PlaybackOrigin,
@@ -2613,14 +2614,17 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         sourceSizes.remember(origin, endpoint.session.sourceSize)
         var finalEndpoint = endpoint
         val timeBase = endpoint.session.timeBase
+        var startSeconds = 0.0
         if (positionSeconds > 0.5 && timeBase != null) {
             finalEndpoint = next.seek((positionSeconds / timeBase.value).roundToLong())
+            startSeconds = positionSeconds
         }
         sessionStartedAt = Instant.now()
         subtitlePreferenceAppliedSession = null
         warningDismissed = false
         reconnectExhausted = false
         val pauseIntent = mutableUi.value.paused
+        val startAt = startTarget(startSeconds)
         streamOpenedWith = state.streamSettings.carrying(finalEndpoint.chosenModel, finalEndpoint.qualityTier)
         mutableUi.update {
             it.copy(
@@ -2633,7 +2637,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 paused = pauseIntent,
                 seeking = false,
                 seekPreviewSeconds = null,
-                seekTargetSeconds = null,
+                seekTargetSeconds = startAt,
                 busy = false,
                 error = null,
                 performanceWarning = null,
@@ -2679,6 +2683,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val origin = activeOrigin ?: return
         val state = mutableUi.value
         if (state.playingPath == null || state.directLocalFallback || closingJob?.isActive == true) return
+        // A reconnect that failed out of sight is left to the next foreground
+        // (resumePendingPlayback), which reads the settings chosen by then; a
+        // restart now would only fail into an error nobody is looking at.
+        if (pendingFailure != null && !appInForeground) return
         if (!state.settingsRestartNeeded(streamOpenedWith, decodesHevcMain10(state.display))) return
         streamOpenedWith = null
         val prior = restartJob
@@ -2985,15 +2993,28 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
      * before mpv attaches. Points near the end (credits) or too close to the
      * start are ignored.
      */
+    /** The endpoint to play, seeked to the saved position if there is one, and where it starts. */
     private suspend fun applyResumePoint(
         controller: RelaySessionController,
         endpoint: PlaybackEndpoint,
         key: String,
-    ): PlaybackEndpoint {
-        val saved = resumeSeconds(key, endpoint.session.durationSeconds) ?: return endpoint
-        val timeBase = endpoint.session.timeBase ?: return endpoint
+    ): Pair<PlaybackEndpoint, Double> {
+        val saved = resumeSeconds(key, endpoint.session.durationSeconds) ?: return endpoint to 0.0
+        val timeBase = endpoint.session.timeBase ?: return endpoint to 0.0
         AppLog.i(TAG, "resuming at saved position %.1fs".format(saved))
-        return controller.seek((saved / timeBase.value).roundToLong())
+        return controller.seek((saved / timeBase.value).roundToLong()) to saved
+    }
+
+    /**
+     * Where a stream just published starts, held as the seek target until mpv
+     * plays there (releaseSeekTargetIfCaughtUp). A settings change waiting on
+     * the open restarts it the moment it publishes, before mpv reports any
+     * position of its own: userPositionSeconds would otherwise read the
+     * previous file's, or zero over a resume point.
+     */
+    private fun startTarget(seconds: Double): Double {
+        seekTargetSetAt = SystemClock.elapsedRealtime()
+        return seconds
     }
 
     /** The saved position worth resuming at, or null near either end of the file. */

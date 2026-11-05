@@ -3,7 +3,6 @@ package org.upscalerelay.android
 import android.net.ConnectivityManager
 import android.os.SystemClock
 import androidx.lifecycle.ViewModelProvider
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
@@ -43,7 +42,7 @@ class ConnectionLossDeviceTest {
         assumeTrue("pass -e auditMediaPath <server-library file>", !path.isNullOrBlank())
         val original = runBlocking { preferences.snapshot() }
         try {
-            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            launchOverKeyguard().use { scenario ->
                 lateinit var model: RelayViewModel
                 scenario.onActivity { model = ViewModelProvider(it)[RelayViewModel::class.java] }
                 await("preferences", model) { it.preferencesLoaded }
