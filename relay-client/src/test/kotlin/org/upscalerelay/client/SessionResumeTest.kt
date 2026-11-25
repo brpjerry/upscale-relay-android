@@ -165,9 +165,12 @@ class SessionResumeTest {
     @Test(timeout = 20_000)
     fun `a connection lost again just after its resume is resumed again`() = runBlocking {
         playing()
-        server.connections.last().drop()
-        awaitResumed()
-        server.connections.last().drop()
+        // The controller retires the original once the replacement is
+        // installed, while that resume is still finishing: the replacement
+        // drops right then.
+        val original = server.connections.last()
+        original.onCancel = { server.connections.last().drop() }
+        original.drop()
         awaitResumed(resumes = 2)
         assertNull(controller.failure.value)
         assertEquals(2, server.allSent("resume_session").size)
@@ -396,6 +399,7 @@ class SessionResumeTest {
         inner class Connection(private val request: Request, private val listener: WebSocketListener) : WebSocket {
             val sent = CopyOnWriteArrayList<Sent>()
             @Volatile var open = true
+            @Volatile var onCancel: () -> Unit = {}
 
             private fun reply(text: String) = listener.onMessage(this, text)
 
@@ -474,6 +478,7 @@ class SessionResumeTest {
 
             override fun cancel() {
                 open = false
+                onCancel()
             }
         }
     }

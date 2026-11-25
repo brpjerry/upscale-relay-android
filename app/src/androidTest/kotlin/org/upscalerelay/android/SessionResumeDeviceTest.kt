@@ -103,7 +103,7 @@ class SessionResumeDeviceTest {
                 "buffered=${model.ui.value.transportStats.reportedBufferMillis}")
 
             await("the lost connection is noticed", model, 180_000, guard = ::noRecoveryUi) { it.resumingConnection }
-            val lostAt = model.ui.value.userPositionSeconds()
+            val lostAt = model.ui.value.mpvMetrics.positionSeconds
             Log.i(TAG, "RESUMING at $lostAt")
             await("the session is resumed", model, 240_000, guard = ::noRecoveryUi) { !it.resumingConnection }
             val resumedAt = model.ui.value.mpvMetrics.positionSeconds
@@ -118,6 +118,9 @@ class SessionResumeDeviceTest {
             // the one-second metrics tick.
             val playedSeconds = resumedAt - startPosition
             assertTrue("played $playedSeconds s in $elapsedSeconds s", playedSeconds >= elapsedSeconds - 3.0)
+            // And through a real outage, not a blip: the 45 s stall less the
+            // up to 20 s it takes to notice.
+            assertTrue("played only ${resumedAt - lostAt} s after the loss was noticed", resumedAt - lostAt >= 20.0)
 
             // The resumed connection carries a seek and the teardown.
             val target = resumedAt + 60
