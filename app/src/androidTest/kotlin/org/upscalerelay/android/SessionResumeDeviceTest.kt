@@ -82,18 +82,23 @@ class SessionResumeDeviceTest {
             assertNotNull("the session was not opened for a resume", session.resumeToken)
 
             // Once mpv holds a second of video, the target follows what it holds.
-            await("a target sized by the cache", model, 30_000) { it.transportStats.bufferTargetMillis != null }
-            val sized = model.ui.value.transportStats.bufferTargetMillis!!
-            await("the server applies it", model, 10_000) { serverTarget(statusUrl, session.sessionId) != null }
-            val applied = serverTarget(statusUrl, session.sessionId)!!
-            Log.i(TAG, "buffer target: opened=$opened sized=$sized applied=$applied")
-            assertTrue("server applies $applied ms", applied > 10_000)
+            // The server must apply one of those reports, not keep the opening target.
+            val reported = mutableSetOf<Long>()
+            var applied: Long? = null
+            await("the server applies a target sized by the cache", model, 30_000) { state ->
+                state.transportStats.bufferTargetMillis?.takeIf { it != opened }?.let(reported::add)
+                applied = serverTarget(statusUrl, session.sessionId)
+                applied != null && applied in reported
+            }
+            Log.i(TAG, "buffer target: opened=$opened applied=$applied")
+            assertTrue("server applies $applied ms", applied!! > 10_000)
 
             // Enough buffered to play through the dropout and its detection.
             await("buffer for the dropout", model, 180_000) {
                 it.transportStats.reportedBufferMillis >= MIN_BUFFER_FOR_DROPOUT_MILLIS
             }
-            val startPosition = model.ui.value.userPositionSeconds()
+            val startedAt = SystemClock.elapsedRealtime()
+            val startPosition = model.ui.value.mpvMetrics.positionSeconds
             Log.i(TAG, "READY_FOR_DROPOUT session=${session.sessionId} position=$startPosition " +
                 "buffered=${model.ui.value.transportStats.reportedBufferMillis}")
 
@@ -101,14 +106,18 @@ class SessionResumeDeviceTest {
             val lostAt = model.ui.value.userPositionSeconds()
             Log.i(TAG, "RESUMING at $lostAt")
             await("the session is resumed", model, 240_000, guard = ::noRecoveryUi) { !it.resumingConnection }
-            val resumedAt = model.ui.value.userPositionSeconds()
+            val resumedAt = model.ui.value.mpvMetrics.positionSeconds
+            val elapsedSeconds = (SystemClock.elapsedRealtime() - startedAt) / 1000.0
             Log.i(TAG, "RESUMED at $resumedAt")
             val after = model.ui.value
             noRecoveryUi(after)
             assertEquals("the session changed", session.sessionId, after.session?.sessionId)
             assertEquals(MpvPlaybackState.PLAYING, after.playerState)
-            // It played on through the dropout rather than waiting it out.
-            assertTrue("played $startPosition..$resumedAt", resumedAt > lostAt + 5)
+            // It played on through the dropout and its detection rather than
+            // waiting either out: as much video as time passed, give or take
+            // the one-second metrics tick.
+            val playedSeconds = resumedAt - startPosition
+            assertTrue("played $playedSeconds s in $elapsedSeconds s", playedSeconds >= elapsedSeconds - 3.0)
 
             // The resumed connection carries a seek and the teardown.
             val target = resumedAt + 60

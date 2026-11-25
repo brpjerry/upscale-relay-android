@@ -86,8 +86,12 @@ class SessionResumeTest {
         return endpoint
     }
 
-    private suspend fun awaitResumed() = withTimeout(10_000) {
-        controller.resuming.first { it }
+    /**
+     * Waits for the resume to reach the server and finish. The flag alone
+     * could have gone true and false before anything subscribed to it.
+     */
+    private suspend fun awaitResumed(resumes: Int = 1) = withTimeout(10_000) {
+        while (server.allSent("resume_session").size < resumes) delay(10)
         controller.resuming.first { !it }
     }
 
@@ -155,6 +159,18 @@ class SessionResumeTest {
         val resumedConnection = server.connections.last()
         withTimeout(5_000) { while (resumedConnection.sent.none { it.type == "buffer_report" }) delay(50) }
         assertNull(controller.failure.value)
+    }
+
+    // Bugs caught: 0, False positives: 0
+    @Test(timeout = 20_000)
+    fun `a connection lost again just after its resume is resumed again`() = runBlocking {
+        playing()
+        server.connections.last().drop()
+        awaitResumed()
+        server.connections.last().drop()
+        awaitResumed(resumes = 2)
+        assertNull(controller.failure.value)
+        assertEquals(2, server.allSent("resume_session").size)
     }
 
     // Bugs caught: 0, False positives: 0
@@ -473,11 +489,15 @@ class SessionResumeTest {
             thread(name = "relay-test-media", isDaemon = true) {
                 runCatching {
                     val accepted = server.accept().also { socket = it }
+                    if (server.isClosed) {
+                        accepted.close()
+                        return@runCatching
+                    }
                     accepted.getInputStream().readNBytes(MediaFraming.HANDSHAKE_LENGTH)
                     val output = accepted.getOutputStream()
                     output.write(0)
                     output.flush()
-                    while (true) {
+                    while (!server.isClosed) {
                         val packet = outgoing.poll(100, TimeUnit.MILLISECONDS) ?: continue
                         output.write(MediaFraming.encode(packet))
                         output.flush()
@@ -489,8 +509,8 @@ class SessionResumeTest {
         fun send(packet: MediaPacket) = outgoing.put(packet)
 
         override fun close() {
-            socket?.close()
             server.close()
+            socket?.close()
         }
     }
 }

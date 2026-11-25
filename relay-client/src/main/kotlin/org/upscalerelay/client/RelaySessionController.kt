@@ -205,6 +205,13 @@ class RelaySessionController internal constructor(
     /** The server_id of the server that opened the session, when it gave one: the token goes to that server only. */
     val sessionServerId: String? get() = openedServerId
 
+    /** How long the server holds this session once its connection is lost (§1.2); zero when it is not held. */
+    val sessionGraceMillis: Long
+        get() = ((activeSessionGraceSeconds ?: 0.0) * 1_000).roundToLong()
+
+    @Volatile
+    private var activeSessionGraceSeconds: Double? = null
+
     /**
      * The id of the session this controller opened, from the moment the
      * server announced it, kept after teardown: a later connection asks about
@@ -485,6 +492,7 @@ class RelaySessionController internal constructor(
         openedSessionId = session.sessionId
         openedResumeToken = session.resumeToken
         openedServerId = caps.serverId
+        activeSessionGraceSeconds = session.resumeGraceSeconds
         takenOver = false
         playIntent = null
     }
@@ -638,7 +646,7 @@ class RelaySessionController internal constructor(
         check(state.value == SessionState.BUFFERING)
         seekProgressTracker.begin(currentEpoch.get())
         startSeekWatchdog(currentEpoch.get())
-        sendPlayIntent(paused = false)
+        synchronized(playbackStateLock) { sendPlayIntent(paused = false) }
     }
 
     fun setPaused(paused: Boolean) = synchronized(playbackStateLock) {
@@ -832,6 +840,7 @@ class RelaySessionController internal constructor(
     private fun startReporter() {
         reporter?.cancel()
         reporter = scope.launch {
+            var lastReportedTarget: Long? = null
             try {
                 while (isActive) {
                     val player = playerBuffer.get()
@@ -847,7 +856,10 @@ class RelaySessionController internal constructor(
                     if (!suppressBufferReports.get() && !mutableResuming.value) {
                         val channel = control
                         try {
-                            channel?.bufferReport(bufferedMillis, targetMillis)
+                            if (channel != null) {
+                                channel.bufferReport(bufferedMillis, targetMillis)
+                                lastReportedTarget = targetMillis
+                            }
                         } catch (error: Throwable) {
                             if (!(mutableResuming.value || channel !== control || resumable())) throw error
                         }
@@ -861,7 +873,7 @@ class RelaySessionController internal constructor(
                         loopbackBytes = loopback?.totalBytesSent() ?: 0,
                         playerCacheMillis = player.cacheDurationMillis,
                         reportedBufferMillis = bufferedMillis,
-                        bufferTargetMillis = targetMillis,
+                        bufferTargetMillis = lastReportedTarget,
                     )
                     delay(500)
                 }
@@ -878,9 +890,13 @@ class RelaySessionController internal constructor(
             it.getOrThrow()
             return@withLock
         }
-        val current = state.value
-        if (current != SessionState.CLOSING && current != SessionState.DISCONNECTED) {
-            stateMachine.transition(SessionState.CLOSING)
+        // With the transition, so no resume can start unseen after it.
+        val endingResume = synchronized(playbackStateLock) {
+            val current = state.value
+            if (current != SessionState.CLOSING && current != SessionState.DISCONNECTED) {
+                stateMachine.transition(SessionState.CLOSING)
+            }
+            resumeJob
         }
         var teardownError: Throwable? = null
         fun remember(error: Throwable) {
@@ -895,7 +911,7 @@ class RelaySessionController internal constructor(
         // A resume in progress is not waited for: control is then the dead
         // connection, its teardown goes unacknowledged, and the next
         // connection takes the session over and releases it (resumeToken).
-        resumeJob?.cancelAndJoin()
+        endingResume?.cancelAndJoin()
         resumeJob = null
         mutableResuming.value = false
         // Every owner must be retired even if an earlier owner's close fails.
@@ -970,23 +986,27 @@ class RelaySessionController internal constructor(
      * business, and the retired one's is nobody's.
      */
     private fun onControlFailure(channel: ControlChannel, error: Throwable) {
-        if (channel !== control) return
-        if (error is SessionTakenOverException) takenOver = true
-        val resume = synchronized(playbackStateLock) {
-            val start = error !is RelayServerException && error !is SessionTakenOverException &&
-                resumable() && resumeJob?.isActive != true
-            if (start) {
-                resumeOutcome = CompletableDeferred()
+        // Decided under the lock a resume installs its connection with: a
+        // loss lands either before the install (the attempt sees it) or
+        // after it (this sees the installed connection as its own).
+        synchronized(playbackStateLock) {
+            if (channel !== control) return
+            if (error is SessionTakenOverException) takenOver = true
+            val session = activeSession
+            if (session != null && error !is RelayServerException && error !is SessionTakenOverException &&
+                resumable() && !mutableResuming.value
+            ) {
+                val outcome = CompletableDeferred<SessionResumed>()
+                resumeOutcome = outcome
                 mutableResuming.value = true
+                resumeJob = scope.launch { resume(session, outcome) }.also { job ->
+                    // A resume cancelled by teardown must not leave a seek waiting on it.
+                    job.invokeOnCompletion { cause -> if (cause != null) outcome.completeExceptionally(cause) }
+                }
+                return
             }
-            start
         }
-        if (!resume) {
-            fail(error)
-            return
-        }
-        val session = requireNotNull(activeSession)
-        resumeJob = scope.launch { resume(session, requireNotNull(resumeOutcome)) }
+        fail(error)
     }
 
     /**
@@ -1033,13 +1053,17 @@ class RelaySessionController internal constructor(
                     val reply = SessionResumed.fromJson(
                         attempt.resumeSession(session.sessionId, requireNotNull(session.resumeToken)),
                     )
-                    val intent = playIntent
-                    catchUp(attempt, reply, intent)
-                    Triple(reply, media, intent)
+                    reply to media
                 } ?: throw SocketTimeoutException("resume attempt timed out after $RESUME_ATTEMPT_TIMEOUT_MILLIS ms")
-                if (!attempt.isOpen) throw IOException("the resumed connection dropped again")
-                val (reply, media, intent) = resumed
+                val (reply, media) = resumed
+                // The last checks, the catch-up and the install under the
+                // lock play/pause and a later loss take: no intent can go to
+                // the dead connection after the catch-up read it, and no loss
+                // of this one can go unseen.
                 val retired = synchronized(playbackStateLock) {
+                    if (!resumable() || resumeOutcome !== outcome) throw CancellationException("session retired")
+                    if (!attempt.isOpen) throw IOException("the resumed connection dropped again")
+                    catchUp(attempt, reply, playIntent)
                     control.also {
                         control = attempt
                         installed = true
@@ -1057,18 +1081,13 @@ class RelaySessionController internal constructor(
                     return
                 }
                 outcome.complete(reply)
-                // A play or pause made after the catch-up read its intent
-                // went to the dead connection.
-                val newest = playIntent
-                if (newest != null && newest != intent) {
-                    runCatching { if (newest == "paused") attempt.pause() else attempt.play() }
-                }
                 return
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (refused: RelayServerException) {
                 refusal = refused
             } catch (taken: SessionTakenOverException) {
+                takenOver = true
                 refusal = taken
             } catch (error: Throwable) {
                 lastError = error
@@ -1076,7 +1095,11 @@ class RelaySessionController internal constructor(
                 // Closed abnormally, never with 1000: the server may already
                 // have handed the session to this connection, and a normal
                 // close would end it there. An abnormal one holds it again.
-                if (!installed) attempt.close()
+                if (!installed) {
+                    attempt.close()
+                    // Another connection took the session over (4001): never taken back.
+                    if (attempt.takenOver) takenOver = true
+                }
             }
             if (refusal != null || takenOver) break
             if (asked && !renewed) {

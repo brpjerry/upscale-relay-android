@@ -91,6 +91,9 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   It switches Wi-Fi off, so run it detached (`nohup am instrument ... >
   /data/local/tmp/out.txt &`) when adb is wireless, and expect the tablet
   to come back under a new address if its Wi-Fi uses a randomized MAC.
+  The test restores Wi-Fi once the app notices the loss and expects playback
+  near the previous position, on the resumed session or on a new one opened
+  once the server has confirmed the old one released.
 - `SessionResumeDeviceTest` checks the cache-sized buffer target end to end
   and plays through a 45 s control-connection dropout on the same session.
   The control port goes through the server repo's stall proxy (`stall_proxy.py
@@ -101,10 +104,6 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   every test that leaves the player ends with `ActivityScenario.close()`
   failing ("Current state was null"): the portrait Activity it returns to is
   not shown over the keyguard. Unlock the tablet first.
-  It switches Wi-Fi off under a playing session until the app notices the
-  dead control connection, switches it back on, and expects playback to
-  resume near the same position on a new session, once the server has
-  confirmed the old one released.
 - The local-file tests need a 150 s clip in the debug app's files directory;
   without it they are skipped:
 

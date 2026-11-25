@@ -122,6 +122,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val resumeToken: String? = null,
         // The server that issued the token, when it named itself: the token goes to that one only.
         val serverId: String? = null,
+        // How long the server holds the session past the usual release (§1.2).
+        val graceMillis: Long = 0,
     )
     private val disposalMutex = Mutex()
     private val loggingMutex = Mutex()
@@ -3334,8 +3336,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
         // Stalled connection: mpv is starved and the downlink byte counter has
         // not moved. A healthy watermark pause keeps mpv's cache full, so
-        // requiring paused_for_cache avoids false positives.
-        if (transport.receivedBytes != lastReceivedBytes) {
+        // requiring paused_for_cache avoids false positives. A resume in
+        // progress bounds its own wait, and the window starts afresh once it
+        // ends, so the server has time to refill a buffer the dropout drained.
+        val resuming = controller?.resuming?.value == true
+        if (transport.receivedBytes != lastReceivedBytes || resuming) {
             lastReceivedBytes = transport.receivedBytes
             lastReceiveChangeAt = now
         } else if (
@@ -3343,10 +3348,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             state.sessionState == SessionState.PLAYING &&
             (seekIdleMillis == null || seekIdleMillis > 60_000) &&
             !state.paused && mpv.pausedForCache &&
-            reconnectJob?.isActive != true && restartJob?.isActive != true &&
-            // A resume in progress bounds this wait itself, and a reopen
-            // could reach the server no sooner than it can.
-            controller?.resuming?.value != true
+            reconnectJob?.isActive != true && restartJob?.isActive != true
         ) {
             lastReceiveChangeAt = now
             AppLog.w(TAG, "stall watchdog: no media for ${STALL_TIMEOUT_MILLIS / 1000}s while PLAYING")
@@ -3387,7 +3389,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             now - metricsStartedAt > 15_000
         if (
             steadyState && !state.paused && !state.directLocalFallback &&
-            state.reconnecting == null && reconnectJob?.isActive != true &&
+            state.reconnecting == null && reconnectJob?.isActive != true && !resuming &&
             restartJob?.isActive != true && seekJob?.isActive != true &&
             mpv.audioPtsSeconds > 0.0 && mpv.positionSeconds > 0.0 &&
             now - lastDriftResyncAt > DRIFT_RESYNC_COOLDOWN_MILLIS
@@ -3552,12 +3554,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun confirmPriorRelease(active: RelaySessionController) {
         val pending = unconfirmedRelease ?: return
         val sessionId = pending.sessionId
+        val issuingAddress = active.host == pending.host && active.port == pending.port
         try {
             active.awaitReleased(
                 sessionId,
+                // Another name for the server cannot take a held session over
+                // (the token stays with its address), so /status alone has to
+                // outlast the hold there.
+                timeoutMillis = RelaySessionController.RELEASE_CONFIRM_TIMEOUT_MILLIS +
+                    if (issuingAddress || pending.resumeToken == null) 0 else pending.graceMillis,
                 // Only to the host and port that issued it, never to another
                 // name for the server (PROTOCOL.md §1.1 step 0).
-                resumeToken = pending.resumeToken.takeIf { active.host == pending.host && active.port == pending.port },
+                resumeToken = pending.resumeToken.takeIf { issuingAddress },
                 issuerServerId = pending.serverId,
             )
         } catch (cancelled: CancellationException) {
@@ -3599,6 +3607,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         AppLog.i(TAG, "session $sessionId closed without the server's acknowledgement (${error.cause?.message}); it will be confirmed before the next session")
                         unconfirmedRelease = UnconfirmedRelease(
                             sessionId, current.host, current.port, current.resumeToken, current.sessionServerId,
+                            current.sessionGraceMillis,
                         )
                     } else {
                         cleanupFailure = error
