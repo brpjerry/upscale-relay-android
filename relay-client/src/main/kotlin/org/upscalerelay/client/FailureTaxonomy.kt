@@ -37,6 +37,8 @@ class TeardownUnconfirmedException(cause: Throwable) : IOException(
 fun classifyFailure(error: Throwable): FailureKind = when (error) {
     is MediaStalledException -> FailureKind.MEDIA_STALLED
     is TeardownUnconfirmedException -> FailureKind.TEARDOWN_UNCONFIRMED
+    // Another device's playback has the session now; taking it back is not a retry.
+    is SessionTakenOverException -> FailureKind.SERVER_REJECTED
     is RelayServerException -> if (error.code == "server_restart_required") {
         FailureKind.SERVER_RESTART_REQUIRED
     } else {

@@ -88,6 +88,19 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   switches the tablet's Wi-Fi off for a few seconds so the launch connect
   waits for the network, and always switches it back on.
 - `ConnectionLossDeviceTest` also uses the real relay and `-e auditMediaPath`.
+  It switches Wi-Fi off, so run it detached (`nohup am instrument ... >
+  /data/local/tmp/out.txt &`) when adb is wireless, and expect the tablet
+  to come back under a new address if its Wi-Fi uses a randomized MAC.
+- `SessionResumeDeviceTest` checks the cache-sized buffer target end to end
+  and plays through a 45 s control-connection dropout on the same session.
+  The control port goes through the server repo's stall proxy (`stall_proxy.py
+  --bind 0.0.0.0 18590:8590`; media stays direct on 8591), and the host stops
+  it once the test logs `READY_FOR_DROPOUT` (tag `SessionResumeTest`):
+  `systemctl --user kill -s USR1 relay-stall-proxy`, then `-s USR2` 45 s
+  later. Pass `-e auditHost <server> -e auditPort 18590`. On a locked tablet
+  every test that leaves the player ends with `ActivityScenario.close()`
+  failing ("Current state was null"): the portrait Activity it returns to is
+  not shown over the keyguard. Unlock the tablet first.
   It switches Wi-Fi off under a playing session until the app notices the
   dead control connection, switches it back on, and expects playback to
   resume near the same position on a new session, once the server has
@@ -208,7 +221,12 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
 - Media framing is read on a dedicated blocking thread with a 4 MiB socket
   receive buffer; no packet crosses the Compose/coroutine UI path.
 - The pre-mpv queue is capped at 256 MiB by bytes, not packet count. mpv's
-  forward demuxer cache is capped at 128 MiB.
+  forward demuxer cache is the "Cache size" setting (768 MB default, 256 MB
+  to 5 GB), and the server keeps it filled: `buffer_report.buffer_target_ms`
+  is how long the whole cache lasts at the bitrate mpv holds (PROTOCOL §5),
+  so a 4 Mbps passthrough stream asks for minutes. `files/phase4-latest.json`
+  has `cache_mib`, `buffer_target_ms` (asked) and `server_buffer_target_ms`
+  (confirmed at the open; null from a server that keeps 10 s).
 - The localhost socket send buffer is kept small so its hidden kernel queue
   cannot grow far beyond the measured application queues.
 - `buffer_report` is sent every 500 ms even when no packets arrive. It
@@ -248,6 +266,15 @@ adb shell "am instrument -w -e auditLocalFile audit-clip-150s.mp4 -e auditMediaP
   resumes after the tablet slept. A session still listed at the deadline, a
   server reporting `restart_required`, or one whose `/status` cannot be read
   blocks the replacement and surfaces an explicit cleanup failure.
+- A session opened on a server that advertises `session_resume` survives a
+  lost control connection (PROTOCOL §1.2): media and playback go on from the
+  buffer while the app reconnects with `resume_session`, quietly, until the
+  server's hold has certainly ended (about 150 s). Logcat shows
+  `control connection lost; resuming session <id>` and `control connection
+  resume ended (failure=null)`; `control_resuming` is in the telemetry. Only
+  a path that goes quiet keeps the media connections: switching Wi-Fi off
+  makes Android abort the sockets on it, and playback then reopens as
+  before, with the held session taken over and released first.
 - Initial playback and seeks use a 60-second inactivity deadline. Strictly
   advancing subtitle-index coverage for the current epoch extends it; stale
   or repeated progress ticks do not. `seek_ready` is only a flush acknowledgement.

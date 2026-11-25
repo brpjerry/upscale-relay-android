@@ -32,6 +32,8 @@ data class AppPreferences(
     val tenBitVideo: Boolean = false,
     // "Show HDR videos in HDR" (docs/HDR_OUTPUT.md); on wherever the display can.
     val hdrOutput: Boolean = true,
+    // mpv's cache, which the server keeps filled (PROTOCOL.md §5): one of CACHE_CHOICES_MIB.
+    val cacheMib: Int = CACHE_DEFAULT_MIB,
     val subtitlesEnabled: Boolean = true,
     val preferredSubtitle: String = "",
     val diagnosticsVisible: Boolean = false,
@@ -90,6 +92,7 @@ class AppPreferencesStore(context: Context) {
     suspend fun setTenBitVideo(value: Boolean) = set(Keys.TEN_BIT_VIDEO, value)
     suspend fun setHdrOutput(value: Boolean) = set(Keys.HDR_OUTPUT, value)
     suspend fun setPassthrough4k(value: Boolean) = set(Keys.PASSTHROUGH_4K, value)
+    suspend fun setCacheMib(value: Int) = set(Keys.CACHE_MIB, validCacheMib(value))
     suspend fun setSubtitlesEnabled(value: Boolean) = set(Keys.SUBTITLES_ENABLED, value)
     suspend fun setPreferredSubtitle(value: String) = set(Keys.PREFERRED_SUBTITLE, value)
     suspend fun setDiagnosticsVisible(value: Boolean) = set(Keys.DIAGNOSTICS_VISIBLE, value)
@@ -128,6 +131,7 @@ class AppPreferencesStore(context: Context) {
             preferences[Keys.TEN_BIT_VIDEO] = value.tenBitVideo
             preferences[Keys.HDR_OUTPUT] = value.hdrOutput
             preferences[Keys.PASSTHROUGH_4K] = value.passthrough4k
+            preferences[Keys.CACHE_MIB] = validCacheMib(value.cacheMib)
             preferences[Keys.SUBTITLES_ENABLED] = value.subtitlesEnabled
             preferences[Keys.PREFERRED_SUBTITLE] = value.preferredSubtitle
             preferences[Keys.DIAGNOSTICS_VISIBLE] = value.diagnosticsVisible
@@ -246,6 +250,7 @@ class AppPreferencesStore(context: Context) {
         tenBitVideo = preferences[Keys.TEN_BIT_VIDEO] ?: false,
         hdrOutput = preferences[Keys.HDR_OUTPUT] ?: true,
         passthrough4k = preferences[Keys.PASSTHROUGH_4K] ?: false,
+        cacheMib = validCacheMib(preferences[Keys.CACHE_MIB] ?: CACHE_DEFAULT_MIB),
         subtitlesEnabled = preferences[Keys.SUBTITLES_ENABLED] ?: true,
         preferredSubtitle = preferences[Keys.PREFERRED_SUBTITLE].orEmpty(),
         diagnosticsVisible = preferences[Keys.DIAGNOSTICS_VISIBLE] ?: false,
@@ -284,6 +289,7 @@ class AppPreferencesStore(context: Context) {
         val TEN_BIT_VIDEO = booleanPreferencesKey("ten_bit_video")
         val HDR_OUTPUT = booleanPreferencesKey("hdr_output")
         val PASSTHROUGH_4K = booleanPreferencesKey("passthrough_4k")
+        val CACHE_MIB = intPreferencesKey("cache_mib")
         val SUBTITLES_ENABLED = booleanPreferencesKey("subtitles_enabled")
         val PREFERRED_SUBTITLE = stringPreferencesKey("preferred_subtitle")
         val DIAGNOSTICS_VISIBLE = booleanPreferencesKey("diagnostics_visible")

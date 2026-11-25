@@ -6,7 +6,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -18,8 +17,11 @@ import org.upscalerelay.protocol.LibraryNode
 /**
  * Playback has to come back by itself after its control connection dies,
  * which is what a tablet that slept through a paused episode wakes up to.
- * The old session can no longer be asked to tear down, so the replacement
- * connection has to confirm with the server that it is gone and resume.
+ * A server that resumes sessions (PROTOCOL.md §1.2) takes the same session
+ * back when its media connections survived; otherwise the old session can
+ * no longer be asked to tear down, so the replacement connection has to
+ * confirm with the server that it is gone (taking it over and releasing it,
+ * for a session held for a resume) and open a new one at the position.
  *
  * Wi-Fi is switched off until the app notices the dead connection and then
  * back on; it is always switched back on. Needs the real relay:
@@ -33,6 +35,9 @@ class ConnectionLossDeviceTest {
     private val arguments get() = InstrumentationRegistry.getArguments()
     private val preferences by lazy { AppPreferencesStore(context) }
 
+    // Bugs caught: 0, False positives: 1
+    // (ActivityScenario.close() on a locked tablet: leaving the player recreates
+    // the Activity in portrait without setShowWhenLocked, and the scenario loses it.)
     @Test
     fun playbackResumesAfterItsControlConnectionDies() {
         check(context.packageName.endsWith(".debug")) {
@@ -70,7 +75,8 @@ class ConnectionLossDeviceTest {
 
                 setWifi(enabled = false)
                 await("the dead connection is noticed", model, 90_000) {
-                    it.reconnecting != null || it.error != null || it.sessionState == SessionState.FAILED
+                    it.resumingConnection || it.reconnecting != null || it.error != null ||
+                        it.sessionState == SessionState.FAILED
                 }
                 val lostAt = model.ui.value.userPositionSeconds()
                 setWifi(enabled = true)
@@ -78,13 +84,17 @@ class ConnectionLossDeviceTest {
                 await("playback resumed on a new session", model, 180_000) {
                     // The one outcome nothing retries: the hard stop this test is about.
                     check(it.error?.contains("did not confirm") != true) { "resume refused: ${it.error}" }
-                    it.reconnecting == null && it.error == null && !it.seeking &&
+                    it.reconnecting == null && it.error == null && !it.seeking && !it.resumingConnection &&
                         it.playerState == MpvPlaybackState.PLAYING &&
-                        it.session != null && it.session?.sessionId != lostSession &&
-                        it.mpvMetrics.positionSeconds > 0.0
+                        it.session != null && it.mpvMetrics.positionSeconds > 0.0
                 }
                 val resumedAt = model.ui.value.mpvMetrics.positionSeconds
-                assertNotEquals(lostSession, model.ui.value.session?.sessionId)
+                // The same session resumed, or a new one opened at the position.
+                android.util.Log.i(
+                    "ConnectionLossTest",
+                    "lost ${lostSession}, playing ${model.ui.value.session?.sessionId}: " +
+                        if (model.ui.value.session?.sessionId == lostSession) "resumed" else "reopened",
+                )
                 assertTrue(
                     "lost at ${lostAt.toInt()} s, resumed at ${resumedAt.toInt()} s",
                     resumedAt > lostAt - TOLERANCE_SECONDS && resumedAt < lostAt + TOLERANCE_SECONDS,
