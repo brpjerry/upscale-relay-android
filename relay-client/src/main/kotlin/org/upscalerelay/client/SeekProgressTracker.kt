@@ -31,6 +31,12 @@ internal class SeekProgressTracker(private val nanoTime: () -> Long = System::na
     @Synchronized
     fun idleMillis(): Long? = epoch?.let { (nanoTime() - advancedAt).coerceAtLeast(0) / 1_000_000 }
 
+    /** Starts the current epoch's wait afresh: nothing could arrive while the connection was being resumed. */
+    @Synchronized
+    fun refresh() {
+        if (epoch != null) advancedAt = nanoTime()
+    }
+
     @Synchronized
     fun clear() {
         epoch = null

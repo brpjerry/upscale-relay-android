@@ -26,6 +26,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.upscalerelay.protocol.BufferTarget
 import org.upscalerelay.protocol.Capabilities
 import org.upscalerelay.protocol.DisplaySize
 import org.upscalerelay.protocol.DisplayTarget
@@ -70,6 +71,15 @@ internal class ControlChannel(
     private lateinit var webSocket: WebSocket
 
     /**
+     * The server closed this connection with 4001: another connection
+     * resumed its session (§1.2). That session is lost to this client, and
+     * taking it back would only start a tug of war.
+     */
+    @Volatile
+    var takenOver: Boolean = false
+        private set
+
+    /**
      * Invoked (from OkHttp's reader thread) with the server's loading text on
      * every session_progress keepalive, and with null once the pending open
      * resolves. Each keepalive also refreshes the open_session inactivity
@@ -82,9 +92,17 @@ internal class ControlChannel(
     @Volatile
     var onSeekProgress: ((SeekProgress) -> Unit)? = null
 
+    /** Neither closed here nor lost. */
+    val isOpen: Boolean
+        get() = !closed.get() && terminalError.get() == null
+
     suspend fun connect(display: DisplaySize): Capabilities {
         val request = Request.Builder().url(controlUrl()).build()
-        webSocket = (webSocketFactory ?: client).newWebSocket(request, Listener())
+        // A redirect could take the connection, and a resume token sent on
+        // it, to another host or port (§1.2): an upgrade answered with one
+        // fails instead.
+        val factory = webSocketFactory ?: client.newBuilder().followRedirects(false).build()
+        webSocket = factory.newWebSocket(request, Listener())
         deadline(15_000, "control connect") { opened.await() }
         val reply = request(
             expectedType = "capabilities",
@@ -157,6 +175,8 @@ internal class ControlChannel(
         requestCachedAttachments: Boolean,
         highBitDepth: HighBitDepth? = null,
         displayTarget: DisplayTarget? = null,
+        bufferTargetMillis: Long? = null,
+        resume: Boolean = false,
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
@@ -172,6 +192,8 @@ internal class ControlChannel(
             requestCachedAttachments = requestCachedAttachments,
             highBitDepth = highBitDepth,
             displayTarget = displayTarget,
+            bufferTargetMillis = bufferTargetMillis,
+            resume = resume,
         ),
     )
 
@@ -184,6 +206,8 @@ internal class ControlChannel(
         resizeAlgorithm: String?,
         highBitDepth: HighBitDepth? = null,
         displayTarget: DisplayTarget? = null,
+        bufferTargetMillis: Long? = null,
+        resume: Boolean = false,
     ): JsonObject = request(
         expectedType = "session_opened",
         timeoutMillis = 240_000,
@@ -246,6 +270,22 @@ internal class ControlChannel(
             put("fit_mode", fitMode)
             if (!resizeAlgorithm.isNullOrBlank()) put("resize_algorithm", resizeAlgorithm)
             putColorRequest(highBitDepth, displayTarget)
+            putSessionRequest(bufferTargetMillis, resume)
+        },
+    )
+
+    /**
+     * Takes over a session held for a resume (§1.2), in place of
+     * open_session on this connection. A refusal is a [RelayServerException]
+     * with code `resume_failed`.
+     */
+    suspend fun resumeSession(sessionId: String, resumeToken: String): JsonObject = request(
+        expectedType = "session_resumed",
+        timeoutMillis = RESUME_REPLY_TIMEOUT_MILLIS,
+        message = buildJsonObject {
+            put("type", "resume_session")
+            put("session_id", sessionId)
+            put("resume_token", resumeToken)
         },
     )
 
@@ -330,9 +370,11 @@ internal class ControlChannel(
         }
     }
 
-    fun bufferReport(bufferedMillis: Long) = send(buildJsonObject {
+    /** [targetMillis] replaces the session's buffer target from this report on (§5); null keeps it. */
+    fun bufferReport(bufferedMillis: Long, targetMillis: Long? = null) = send(buildJsonObject {
         put("type", "buffer_report")
         put("buffered_ms", bufferedMillis.coerceAtLeast(0))
+        BufferTarget.normalize(targetMillis)?.let { put("buffer_target_ms", it) }
     })
 
     suspend fun teardown() = teardownMutex.withLock {
@@ -369,7 +411,7 @@ internal class ControlChannel(
             "request for '$expectedType' is already pending"
         }
         try {
-            if (message["type"]?.jsonPrimitive?.content == "open_session") {
+            if (message["type"]?.jsonPrimitive?.content in SESSION_REQUESTS) {
                 serverSessionRequested.set(true)
             }
             lastActivityNanos.set(System.nanoTime())
@@ -494,8 +536,11 @@ internal class ControlChannel(
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             webSocket.close(code, reason)
+            if (code == CLOSE_SESSION_TAKEN_OVER) takenOver = true
             if (!teardownAcknowledged.get()) {
-                fail(if (code == 1011 && reason.contains("restart required", ignoreCase = true)) {
+                fail(if (code == CLOSE_SESSION_TAKEN_OVER) {
+                    SessionTakenOverException()
+                } else if (code == 1011 && reason.contains("restart required", ignoreCase = true)) {
                     RelayServerException("server_restart_required", "Server native cleanup failed; restart the server")
                 } else {
                     IOException("control channel closed: $code $reason")
@@ -513,15 +558,25 @@ internal class ControlChannel(
 
         private fun fail(error: Throwable) {
             if (closed.get() || teardownAcknowledged.get() || !terminalError.compareAndSet(null, error)) return
+            // The owner hears of the loss before any waiter does: a seek
+            // whose reply this connection will never carry must find the
+            // resume (§1.2) already under way when its wait fails.
+            if (!closed.get()) onFailure(error)
             if (!opened.isCompleted) opened.completeExceptionally(error)
             pending.values.forEach { it.deferred.completeExceptionally(error) }
             pending.clear()
-            if (!closed.get()) onFailure(error)
         }
     }
 }
 
 private const val KEEPALIVE_POLL_MILLIS = 2_000L
+private const val RESUME_REPLY_TIMEOUT_MILLIS = 30_000L
+
+/** Requests that give this connection a server session, which a teardown must then release. */
+private val SESSION_REQUESTS = setOf("open_session", "resume_session")
+
+/** The server closed a connection whose session another connection resumed (§1.2). */
+internal const val CLOSE_SESSION_TAKEN_OVER = 4001
 internal const val TEARDOWN_TIMEOUT_MILLIS = 30_000L
 private data class DeadlineResult<T>(val value: T)
 
@@ -531,6 +586,9 @@ private data class PendingReply(
 )
 
 class RelayServerException(val code: String, message: String) : IOException("$code: $message")
+
+/** Another control connection resumed this one's session (§1.2): it is not this client's any more. */
+class SessionTakenOverException : IOException("The session was resumed on another connection")
 
 /** The server answered a GET, but not with what was asked for. */
 class RelayHttpStatusException(what: String, val status: Int) : IOException("$what failed with HTTP $status")
@@ -546,6 +604,8 @@ internal fun serverFileOpenMessage(
     requestCachedAttachments: Boolean,
     highBitDepth: HighBitDepth? = null,
     displayTarget: DisplayTarget? = null,
+    bufferTargetMillis: Long? = null,
+    resume: Boolean = false,
 ): JsonObject = buildJsonObject {
     require(!requestCachedAttachments || requestMuxedAuxTracks) {
         "cached attachments require muxed auxiliary tracks"
@@ -569,6 +629,17 @@ internal fun serverFileOpenMessage(
         put("aux_attachments", if (requestCachedAttachments) "cached" else "embedded")
     }
     putColorRequest(highBitDepth, displayTarget)
+    putSessionRequest(bufferTargetMillis, resume)
+}
+
+/**
+ * open_session's buffer target (§5), sent as the server applies it, and its
+ * request to be held through a lost control connection (§1.2; the caller has
+ * checked capabilities.session_resume).
+ */
+private fun JsonObjectBuilder.putSessionRequest(bufferTargetMillis: Long?, resume: Boolean) {
+    BufferTarget.normalize(bufferTargetMillis)?.let { put("buffer_target_ms", it) }
+    if (resume) put("resume", true)
 }
 
 /**

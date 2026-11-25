@@ -98,6 +98,11 @@ data class Capabilities(
      * applies Dolby Vision and HDR10+ for it.
      */
     val displayMapping: Boolean = false,
+    /**
+     * open_session may ask the server to hold the session through a lost
+     * control connection, and resume_session take it over (§1.2).
+     */
+    val sessionResume: Boolean = false,
 ) {
     val phaseOneModel: String
         get() = models.firstOrNull { it.name != "passthrough" }?.name ?: "passthrough"
@@ -153,6 +158,7 @@ data class Capabilities(
                     ?.takeIf(SERVER_ID::matches),
                 highBitDepth = value["high_bit_depth"].wireBoolean(),
                 displayMapping = value["display_mapping"].wireBoolean(),
+                sessionResume = value["session_resume"].wireBoolean(),
             )
         }
     }
@@ -458,7 +464,27 @@ data class SessionInfo(
      * higher resolution videos" probed it through /media. Set by the client.
      */
     val sourceSize: VideoSize? = null,
+    /**
+     * The client buffer the server keeps topped off (§5), as it confirmed it.
+     * Null from a server that predates the field: it keeps
+     * [BufferTarget.DEFAULT_MILLIS] and ignores updates.
+     */
+    val bufferTargetMillis: Long? = null,
+    /**
+     * Lets a new control connection take this session over (§1.2); comes
+     * only with [resumeGraceSeconds], and only when open_session asked for
+     * resume. A secret: never log, persist or put it in exception text.
+     */
+    val resumeToken: String? = null,
+    /** How long the server holds the session once it notices its connection is gone. */
+    val resumeGraceSeconds: Double? = null,
 ) {
+    /** Never prints the bearer tokens a data class would. */
+    override fun toString(): String =
+        "SessionInfo(sessionId=$sessionId, epoch=$epoch, source=$source, model=$model, " +
+            "downlink=${downlinkWidth}x$downlinkHeight $downlinkCodec, auxTracks=$auxTracks, " +
+            "bufferTargetMillis=$bufferTargetMillis, resumable=${resumeToken != null})"
+
     /**
      * An HDR source: an HDR downlink, or a mapped one, whose epoch may be SDR
      * for an SDR display. Either way it streams at 10 bits under "hdr" and
@@ -505,6 +531,7 @@ data class SessionInfo(
             } else {
                 null
             }
+            val resume = resumeFields(value)
             return SessionInfo(
             sessionId = value.requiredString("session_id"),
             mediaPort = value.requiredInt("media_port"),
@@ -546,7 +573,18 @@ data class SessionInfo(
             downlinkDolbyVision = value["downlink_dolby_vision"].wireBoolean(),
             sourceBitDepth = value["source_bit_depth"].wireInt()?.takeIf { it > 0 },
             downlinkMapping = DownlinkMapping.fromJson(value["downlink_mapping"]),
+            bufferTargetMillis = value["buffer_target_ms"].wireLong()?.takeIf { it > 0 },
+            resumeToken = resume?.first,
+            resumeGraceSeconds = resume?.second,
         )
+        }
+
+        /** resume_token and resume_grace_s, both or neither (§1.2). */
+        private fun resumeFields(value: JsonObject): Pair<String, Double>? {
+            val token = (value["resume_token"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?.takeIf { it.isNotEmpty() } ?: return null
+            val grace = value["resume_grace_s"].wireNumber()?.takeIf { it > 0 } ?: return null
+            return token to grace
         }
 
         private fun parseAttachmentManifest(value: kotlinx.serialization.json.JsonElement?): List<AttachmentManifestEntry> {
@@ -569,6 +607,50 @@ data class SessionInfo(
                 entry
             }
         }
+    }
+}
+
+/**
+ * session_resumed: the session is on this connection now, and this is what
+ * the client missed while it was held (§1.2).
+ */
+data class SessionResumed(
+    val sessionId: String,
+    /** "open", "playing", "paused" or "closed"; null when the server did not say. */
+    val state: String?,
+    val epoch: Int,
+    /** False when that media connection is gone; null when the server did not say. */
+    val uplinkAttached: Boolean?,
+    val downlinkAttached: Boolean?,
+    val bufferTargetMillis: Long?,
+    /** The reply itself: it describes the current epoch as a seek_ready would (SessionInfo.describedBy). */
+    val message: JsonObject,
+) {
+    /**
+     * A seek_ready for [seekEpoch], which the server already had when it
+     * resumed: carrying this reply's colour only when that is still the
+     * current epoch.
+     */
+    fun seekReadyFor(seekEpoch: Int): JsonObject = buildJsonObject {
+        put("type", "seek_ready")
+        put("epoch", seekEpoch)
+        if (seekEpoch == epoch) {
+            listOf("downlink_color", "downlink_mapping").forEach { field ->
+                message[field]?.let { put(field, it) }
+            }
+        }
+    }
+
+    companion object {
+        fun fromJson(value: JsonObject): SessionResumed = SessionResumed(
+            sessionId = value.requiredString("session_id"),
+            state = (value["state"] as? JsonPrimitive)?.takeIf { it.isString }?.content,
+            epoch = value.requiredInt("epoch"),
+            uplinkAttached = (value["uplink_attached"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull,
+            downlinkAttached = (value["downlink_attached"] as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull,
+            bufferTargetMillis = value["buffer_target_ms"].wireLong()?.takeIf { it > 0 },
+            message = value,
+        )
     }
 }
 
@@ -618,6 +700,9 @@ private fun JsonElement?.wireBoolean(): Boolean =
 
 private fun JsonElement?.wireInt(): Int? =
     (this as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
+
+private fun JsonElement?.wireLong(): Long? =
+    (this as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
 
 private fun JsonElement?.wireNumber(): Double? =
     (this as? JsonPrimitive)?.takeUnless { it.isString }?.doubleOrNull?.takeIf { it.isFinite() }

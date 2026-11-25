@@ -17,6 +17,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -130,6 +131,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -1114,6 +1116,7 @@ private fun SettingsDestination(viewModel: RelayViewModel, state: RelayUiState) 
                         }
                     TenBitVideoToggle(viewModel, state)
                     HdrOutputToggle(viewModel, state)
+                    CacheSizeSetting(viewModel, state, MaterialTheme.typography.labelLarge)
                     Text("Framing", style = MaterialTheme.typography.labelLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RelaySessionController.FIT_MODES.forEach { mode ->
@@ -1421,6 +1424,41 @@ private fun TenBitVideoToggle(viewModel: RelayViewModel, state: RelayUiState) {
     )
 }
 
+/**
+ * "Cache size" (PROTOCOL.md §5), in Settings and the player's sheet, as on
+ * the desktop. A change applies as playback goes on: nothing restarts.
+ */
+@Composable
+private fun CacheSizeSetting(viewModel: RelayViewModel, state: RelayUiState, labelStyle: TextStyle) {
+    Text("Cache size", style = labelStyle)
+    Text(
+        "How much video is held in memory ahead of playback. The server keeps it filled, so " +
+            "lower-bitrate video is buffered further ahead and rides out longer network dropouts.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        CACHE_CHOICES_MIB.forEach { mib ->
+            FilterChip(
+                selected = state.cacheMib == mib,
+                onClick = { viewModel.setCacheMib(mib) },
+                label = { Text(formatCacheSize(mib) + if (mib == CACHE_DEFAULT_MIB) " (default)" else "") },
+            )
+        }
+    }
+    val session = state.relaySession
+    val hint = cacheSizeHint(
+        state.cacheMib,
+        state.capabilities,
+        state.qualityTier,
+        // A session this server opened confirmed no target: it predates them.
+        serverKeepsFixedBuffer = session != null && session.bufferTargetMillis == null,
+    )
+    if (hint.isNotEmpty()) {
+        Text(hint, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
 /** "Show HDR videos in HDR" (docs/HDR_OUTPUT.md), in Settings and the player's sheet. */
 @Composable
 private fun HdrOutputToggle(viewModel: RelayViewModel, state: RelayUiState) {
@@ -1704,7 +1742,29 @@ private fun PlayerScreen(
                     appearAfterMillis = 0,
                 )
                 state.seeking -> LoadingOverlay("Seeking…", detail = seekProgressDetail(state))
-                buffering -> LoadingOverlay("Buffering…")
+                buffering -> LoadingOverlay(
+                    "Buffering…",
+                    detail = if (state.resumingConnection) "Reconnecting to the server" else null,
+                )
+                // The control connection is being resumed (PROTOCOL.md §1.2)
+                // while playback goes on from the buffer: said quietly, in a
+                // corner, and never as an error.
+                state.resumingConnection -> Box(
+                    Modifier
+                        .fillMaxSize()
+                        .windowInsetsPadding(playerControlInsets())
+                        .padding(16.dp),
+                    contentAlignment = Alignment.TopStart,
+                ) {
+                    Text(
+                        "Reconnecting to the server…",
+                        Modifier
+                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
             }
         }
     }
@@ -2540,6 +2600,7 @@ private fun PlaybackSettingsSheet(viewModel: RelayViewModel, state: RelayUiState
                     }
                 TenBitVideoToggle(viewModel, state)
                 HdrOutputToggle(viewModel, state)
+                CacheSizeSetting(viewModel, state, MaterialTheme.typography.titleMedium)
                 Text("Framing", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RelaySessionController.FIT_MODES.forEach { mode ->

@@ -139,4 +139,17 @@ class MpvPlayerEngineTest {
         title: String,
         codec: String,
     ) = MpvTrack(id, type, language, title, codec, selected = false, external = false)
+
+    // Bugs caught: 0, False positives: 0
+    @Test
+    fun `the cache state gives bytes and duration from one notification`() {
+        // As mpv prints the node (abridged).
+        val state = """{"seekable-ranges":[],"bof-cached":false,"eof-cached":false,"fw-bytes":104857600,""" +
+            """"file-cache-bytes":0,"cache-end":512.25,"cache-duration":20.5,"underrun":false,"idle":true}"""
+        assertEquals(104_857_600L to 20_500L, parseCacheState(state))
+        // mpv has not measured a duration yet, or the cache is off.
+        assertEquals(null, parseCacheState("""{"fw-bytes":4096,"underrun":true}"""))
+        assertEquals(null, parseCacheState("{}"))
+        assertEquals(0L to 1_000_000L, parseCacheState("""{"fw-bytes":0,"cache-duration":1e3}"""))
+    }
 }

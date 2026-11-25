@@ -30,6 +30,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     private val mutableState = MutableStateFlow(MpvPlaybackState.CREATED)
     val state: StateFlow<MpvPlaybackState> = mutableState.asStateFlow()
     private var initialized = false
+
+    /** mpv's demuxer cache (setCacheSize); 768 MiB, the "Cache size" default, until the app sets it. */
+    private var cacheBytes = DEFAULT_CACHE_BYTES
     private var initializationStarted = false
     private var closed = false
     private var attachedSurface: Surface? = null
@@ -303,6 +306,18 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         if (initialized && !closed) MPVLib.setPropertyDouble("panscan", value.coerceIn(0.0, 1.0))
     }
 
+    /**
+     * mpv's demuxer cache: how much is held in memory ahead of playback, for
+     * relay and local playback alike. mpv applies it to the file playing as
+     * soon as it reads on; a relay stream's server buffer follows at the
+     * next buffer report (the app sizes it from [MpvMetrics.cacheForwardBytes]).
+     */
+    fun setCacheSize(bytes: Long) = synchronized(lock) {
+        require(bytes > 0)
+        cacheBytes = bytes
+        if (initialized && !closed) MPVLib.setPropertyString("demuxer-max-bytes", bytes.toString())
+    }
+
     fun setDeband(enabled: Boolean) = synchronized(lock) {
         if (initialized && !closed) MPVLib.setPropertyString("deband", if (enabled) "yes" else "no")
     }
@@ -496,7 +511,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "cache" to "yes",
             "cache-pause" to "yes",
             "demuxer-readahead-secs" to "20",
-            "demuxer-max-bytes" to (128L * 1024 * 1024).toString(),
+            // With the cache on, mpv reads ahead as far as this allows
+            // (cache-secs, effectively unlimited, overrides the readahead).
+            "demuxer-max-bytes" to cacheBytes.toString(),
             "demuxer-max-back-bytes" to "0",
             "network-timeout" to "10",
             "vd-lavc-dr" to "yes",
@@ -685,6 +702,8 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
         metrics = metrics.copy(
             bitrateBitsPerSecond = 0,
             cacheDurationMillis = 0,
+            cacheForwardBytes = 0,
+            cacheStateDurationMillis = 0,
             cacheBufferingPercent = 0,
             pausedForCache = false,
             positionSeconds = 0.0,
@@ -702,6 +721,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "video-params/hw-pixelformat",
             "video-params/gamma",
             "video-params/primaries",
+            // A node, delivered as JSON: its bytes and duration from one
+            // notification, since separate properties update apart.
+            "demuxer-cache-state",
         )
         val integerProperties = listOf(
             "video-params/w",
@@ -780,6 +802,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
             "video-params/hw-pixelformat" -> metrics.copy(videoHwPixelFormat = value)
             "video-params/gamma" -> metrics.copy(videoGamma = value)
             "video-params/primaries" -> metrics.copy(videoPrimaries = value)
+            "demuxer-cache-state" -> parseCacheState(value)?.let { (bytes, millis) ->
+                metrics.copy(cacheForwardBytes = bytes, cacheStateDurationMillis = millis)
+            } ?: metrics
             else -> metrics
         }
     }
@@ -882,6 +907,9 @@ class MpvPlayerEngine(context: Context) : MPVLib.EventObserver, MPVLib.LogObserv
     }
 
     companion object {
+        /** mpv's demuxer cache until the app sets the "Cache size" setting: its default. */
+        const val DEFAULT_CACHE_BYTES = 768L * 1024 * 1024
+
         private const val TAG = "RelayMpv"
 
         /** Cap on the pause hold, so a silent file can never strand playback. */
@@ -1022,6 +1050,13 @@ data class MpvMetrics(
     val subtitleDelaySeconds: Double = 0.0,
     val audioPtsSeconds: Double = 0.0,
     val cacheBufferingPercent: Int = 0,
+    /**
+     * What mpv's cache holds ahead of playback, in bytes and in time, from
+     * one demuxer-cache-state notification: together they give the bitrate
+     * of what it holds, and so how long the whole cache lasts.
+     */
+    val cacheForwardBytes: Long = 0,
+    val cacheStateDurationMillis: Long = 0,
     val seeking: Boolean = false,
     val coreIdle: Boolean = true,
     /**
@@ -1036,6 +1071,21 @@ data class MpvMetrics(
     val videoPrimaries: String = "",
     val videoSignalPeak: Double = 0.0,
 )
+
+private val CACHE_FORWARD_BYTES = Regex("\"fw-bytes\"\\s*:\\s*(\\d+)")
+private val CACHE_DURATION = Regex("\"cache-duration\"\\s*:\\s*([0-9.eE+-]+)")
+
+/**
+ * demuxer-cache-state's forward bytes and cached duration, from the JSON mpv
+ * prints the node as; null when either is missing (no cache, or mpv has not
+ * measured a duration yet).
+ */
+internal fun parseCacheState(json: String): Pair<Long, Long>? {
+    val bytes = CACHE_FORWARD_BYTES.find(json)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+    val seconds = CACHE_DURATION.find(json)?.groupValues?.get(1)?.toDoubleOrNull()
+        ?.takeIf { it.isFinite() && it >= 0 } ?: return null
+    return bytes to (seconds * 1000).toLong()
+}
 
 /** The picture's description cleared, as before the first frame of a stream. */
 internal fun MpvMetrics.withoutVideoParams(): MpvMetrics = copy(

@@ -191,7 +191,17 @@ release.yml` builds and publishes the signed APK with those notes.
 - Keep the dedicated blocking downlink and loopback threads. No media packet
   may cross the Compose/coroutine UI path.
 - The pre-mpv queue is bounded by bytes (256 MiB), mpv's forward cache by
-  bytes (128 MiB). Backpressure must stop producers, never grow memory.
+  bytes: the "Cache size" setting (768 MB default, 256 MB-5 GB, the
+  desktop's choices; `MpvPlayerEngine.setCacheSize`, applied without a
+  restart). Backpressure must stop producers, never grow memory.
+- **The server keeps the cache filled (PROTOCOL.md §5).** Every open sends
+  `buffer_target_ms` as the cache's length at the tier's nominal bitrate
+  (`cacheTargetEstimateMillis`), and every `buffer_report` sends the cache
+  size over the bitrate mpv holds (`cacheTargetMillis`, from one
+  `demuxer-cache-state` notification's `fw-bytes` and `cache-duration`;
+  separate properties update apart). The target sizes mpv's cache only; the
+  pre-mpv queue stays slack. A session whose `session_opened` confirmed no
+  target is on a server that keeps 10 s, and the setting's hint says so.
 - **No replacement session until the server has confirmed the previous one
   released.** Teardown waits for the server's `closed` acknowledgement; a
   state notification, EOF or timeout is not confirmed native cleanup. When the
@@ -212,12 +222,47 @@ release.yml` builds and publishes the signed APK with those notes.
   connection whose session id was never learned all remain the hard stop
   (`cleanupFailure`). An unreachable server settles nothing and the question
   stays open for the next connection. Any new place that opens a session must
-  call `confirmPriorRelease` first.
+  call `confirmPriorRelease` first. A session opened for a resume is held
+  for its grace period (120 s) past that 60 s, so `UnconfirmedRelease` keeps
+  its resume token (in memory only, never logged) and `awaitReleased` first
+  takes it over and tears it down on a connection of its own (§1.1 step 0;
+  the controller's own connection is still needed for the next open). The
+  token goes only to the host and port that issued it and a server with the
+  issuer's `server_id`; a refused takeover leaves the verdict to `/status`.
 - Stop and await the player's command queue before retiring loopback,
   external-media, font or HDR relay owners. Native initialize/destroy run off
   Main and preserve the process-global JNI ownership barrier.
 - Seek inactivity is extended only by advancing subtitle-index coverage for
-  the current epoch. `seek_ready` acknowledges the flush, not playable media.
+  the current epoch, and while the control connection is being resumed
+  (nothing can arrive then; the resume bounds that wait). `seek_ready`
+  acknowledges the flush, not playable media.
+- **A lost control connection is resumed, not failed, when the session
+  allows it (PROTOCOL.md §1.2).** Every open asks for `resume` where
+  `capabilities.session_resume` says so. `RelaySessionController.
+  onControlFailure` then keeps the downlink, queue, loopback and uplink
+  running, so mpv plays on from the buffer, and `resume` reconnects:
+  `hello`, then `resume_session` with the token, each attempt bounded at
+  10 s, with 0.5-5 s backoff, until the server's hold has certainly ended
+  (`resume_grace_s` plus its 30 s heartbeat window, renewed once per outage
+  after an attempt that sent `resume_session`) or it refuses. This is the
+  one timer-driven reconnect, and it is allowed because it is bounded by the
+  hold and says nothing while it runs: the player shows a quiet
+  "Reconnecting to the server…" note (`resumingConnection`), never an
+  error. A network appearing makes the next attempt at once
+  (`networkAvailable`). The token goes only to a reconnect whose
+  capabilities still advertise `session_resume` and name the issuing
+  `server_id`, and the WebSocket refuses redirects. An abandoned attempt is
+  cancelled, never closed with 1000, which would end a session the server
+  may already have handed it. Catch-up: a seek whose `seek_ready` never came
+  is answered by `session_resumed.epoch` when the server had it and sent
+  again when it did not (`seekReady`); the newest play/pause is sent when
+  the server's state differs. Buffer reports pause meanwhile. A media
+  connection `session_resumed` reports gone, a refusal, or the deadline
+  fail the session as a lost connection always did, and the ViewModel
+  reopens as before; a 4001 close (another connection took the session)
+  fails it as rejected and drops the token. `ControlChannel` tells its owner
+  of a loss before it fails the waiters, so a waiting seek finds the resume
+  already under way.
 
 - **Read where the user is with `RelayUiState.userPositionSeconds()`**, never
   `mpvMetrics.positionSeconds`, for anything that moves relative to it or
@@ -421,7 +466,10 @@ release.yml` builds and publishes the signed APK with those notes.
   (or run through `libraryAction`), never from the `controller` field
   directly: that is what waits out the connect in flight.
 - **Reconnects are made on demand, never on a timer, and there is no setting
-  for them — nor for connecting at launch, which always happens, quietly.** No retry loops, attempt counters or backoff. A connection is
+  for them — nor for connecting at launch, which always happens, quietly.** No retry loops, attempt counters or backoff,
+  except the bounded, silent session resume above. The rule exists because
+  timer-driven reconnects once produced a stream of error messages; nothing
+  automatic may report an error. A connection is
   re-made when something makes it worth trying: the user needs the server
   (`connectionForAction`, which may retry a failed request once on a fresh
   connection), a live connection was seen to die, the app came to the

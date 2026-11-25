@@ -33,6 +33,7 @@ class BackupCodecTest {
         debandEnabled = true,
         tenBitVideo = true,
         hdrOutput = false,
+        cacheMib = 2048,
         subtitlesEnabled = false,
         preferredSubtitle = "eng\u001FSigns",
         diagnosticsVisible = true,
@@ -122,7 +123,7 @@ class BackupCodecTest {
               "format": "${BackupCodec.FORMAT}",
               "version": 1,
               "connection": { "host": "  ", "port": 70000 },
-              "playbackDefaults": { "fitMode": "stretch" },
+              "playbackDefaults": { "fitMode": "stretch", "cacheMib": 1000 },
               "player": { "interpolationScaler": "bogus", "playbackHistoryLimit": 99999 },
               "library": { "librarySort": "SIZE", "lastDestination": "NOWHERE" }
             }
@@ -131,6 +132,7 @@ class BackupCodecTest {
         assertEquals(populated.host, result.host)
         assertEquals(populated.port, result.port)
         assertEquals(populated.fitMode, result.fitMode)
+        assertEquals(populated.cacheMib, result.cacheMib)
         assertEquals(populated.interpolationScaler, result.interpolationScaler)
         assertEquals(MAX_POSITIONS_LIMIT, result.playbackHistoryLimit)
         assertEquals(populated.librarySort, result.librarySort)

@@ -112,7 +112,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     private var unconfirmedRelease: UnconfirmedRelease? = null
 
-    private class UnconfirmedRelease(val sessionId: String, val host: String, val port: Int)
+    private class UnconfirmedRelease(
+        val sessionId: String,
+        val host: String,
+        val port: Int,
+        // A session opened for a resume (PROTOCOL.md §1.2) is held past the
+        // release wait unless the next connection takes it over and tears it
+        // down with this. In memory only: a secret, never logged or saved.
+        val resumeToken: String? = null,
+        // The server that issued the token, when it named itself: the token goes to that one only.
+        val serverId: String? = null,
+        // How long the server holds the session past the usual release (§1.2).
+        val graceMillis: Long = 0,
+    )
     private val disposalMutex = Mutex()
     private val loggingMutex = Mutex()
     private val actionErrors = CoroutineExceptionHandler { _, error ->
@@ -389,6 +401,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 networkEpoch.update { it + 1 }
+                // A session being resumed tries again now rather than after
+                // its backoff: the network it lacked is back.
+                controller?.networkAvailable()
                 // A restored network is the moment to re-make whatever its
                 // absence broke: Wi-Fi often re-associates seconds after the
                 // wake-triggered connect has already failed.
@@ -477,6 +492,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         // snapshot must not turn back a switch whose reload
                         // is under way.
                         hdrOutput = if (firstLoad) value.hdrOutput else state.hdrOutput,
+                        // And for the cache size, which the engine and the
+                        // buffer reports read from the state.
+                        cacheMib = if (firstLoad) value.cacheMib else state.cacheMib,
                         qualityTier = value.qualityTier,
                         fitMode = value.fitMode,
                         resizeAlgorithm = value.resizeAlgorithm,
@@ -521,6 +539,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 persistedLibraryPath = value.lastLibraryPath
                 syncFileLogging(value.fileLoggingEnabled)
                 playerEngine.setDeband(value.debandEnabled)
+                playerEngine.setCacheSize(mutableUi.value.cacheMib * MIB)
                 playerEngine.setVideoSyncPreferences(
                     displayResample = value.displayResampleSync,
                     interpolation = value.interpolationEnabled,
@@ -761,6 +780,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * "Cache size": mpv's cache, which the server keeps filled (PROTOCOL.md
+     * §5). No restart: mpv resizes as it plays, and the server's buffer
+     * target follows at the next buffer report. Saved from the main thread,
+     * so quick changes reach DataStore in the order they were made.
+     */
+    fun setCacheMib(value: Int) {
+        val mib = validCacheMib(value)
+        if (mutableUi.value.cacheMib == mib) return
+        mutableUi.update { it.copy(cacheMib = mib) }
+        playerEngine.setCacheSize(mib * MIB)
+        viewModelScope.launch(actionErrors) { preferences.setCacheMib(mib) }
+    }
+
+    /**
      * "Use passthrough for 4K or higher resolution videos": restarts only a
      * stream whose model it changes (passthrough4kChangesStream).
      */
@@ -903,6 +936,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         fileLoggingEnabled = restored.fileLoggingEnabled,
                         passthrough4k = restored.passthrough4k,
                         hdrOutput = restored.hdrOutput,
+                        cacheMib = restored.cacheMib,
                         backupStatus = BackupStatus(
                             "Restored all settings and ${restored.playbackPositions.size} " +
                                 "watch-history ${entryWord(restored.playbackPositions.size)}. " +
@@ -911,6 +945,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 syncFileLogging(restored.fileLoggingEnabled)
+                playerEngine.setCacheSize(restored.cacheMib * MIB)
             }.onFailure { error ->
                 AppLog.e(TAG, "backup import failed: ${error.message}")
                 mutableUi.update {
@@ -1688,6 +1723,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         highBitDepth = downlinkDepth(landscape),
                         displayTarget = displayTarget(landscape),
                         passthrough4k = landscape.passthrough4k,
+                        bufferTargetMillis = cacheTargetEstimateMillis(
+                            landscape.cacheMib, landscape.capabilities, landscape.qualityTier,
+                        ),
                     )
                     pendingSource = null // controller now owns the source
                     val (resumed, start) = applyResumePoint(currentController, endpoint, "local:$uriValue")
@@ -1792,6 +1830,9 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         highBitDepth = downlinkDepth(landscape),
                         displayTarget = displayTarget(landscape),
                         passthrough4k = landscape.passthrough4k,
+                        bufferTargetMillis = cacheTargetEstimateMillis(
+                            landscape.cacheMib, landscape.capabilities, landscape.qualityTier,
+                        ),
                         sourceSizeProbe = serverFileSizeProbe,
                     )
                 }
@@ -2311,6 +2352,18 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             launch {
+                var wasResuming = false
+                value.resuming.collect { resuming ->
+                    if (resuming) {
+                        AppLog.w(TAG, "control connection lost; resuming session ${value.sessionId}")
+                    } else if (wasResuming) {
+                        AppLog.i(TAG, "control connection resume ended (failure=${value.failure.value?.kind})")
+                    }
+                    wasResuming = resuming
+                    mutableUi.update { it.copy(resumingConnection = resuming) }
+                }
+            }
+            launch {
                 value.openingProgress.collectLatest { progress ->
                     mutableUi.update { it.copy(openingProgress = progress) }
                 }
@@ -2570,6 +2623,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 highBitDepth = downlinkDepth(state),
                 displayTarget = displayTarget(state),
                 passthrough4k = state.passthrough4k,
+                bufferTargetMillis = cacheTargetEstimateMillis(state.cacheMib, connected.capabilities, tier),
                 sourceSizeProbe = serverFileSizeProbe,
                 // Only a restart of the file the last open read: next and
                 // previous move activeOrigin before the session changes.
@@ -2603,6 +2657,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         highBitDepth = downlinkDepth(state),
                         displayTarget = displayTarget(state),
                         passthrough4k = state.passthrough4k,
+                        bufferTargetMillis = cacheTargetEstimateMillis(state.cacheMib, connected.capabilities, tier),
                     ).also { pendingSource = null }
                 } finally {
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -3208,7 +3263,16 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                     subtitlePreferenceAppliedSession = sessionId
                 }
                 value?.updatePlayerBuffer(
-                    PlayerBufferSnapshot(metrics.cacheDurationMillis, metrics.bitrateBitsPerSecond),
+                    PlayerBufferSnapshot(
+                        metrics.cacheDurationMillis,
+                        metrics.bitrateBitsPerSecond,
+                        // Keeps the server filling the cache, however long that
+                        // is at this stream's bitrate; until mpv holds a usable
+                        // sample, the session keeps the target it has.
+                        bufferTargetMillis = cacheTargetMillis(
+                            mutableUi.value.cacheMib, metrics.cacheForwardBytes, metrics.cacheStateDurationMillis,
+                        ),
+                    ),
                 )
                 mutableUi.value = mutableUi.value.copy(mpvMetrics = metrics, tracks = tracks)
                 releaseSeekTargetIfCaughtUp(metrics)
@@ -3272,8 +3336,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
 
         // Stalled connection: mpv is starved and the downlink byte counter has
         // not moved. A healthy watermark pause keeps mpv's cache full, so
-        // requiring paused_for_cache avoids false positives.
-        if (transport.receivedBytes != lastReceivedBytes) {
+        // requiring paused_for_cache avoids false positives. A resume in
+        // progress bounds its own wait, and the window starts afresh once it
+        // ends, so the server has time to refill a buffer the dropout drained.
+        val resuming = controller?.resuming?.value == true
+        if (transport.receivedBytes != lastReceivedBytes || resuming) {
             lastReceivedBytes = transport.receivedBytes
             lastReceiveChangeAt = now
         } else if (
@@ -3322,7 +3389,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             now - metricsStartedAt > 15_000
         if (
             steadyState && !state.paused && !state.directLocalFallback &&
-            state.reconnecting == null && reconnectJob?.isActive != true &&
+            state.reconnecting == null && reconnectJob?.isActive != true && !resuming &&
             restartJob?.isActive != true && seekJob?.isActive != true &&
             mpv.audioPtsSeconds > 0.0 && mpv.positionSeconds > 0.0 &&
             now - lastDriftResyncAt > DRIFT_RESYNC_COOLDOWN_MILLIS
@@ -3423,6 +3490,12 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 put("queue_bytes", transport.queuedBytes)
                 put("queue_packets", transport.queuedPackets)
                 put("reported_buffer_ms", transport.reportedBufferMillis)
+                put("cache_mib", state.cacheMib)
+                put("buffer_target_ms", transport.bufferTargetMillis)
+                put("server_buffer_target_ms", session?.bufferTargetMillis)
+                put("cache_forward_bytes", state.mpvMetrics.cacheForwardBytes)
+                put("session_resumable", session?.resumeToken != null)
+                put("control_resuming", state.resumingConnection)
                 put("selected_model", state.selectedModel)
                 put("session_model", session?.model)
                 put("passthrough_4k", state.passthrough4k)
@@ -3481,8 +3554,20 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun confirmPriorRelease(active: RelaySessionController) {
         val pending = unconfirmedRelease ?: return
         val sessionId = pending.sessionId
+        val issuingAddress = active.host == pending.host && active.port == pending.port
         try {
-            active.awaitReleased(sessionId)
+            active.awaitReleased(
+                sessionId,
+                // Another name for the server cannot take a held session over
+                // (the token stays with its address), so /status alone has to
+                // outlast the hold there.
+                timeoutMillis = RelaySessionController.RELEASE_CONFIRM_TIMEOUT_MILLIS +
+                    if (issuingAddress || pending.resumeToken == null) 0 else pending.graceMillis,
+                // Only to the host and port that issued it, never to another
+                // name for the server (PROTOCOL.md §1.1 step 0).
+                resumeToken = pending.resumeToken.takeIf { issuingAddress },
+                issuerServerId = pending.serverId,
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -3520,7 +3605,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                         // server whether this session is gone before it opens
                         // another. Without an id there is nothing to ask about.
                         AppLog.i(TAG, "session $sessionId closed without the server's acknowledgement (${error.cause?.message}); it will be confirmed before the next session")
-                        unconfirmedRelease = UnconfirmedRelease(sessionId, current.host, current.port)
+                        unconfirmedRelease = UnconfirmedRelease(
+                            sessionId, current.host, current.port, current.resumeToken, current.sessionServerId,
+                            current.sessionGraceMillis,
+                        )
                     } else {
                         cleanupFailure = error
                         throw error
@@ -3684,6 +3772,11 @@ data class RelayUiState(
     // How mpv presents the picture now.
     val videoOutput: VideoOutput = VideoOutput.Sdr,
     val passthrough4k: Boolean = false,
+    // "Cache size", in MiB: one of CACHE_CHOICES_MIB.
+    val cacheMib: Int = CACHE_DEFAULT_MIB,
+    // The control connection was lost and the session is being resumed on a
+    // new one (PROTOCOL.md §1.2); playback goes on from the buffer meanwhile.
+    val resumingConnection: Boolean = false,
     val paused: Boolean = false,
     val seeking: Boolean = false,
     val seekPreviewSeconds: Double? = null,
